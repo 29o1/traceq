@@ -1,0 +1,12 @@
+# build artifacts
+*.o
+*.a
+*.dSYM/
+cli/gt
+bench/gt-harness
+
+# benchmark outputs (regenerate with `make report`)
+bench/build/
+
+# macOS
+.DS_Store
