@@ -51,7 +51,7 @@ bool GtbFile::load(const std::string& path) {
             // initial_sp is a later addition: absent in older files, which is
             // why it is read defensively rather than assumed present
             if (gv(v)) initial_sp = v;
-            if (o < payload.size()) dialect = payload[o++]; // absent = corpus
+            if (o < payload.size()) dialect = payload[o++]; // absent = native
             footer_seen = true;
         }
     }
@@ -199,8 +199,8 @@ bool GtbFile::load(const std::string& path) {
 }
 
 bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
-    // sp comes from the trace itself, not from any assumption about the event
-    // source (it used to be hardcoded to the benchmark corpus' stack top)
+    // sp comes from the trace itself (recorded in the footer by the event
+    // source), not from any assumption about who produced the file
     regs_[31] = f_.initial_sp;
     const uint8_t* p = f_.events.data();
     size_t len = f_.events.size(), o = 0;

@@ -1,396 +1,397 @@
 #!/usr/bin/env python3
-"""GumTrace-ng A/B benchmark driver.
+"""gumtrace-ng benchmark — driven entirely by real trace files.
 
-Measures the product (../cli) as an outside consumer would:
+No simulator, no synthetic corpus: every number below is the shipping `gt`
+binary running on real GumTrace text logs (bench/traces/). What is measured:
 
-  * end-to-end work goes through the real `gt` CLI as a subprocess, so the
-    numbers include process startup exactly like a user's would
-  * the one exception is per-event recorder cost, which `gt-harness hotpath`
-    measures in-process. Timing `record` from outside would fold in the event
-    source's own cost, and excluding that is the premise of the comparison:
-    in a real deployment it is the Stalker engine and it is the same on both
-    sides.
+  * import time (log -> .gtb), median of --repeat runs
+  * .gtb size ratio vs the source log
+  * two correctness gates per trace:
+      - determinism: importing twice yields byte-identical .gtb
+      - roundtrip:  `gt export --format upstream` reproduces the source
+        log byte-for-byte (cmp)
+  * a query battery against the imported .gtb (stat / export compact /
+    export jsonl / find-value / mem-access / func-args / calltree / fold /
+    taint forward+back), each timed --repeat times -> min/median/max
 
-Nothing here knows how the recorders work; it only knows their interfaces.
+Anchors for the value/address/function queries are scraped from the first
+500 lines of each trace (first non-zero `-> xN=0x..` write, first
+`mem_w=0x..` address, first `call func: NAME(`). A trace that lacks an
+anchor simply skips the dependent queries (recorded as skipped).
+
+usage:
+  run.py run [TRACE.log ...] [--repeat N] [--out DIR]
+  run.py compare OLD/report.json NEW/report.json
+
+run writes DIR/report.json + DIR/report.md (default:
+bench/reports/<UTCts>-<gitsha>/) and exits non-zero if any gate fails.
+compare prints a single JSON object to stdout and a human table to stderr.
 """
-
+import hashlib
 import json
 import os
 import re
-import shutil
+import statistics
 import subprocess
 import sys
+import tempfile
 import time
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLI = os.path.join(HERE, os.pardir, "cli")
-GT = os.path.join(CLI, "gt")
-HARNESS = os.path.join(HERE, "gt-harness")
-BUILD = os.path.join(HERE, "build")
+GT = os.path.join(HERE, "..", "cli", "gt")
+DEFAULT_TRACES_DIR = os.path.join(HERE, "traces")
+DEFAULT_REPORTS_DIR = os.path.join(HERE, "reports")
+ANCHOR_SCAN_LINES = 500
 
-# corpus size: matches the historical report so numbers stay comparable
-OUTER, INNER = 1500, 60
-HOT_ADDR = 0x100000030100
-# taint seed: the first key cell. The old hot-cell seed is rewritten before it
-# is ever read, which kill-on-overwrite semantics (upstream-compatible) turn
-# into instant taint death; a key byte is load-consumed and fans out into the
-# eor/strb chain, so both sides exercise real propagation.
-TAINT_ADDR = 0x10000020000
-
-MB = 1024.0 * 1024.0
+RE_MEM_W = re.compile(r"mem_w=0x([0-9a-fA-F]+)")
+RE_CALL = re.compile(r"call func: (\w+)\(")
+RE_WRVAL = re.compile(r"-> x\d+=0x([0-9a-fA-F]+)")
 
 
-def sh(cmd, outfile=None, check=True):
-    """Run a shell command, returning (elapsed_ns, stdout_text)."""
-    t0 = time.perf_counter_ns()
-    if outfile:
-        with open(outfile, "wb") as fh:
-            rc = subprocess.run(cmd, shell=True, stdout=fh,
-                                stderr=subprocess.DEVNULL).returncode
-        dt = time.perf_counter_ns() - t0
-        with open(outfile, "r", errors="replace") as fh:
-            out = fh.read()
-    else:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        dt = time.perf_counter_ns() - t0
-        rc, out = p.returncode, p.stdout
-    if check and rc != 0:
-        print(f"  ! command failed ({rc}): {cmd}", file=sys.stderr)
-    return dt, out
+def die(msg):
+    sys.stderr.write("run.py: %s\n" % msg)
+    sys.exit(1)
 
 
-def harness(args, outfile=None):
-    return sh(f"{HARNESS} {args}", outfile)
+def sha256_path(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
-def gt(args, outfile=None):
-    return sh(f"{GT} {args}", outfile)
-
-
-def size(path):
+def git_short_sha():
     try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=HERE, capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() if out.returncode == 0 else "nogit"
+    except Exception:
+        return "nogit"
 
 
-def b(name):
-    return os.path.join(BUILD, name)
+def fingerprint():
+    return {
+        "git": git_short_sha(),
+        "gt_sha256": sha256_path(GT),
+        "uname": subprocess.run(["uname", "-a"], capture_output=True,
+                                text=True).stdout.strip(),
+        "python": sys.version.split()[0],
+    }
 
 
-def have(tool):
-    return shutil.which(tool) is not None
+def scrape_anchors(log_path):
+    """First non-zero reg-write value, first mem_w address, first call name."""
+    val = addr = func = None
+    with open(log_path, "r", errors="replace") as f:
+        for i, line in enumerate(f):
+            if i >= ANCHOR_SCAN_LINES:
+                break
+            if val is None:
+                m = RE_WRVAL.search(line)
+                if m and int(m.group(1), 16) != 0:
+                    val = m.group(1)
+            if addr is None:
+                m = RE_MEM_W.search(line)
+                if m:
+                    addr = m.group(1)
+            if func is None:
+                m = RE_CALL.search(line)
+                if m:
+                    func = m.group(1)
+            if val and addr and func:
+                break
+    return {"value": val, "addr": addr, "func": func}
 
 
-def ms(ns):
-    return ns / 1e6
+def timed(argv, repeats):
+    """Run argv `repeats` times; return sorted sample list (seconds)."""
+    samples = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        r = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        samples.append(time.perf_counter() - t0)
+        if r.returncode != 0:
+            die("command failed: %s" % " ".join(argv))
+    return sorted(samples)
 
 
-def ratio(a, b_):
-    return (a / b_) if b_ else 0.0
+def stats(samples):
+    return {
+        "samples": samples,
+        "min": samples[0],
+        "median": statistics.median(samples),
+        "max": samples[-1],
+    }
 
 
-def main():
-    if not os.path.exists(GT):
-        sys.exit(f"missing {GT} — run `make -C ../cli` first")
-    if not os.path.exists(HARNESS):
-        sys.exit(f"missing {HARNESS} — run `make` first")
-    os.makedirs(BUILD, exist_ok=True)
-    os.chdir(HERE)
+def run_trace(log_path, repeats, workdir):
+    name = os.path.splitext(os.path.basename(log_path))[0]
+    gtb = os.path.join(workdir, name + ".gtb")
+    log_bytes = os.path.getsize(log_path)
+    with open(log_path, "rb") as f:
+        n_lines = f.read().count(b"\n")
 
-    have_py_baseline = True  # we ARE python; the text baselines are local
+    # gate 1: determinism — import twice, compare bytes
+    gtb_b = os.path.join(workdir, name + ".b.gtb")
+    subprocess.run([GT, "import", log_path, "-o", gtb], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run([GT, "import", log_path, "-o", gtb_b], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    determinism = sha256_path(gtb) == sha256_path(gtb_b)
+    os.unlink(gtb_b)
 
-    R = {}
+    # gate 2: roundtrip — upstream export must equal the source log
+    rt = os.path.join(workdir, name + ".roundtrip.log")
+    with open(rt, "wb") as out:
+        subprocess.run([GT, "export", "--format", "upstream", gtb],
+                       check=True, stdout=out, stderr=subprocess.DEVNULL)
+    roundtrip = sha256_path(rt) == sha256_path(log_path)
+    os.unlink(rt)
 
-    # ---------------------------------------------------------------- hot path
-    print("[1/6] hot path (in-process, per-event timing)")
-    _, out = harness(
-        f"hotpath --outer {OUTER} --inner {INNER} "
-        f"--legacy-out {b('bench_legacy.txt')} --gtb-out {b('bench_full.gtb')}")
-    hp = json.loads(out)
-    R["hotpath"] = hp
-    legacy_per_ev = hp["legacy"]["rec_ns"] / hp["legacy"]["events"]
-    gtb_per_ev = hp["gtb"]["rec_ns"] / hp["gtb"]["events"]
-    sz_legacy = size(b("bench_legacy.txt"))
-    sz_gtb = size(b("bench_full.gtb"))
-    print(f"      {legacy_per_ev:.0f} vs {gtb_per_ev:.0f} ns/event "
-          f"({ratio(legacy_per_ev, gtb_per_ev):.2f}x), "
-          f"{sz_legacy/MB:.1f} vs {sz_gtb/MB:.1f} MB")
+    import_t = stats(timed([GT, "import", log_path, "-o", gtb], repeats))
+    gtb_bytes = os.path.getsize(gtb)
+    anchors = scrape_anchors(log_path)
 
-    # ------------------------------------------------------- detail level scan
-    print("[2/6] detail levels (via CLI-facing recorder)")
-    harness(f"record --format gtb --detail mem  --outer {OUTER} --inner {INNER} "
-            f"-o {b('bench_mem.gtb')}")
-    harness(f"record --format gtb --detail calls --outer {OUTER} --inner {INNER} "
-            f"-o {b('bench_calls.gtb')}")
-    sz_mem, sz_calls = size(b("bench_mem.gtb")), size(b("bench_calls.gtb"))
-    print(f"      mem {sz_mem/MB:.1f} MB, calls {sz_calls/MB:.3f} MB")
+    queries = {}
+    skipped = []
 
-    # -------------------------------------------------------- equivalence (T3)
-    print("[3/6] expansion equivalence (gt export vs legacy text)")
-    gt(f"export {b('bench_full.gtb')}", b("expanded.txt"))
-    exp_ok = (size(b("expanded.txt")) == sz_legacy and
-              subprocess.run(["cmp", "-s", b("bench_legacy.txt"),
-                              b("expanded.txt")]).returncode == 0)
-    print(f"      byte-identical: {exp_ok}")
+    def battery(key, argv, need=None):
+        if need and not anchors[need]:
+            skipped.append(key)
+            return
+        queries[key] = stats(timed(argv, repeats))
 
-    # ------------------------------------------------- variant corpus for diff
-    print("[4/6] variant corpus (diff A/B)")
-    harness(f"record --format text --outer {OUTER} --inner {INNER} --variant 0x2B00 "
-            f"-o {b('bench_legacy_v2.txt')}")
-    harness(f"record --format gtb  --outer {OUTER} --inner {INNER} --variant 0x2B00 "
-            f"-o {b('bench_v2.gtb')}")
+    battery("stat", [GT, "stat", gtb])
+    battery("export_compact",
+            [GT, "export", "--format", "compact", "--limit", "5000", gtb])
+    battery("export_jsonl",
+            [GT, "export", "--format", "jsonl", "--limit", "5000", gtb])
+    battery("find_value", [GT, "find-value", "0x" + anchors["value"], gtb]
+            if anchors["value"] else [], need="value")
+    battery("mem_access_w",
+            [GT, "mem-access", gtb, "--addr", "0x" + anchors["addr"], "--write"]
+            if anchors["addr"] else [], need="addr")
+    battery("func_args", [GT, "func-args", "--func", anchors["func"], gtb]
+            if anchors["func"] else [], need="func")
+    battery("calltree", [GT, "calltree", "--func", anchors["func"], gtb]
+            if anchors["func"] else [], need="func")
+    battery("fold", [GT, "fold", "--top", "5", gtb])
+    battery("taint_fwd",
+            [GT, "taint", "--seed-addr", "0x" + anchors["addr"], gtb]
+            if anchors["addr"] else [], need="addr")
+    battery("taint_back",
+            [GT, "taint", "--seed-addr", "0x" + anchors["addr"], "--back", gtb]
+            if anchors["addr"] else [], need="addr")
 
-    # durability: bytes still unflushed in the legacy 50MB buffer when the
-    # process dies (the gtb side is bounded by one chunk by construction)
-    legacy_lost = hp["legacy"]["pending_bytes"]
+    return {
+        "path": os.path.relpath(log_path, HERE),
+        "sha256": sha256_path(log_path),
+        "bytes": log_bytes,
+        "lines": n_lines,
+        "gtb_bytes": gtb_bytes,
+        "size_ratio": gtb_bytes / log_bytes if log_bytes else None,
+        "anchors": anchors,
+        "gates": {"determinism": determinism, "roundtrip": roundtrip},
+        "import": import_t,
+        "queries": queries,
+        "skipped": skipped,
+    }, gtb
 
-    # ----------------------------------------------------------- query A/B set
-    print("[5/6] query A/B (text pipeline vs gt CLI)")
-    Q = []
 
-    q1a, _ = sh(
-        f"grep -a 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')} | head -5; "
-        f"grep -ac 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')}",
-        b("q1a.out"), check=False)
-    q1b, _ = gt(f"mem-access --addr 0x{HOT_ADDR:x} --write --limit 5 "
-                f"{b('bench_full.gtb')}", b("q1b.out"))
-    Q.append((f"writes to 0x{HOT_ADDR:x} (top5+count)", q1a, q1b))
+def write_markdown(rep, path):
+    fp = rep["fingerprint"]
+    lines = [
+        "# gumtrace-ng benchmark — %s" % rep["timestamp_utc"],
+        "",
+        "- git: `%s`  gt sha256: `%s`" % (fp["git"], fp["gt_sha256"][:16]),
+        "- host: `%s`" % fp["uname"],
+        "- repeat: %d (median reported)" % rep["repeat"],
+        "- gates: %s" % ("ALL PASS" if rep["ok"] else "FAILURES PRESENT"),
+        "",
+    ]
+    for name, t in rep["traces"].items():
+        g = t["gates"]
+        lines += [
+            "## %s" % name,
+            "",
+            "- source: `%s` (%d bytes, %d lines, sha256 `%s`)"
+            % (t["path"], t["bytes"], t["lines"], t["sha256"][:16]),
+            "- import: %.3fs median (min %.3f / max %.3f)"
+            % (t["import"]["median"], t["import"]["min"], t["import"]["max"]),
+            "- .gtb: %d bytes (%.2fx the log)" % (t["gtb_bytes"], t["size_ratio"]),
+            "- gates: determinism=%s roundtrip=%s"
+            % ("PASS" if g["determinism"] else "FAIL",
+               "PASS" if g["roundtrip"] else "FAIL"),
+            "- anchors: value=%s addr=%s func=%s"
+            % (t["anchors"]["value"], t["anchors"]["addr"], t["anchors"]["func"]),
+            "",
+            "| query | median s | min | max |",
+            "| --- | ---: | ---: | ---: |",
+        ]
+        for q, s in t["queries"].items():
+            lines.append("| %s | %.4f | %.4f | %.4f |"
+                         % (q, s["median"], s["min"], s["max"]))
+        if t["skipped"]:
+            lines.append("\nskipped (no anchor in trace): %s"
+                         % ", ".join(t["skipped"]))
+        lines.append("")
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
 
-    q2a, _ = sh(f"grep -an '^call func: transform_block_0' "
-                f"{b('bench_legacy.txt')} | sed -n 3p", b("q2a.out"),
-                check=False)
-    q2b, _ = gt(f"func-args --func transform_block_0 --nth 3 "
-                f"{b('bench_full.gtb')}", b("q2b.out"))
-    Q.append(("3rd call args of transform_block_0", q2a, q2b))
 
-    q3a, _ = sh(rf"grep -ac 'ldrb   w7, \[x4\]' {b('bench_legacy.txt')}",
-                b("q3a.out"), check=False)
-    q3b, _ = gt(f"fold --top 1 {b('bench_full.gtb')}", b("q3b.out"))
-    Q.append(("loop iteration count", q3a, q3b))
+def cmd_run(traces, repeats, out_dir):
+    if not os.path.isfile(GT):
+        die("gt binary not found at %s — build it first (make -C cli)" % GT)
+    if not traces:
+        if not os.path.isdir(DEFAULT_TRACES_DIR):
+            die("no traces given and %s missing" % DEFAULT_TRACES_DIR)
+        traces = sorted(
+            os.path.join(DEFAULT_TRACES_DIR, f)
+            for f in os.listdir(DEFAULT_TRACES_DIR) if f.endswith(".log"))
+        if not traces:
+            die("no *.log traces in %s" % DEFAULT_TRACES_DIR)
+    for t in traces:
+        if not os.path.isfile(t):
+            die("trace not found: %s" % t)
 
-    q4a, t4a = sh(f"python3 baselines/text_taint.py {b('bench_legacy.txt')} "
-                  f"0x{TAINT_ADDR:x}", b("q4a.out"))
-    q4b, t4b = gt(f"taint --seed-addr 0x{TAINT_ADDR:x} --limit 20 "
-                  f"{b('bench_full.gtb')}", b("q4b.out"))
-    Q.append((f"forward taint from 0x{TAINT_ADDR:x}", q4a, q4b))
+    if not out_dir:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_dir = os.path.join(DEFAULT_REPORTS_DIR,
+                               "%s-%s" % (ts, git_short_sha()))
+    os.makedirs(out_dir, exist_ok=True)
 
-    q5a, t5a = sh(f"python3 baselines/text_diff.py {b('bench_legacy.txt')} "
-                  f"{b('bench_legacy_v2.txt')}", b("q5a.out"))
-    q5b, t5b = gt(f"diff {b('bench_full.gtb')} {b('bench_v2.gtb')}",
-                  b("q5b.out"))
-    Q.append(("diff two runs", q5a, q5b))
+    rep = {
+        "schema": 1,
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "fingerprint": fingerprint(),
+        "repeat": repeats,
+        "traces": {},
+        "ok": True,
+    }
+    with tempfile.TemporaryDirectory(prefix="gt-bench-") as workdir:
+        gtbs = {}
+        for log in traces:
+            name = os.path.splitext(os.path.basename(log))[0]
+            sys.stderr.write("[run] %s ...\n" % name)
+            entry, gtb = run_trace(log, repeats, workdir)
+            rep["traces"][name] = entry
+            gtbs[name] = gtb
+            g = entry["gates"]
+            if not (g["determinism"] and g["roundtrip"]):
+                rep["ok"] = False
+                sys.stderr.write("[run] %s GATE FAIL: %s\n" % (name, g))
+        if len(gtbs) >= 2:
+            a, b = (gtbs[n] for n in list(rep["traces"])[:2])
+            rep["diff"] = stats(timed([GT, "diff", a, b], repeats))
 
-    q6a, _ = sh(f"wc -l {b('bench_legacy.txt')}; "
-                f"grep -ac 'call func:' {b('bench_legacy.txt')}",
-                b("q6a.out"), check=False)
-    q6b, _ = gt(f"stat {b('bench_full.gtb')}", b("q6b.out"))
-    Q.append(("run overview (wc+grep ritual vs gt stat)", q6a, q6b))
+    with open(os.path.join(out_dir, "report.json"), "w") as f:
+        json.dump(rep, f, indent=2)
+    write_markdown(rep, os.path.join(out_dir, "report.md"))
+    sys.stderr.write("[run] wrote %s\n" % out_dir)
+    return 0 if rep["ok"] else 1
 
-    # both sides scan the whole input: grep -c exits after the full pass, so
-    # the gt side is asked for every row too (limit > any plausible count)
-    q7a, _ = sh(f"grep -ac 'mem_[rw]=0x{HOT_ADDR:x}' {b('bench_legacy.txt')}",
-                b("q7a.out"), check=False)
-    q7b, _ = gt(f"mem-access --addr 0x{HOT_ADDR:x} --limit 1000000 "
-                f"{b('bench_full.gtb')}", b("q7b.out"))
-    Q.append(("mem accesses of hot addr, full count", q7a, q7b))
 
-    q8a, _ = sh(f"grep -ac '2a00' {b('bench_legacy.txt')}", b("q8a.out"),
-                check=False)
-    q8b, _ = gt(f"find-value 0x2a00 --limit 1000000 {b('bench_full.gtb')}",
-                b("q8b.out"))
-    Q.append(("value search 0x2a00 (full scan)", q8a, q8b))
+def cmd_compare(old_path, new_path):
+    with open(old_path) as f:
+        old = json.load(f)
+    with open(new_path) as f:
+        new = json.load(f)
+    new_ok = bool(new.get("ok"))
 
-    for name, a_ns, b_ns in Q:
-        print(f"      {name}: {ms(a_ns):.1f} -> {ms(b_ns):.1f} ms "
-              f"({ratio(a_ns, b_ns):.1f}x)")
+    def series(rep):
+        out = {}
+        for tname, t in rep.get("traces", {}).items():
+            out.setdefault(tname, {})["import"] = t["import"]
+            for q, s in t.get("queries", {}).items():
+                out[tname][q] = s
+        return out
 
-    # ------------------------------------------------------- cross-validation
-    def regs_of(text):
-        m = re.search(r"regs[=:]\s*(.*)", text)
-        return set(re.findall(r"x\d+", m.group(1))) if m else set()
-
-    def naddrs_of(text):
-        m = re.search(r"n_addrs=(\d+)", text) or re.search(
-            r"final tainted addrs: (\d+)", text)
-        return int(m.group(1)) if m else -1
-
-    ra, rb = regs_of(t4a), regs_of(t4b)
-    na, nb = naddrs_of(t4a), naddrs_of(t4b)
-    taint_match = na >= 0 and na == nb and ra == rb
-
-    def offsets_of(text):
-        m = re.search(r"offsets 0x([0-9a-f]+) vs 0x([0-9a-f]+)", text)
-        if m:
-            return int(m.group(1), 16), int(m.group(2), 16)
-        # gt's DIVERGES marker: "A: <mod>!0xoff ... B: <mod>!0xoff" (W1 format,
-        # module-qualified) or the older bare "A: 0xoff" form
-        for line in text.splitlines():
-            if "<-- DIVERGES" in line:
-                got = re.findall(r"[AB]: \S+!0x([0-9a-f]+)", line)
-                if len(got) >= 2:
-                    return int(got[0], 16), int(got[1], 16)
-                got = re.findall(r"[AB]: 0x([0-9a-f]+)", line)
-                if len(got) >= 2:
-                    return int(got[0], 16), int(got[1], 16)
-        return None
-
-    oa, ob = offsets_of(t5a), offsets_of(t5b)
-    diff_match = oa is not None and oa == ob
-
-    print(f"      taint regs match: {taint_match} {sorted(ra)}")
-    print(f"      diff divergence match: {diff_match} {oa} vs {ob}")
-
-    # ------------------------------------------------- agent token proxy (W2)
-    print("[6/6] agent token proxy (compact vs legacy, same event window)")
-    EVENTS_WIN = 5000
-    gt(f"export --format compact --from 0 --to {EVENTS_WIN - 1} "
-       f"{b('bench_full.gtb')}", b("tok_compact.txt"))
-    # legacy side: lines until the window's 5000th instruction line ('['-lines);
-    # interleaved call/ret lines inside the window count, like compact's do
-    leg_bytes = leg_words = insn = 0
-    with open(b("bench_legacy.txt"), "rb") as fh:
-        for line in fh:
-            if line[:1] == b"[":
-                if insn == EVENTS_WIN:
-                    break
-                insn += 1
-            leg_bytes += len(line)
-            leg_words += len(line.split())
-    with open(b("tok_compact.txt"), "rb") as fh:
-        cdat = fh.read()
-    c_bytes = len(cdat)
-    c_words = len(cdat.split())
-    print(f"      {EVENTS_WIN} events: legacy {leg_bytes} B/{leg_words} tok -> "
-          f"compact {c_bytes} B/{c_words} tok "
-          f"({ratio(leg_bytes, c_bytes):.1f}x / {ratio(leg_words, c_words):.1f}x)")
-
-    # --------------------------------------------------------------- the report
-    speedup = ratio(legacy_per_ev, gtb_per_ev)
-    shrink = ratio(sz_legacy, sz_gtb)
-    shrink_mem = ratio(sz_legacy, sz_mem)
-    shrink_calls = ratio(sz_legacy, sz_calls)
-
-    _, uname = sh("uname -a")
-    _, cpu = sh("sysctl -n machdep.cpu.brand_string", check=False)
-
-    L = []
-    w = L.append
-    w("# GumTrace-ng A/B benchmark report\n")
-    w(f"Host: {uname.strip()}")
-    w(f"{cpu.strip()}\n")
-    w("- driven by `bench/run.py`: the queryable side is the real `gt` CLI, "
-      "invoked as a subprocess")
-    w("- legacy = faithful port of the GumTrace text hot path (snprintf reg "
-      "names, 50MB buffer, per-exec prefix rebuild)")
-    w("- gtb = static/execution-separated binary format + precompiled site "
-      "plans + background writer")
-    w(f"- corpus: synthetic ARM64 (real encodings), {hp['events']} executed "
-      f"instructions, inner loop {INNER} iters")
-    w("- both recorders consume an identical event stream; engine (Stalker "
-      "callout) cost is excluded from both sides, which is why the per-event "
-      "figure is measured in-process by `gt-harness hotpath`\n")
-
-    w("## Recording (hot path)\n")
-    w("| metric | legacy text | gtb binary |")
-    w("|---|---|---|")
-    w(f"| recorder time/event | {legacy_per_ev:.4g} ns | {gtb_per_ev:.4g} ns "
-      f"(**{speedup:.4g}x**) |")
-    w(f"| recorder time total | {ms(hp['legacy']['rec_ns']):.4g} ms | "
-      f"{ms(hp['gtb']['rec_ns']):.4g} ms |")
-    w(f"| wall incl. event source | {ms(hp['legacy']['wall_ns']):.4g} ms | "
-      f"{ms(hp['gtb']['wall_ns']):.4g} ms |")
-    w(f"| output size | {sz_legacy/MB:.4g} MB | {sz_gtb/MB:.4g} MB "
-      f"(**{shrink:.4g}x smaller**) |")
-    w(f"| events | {hp['legacy']['events']} | {hp['gtb']['events']} |\n")
-
-    w("## Detail levels (volume scaling)\n")
-    w("| detail | size | vs full text |")
-    w("|---|---|---|")
-    w(f"| full (gtb) | {sz_gtb/MB:.4g} MB | {shrink:.4g}x |")
-    w(f"| mem-only | {sz_mem/MB:.4g} MB | {shrink_mem:.4g}x |")
-    w(f"| calls-only | {sz_calls/MB:.4g} MB | {shrink_calls:.4g}x |\n")
-
-    w(f"site compile (transform time): {ms(hp['site_compile_ns']):.4g} ms for "
-      f"{hp['sites']} sites; corpus build {ms(hp['corpus_build_ns']):.4g} ms\n")
-
-    w("## Query A/B (identical questions, text pipeline vs CLI)\n")
-    w("| question | text pipeline | gt CLI | CLI speedup |")
-    w("|---|---|---|---|")
-    for name, a_ns, b_ns in Q:
-        w(f"| {name} | {ms(a_ns):.4g} ms | {ms(b_ns):.4g} ms | "
-          f"{ratio(a_ns, b_ns):.4g}x |")
-    w("")
-
-    w("## Durability\n")
-    w("- gtb crash loss window: **<= 0.25 MB by construction** (one 256KB "
-      "chunk + footer via signal handler; verified in selftest T5)")
-    w(f"- legacy crash loss window: **{legacy_lost} B measured on this "
-      "call-heavy corpus**. Upstream flushes its 50MB buffer at every "
-      "function-call info block, so the window tracks call density: small on "
-      "call-heavy code (like this corpus), up to the full 50MB on call-free "
-      "hot loops. That per-call direct-write behaviour is the same one the "
-      "recording benchmark penalises — it trades hot-path speed for a smaller "
-      "loss window.\n")
-
-    w("## Cross-validation\n")
-    w(f"- expansion byte-identical to legacy text: "
-      f"**{'YES' if exp_ok else 'NO'}** "
-      f"({sz_legacy} B, verified with `gt export` + `cmp`)")
-    w(f"- taint final reg set equal: {'YES' if taint_match else 'NO'} "
-      f"(text {sorted(ra)} vs gtb {sorted(rb)})")
-    w(f"- diff divergence point equal (instruction offsets): "
-      f"{'YES' if diff_match else 'NO'} — text line ordinals != event "
-      f"ordinals (upstream merges pure-store lines), so the comparison is on "
-      f"first-diverging-instruction offsets\n")
-
-    w("## Agent surface (compact format + streaming queries)\n")
-    w(f"- token proxy over the same {EVENTS_WIN}-event window: legacy text "
-      f"{leg_bytes} B / {leg_words} tokens -> compact {c_bytes} B / "
-      f"{c_words} tokens (**{ratio(leg_bytes, c_bytes):.2f}x bytes, "
-      f"{ratio(leg_words, c_words):.2f}x tokens**)")
-    w("- 全部命令流式直读 .gtb，无入库步骤；查询延迟见上表\n")
-
-    w("## Acceptance criteria\n")
-    w("| criterion | target | actual | verdict |")
-    w("|---|---|---|---|")
-    w(f"| hot-path throughput | >= 3x | {speedup:.4g}x | "
-      f"{'PASS' if speedup >= 3.0 else 'FAIL'} |")
-    w(f"| output size (full detail) | >= 20x | {shrink:.4g}x | MISS — see note |")
-    w(f"| output size (tiered detail) | >= 20x at a usable tier | mem-only "
-      f"{shrink_mem:.4g}x, calls-only {shrink_calls:.4g}x | "
-      f"{'PASS' if shrink_mem >= 20 or shrink_calls >= 20 else 'FAIL'} |")
-    if Q:
-        qv = ratio(Q[0][1], Q[0][2])
-        w(f"| mem-write query vs grep | >= 10x | {qv:.4g}x | "
-          f"{'PASS' if qv >= 10 else 'FAIL'} |")
-    w("| crash loss window | gtb <= 1MB, crash-safe | 0.25MB by design "
-      "(T5-verified); legacy workload-dependent | PASS |")
-    w(f"| taint consistency | match | {'match' if taint_match else 'MISMATCH'} "
-      f"| {'PASS' if taint_match else 'FAIL'} |")
-    w(f"| diff consistency | match | {'match' if diff_match else 'MISMATCH'} | "
-      f"{'PASS' if diff_match else 'FAIL'} |")
-    w(f"| byte-identical expansion | match | "
-      f"{'match' if exp_ok else 'MISMATCH'} | "
-      f"{'PASS' if exp_ok else 'FAIL'} |")
-    w(f"| agent token proxy (compact vs legacy, {EVENTS_WIN} events) | "
-      f">= 1.5x bytes | {ratio(leg_bytes, c_bytes):.4g}x bytes / "
-      f"{ratio(leg_words, c_words):.4g}x ws-tokens | "
-      f"{'PASS' if ratio(leg_bytes, c_bytes) >= 1.5 else 'FAIL'} — whitespace "
-      f"splitting undercounts LLM tokens; values are the entropy floor on both "
-      f"sides, real-log module prefixes widen the gap (see real_report) |")
-
-    out_path = b("report.md")
-    with open(out_path, "w") as fh:
-        fh.write("\n".join(L) + "\n")
-
-    print(f"\nbench complete -> {out_path}")
-    print(f"  hot path: {legacy_per_ev:.0f} vs {gtb_per_ev:.0f} ns/event "
-          f"({speedup:.1f}x)")
-    print(f"  size: {sz_legacy/MB:.1f} vs {sz_gtb/MB:.1f} MB ({shrink:.0f}x)")
-    print(f"  equivalence: {exp_ok}, taint: {taint_match}, diff: {diff_match}")
+    so, sn = series(old), series(new)
+    results = []
+    for tname in sorted(so):
+        if tname not in sn:
+            continue
+        for q in sorted(so[tname]):
+            if q not in sn[tname]:
+                continue
+            a, b = so[tname][q], sn[tname][q]
+            ma, mb = a["median"], b["median"]
+            if ma <= 0 or mb <= 0:
+                continue
+            spread_a = (a["max"] - a["min"]) / ma
+            spread_b = (b["max"] - b["min"]) / mb
+            noise = max(spread_a, spread_b, 0.05)
+            delta = (mb - ma) / ma
+            verdict = ("flat" if abs(delta) <= noise
+                       else "regressed" if delta > 0 else "improved")
+            results.append({
+                "trace": tname, "query": q,
+                "old_median": ma, "new_median": mb,
+                "delta_pct": round(delta * 100, 2),
+                "noise_pct": round(noise * 100, 2),
+                "verdict": verdict,
+            })
+    counts = {"improved": 0, "regressed": 0, "flat": 0}
+    for r in results:
+        counts[r["verdict"]] += 1
+    out = {
+        "old": os.path.abspath(old_path),
+        "new": os.path.abspath(new_path),
+        "new_ok": new_ok,
+        "verdict": "INVALID" if not new_ok else (
+            "regressed" if counts["regressed"] else
+            "improved" if counts["improved"] else "flat"),
+        "summary": counts,
+        "results": results,
+    }
+    sys.stderr.write("%-24s %-16s %10s %10s %8s %8s  %s\n"
+                     % ("trace", "query", "old s", "new s", "delta%", "noise%",
+                        "verdict"))
+    for r in results:
+        sys.stderr.write("%-24s %-16s %10.4f %10.4f %8.2f %8.2f  %s\n"
+                         % (r["trace"], r["query"], r["old_median"],
+                            r["new_median"], r["delta_pct"], r["noise_pct"],
+                            r["verdict"]))
+    sys.stderr.write("verdict: %s (+%d improved / -%d regressed / %d flat)\n"
+                     % (out["verdict"], counts["improved"],
+                        counts["regressed"], counts["flat"]))
+    json.dump(out, sys.stdout, indent=2)
+    sys.stdout.write("\n")
     return 0
 
 
+def main(argv):
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        sys.stderr.write(__doc__)
+        return 2
+    cmd = argv[1]
+    if cmd == "compare":
+        if len(argv) != 4:
+            die("usage: run.py compare OLD/report.json NEW/report.json")
+        return cmd_compare(argv[2], argv[3])
+    if cmd == "run":
+        traces, repeats, out_dir = [], 3, None
+        i = 2
+        while i < len(argv):
+            a = argv[i]
+            if a == "--repeat":
+                i += 1
+                repeats = int(argv[i])
+            elif a == "--out":
+                i += 1
+                out_dir = argv[i]
+            elif a.startswith("--"):
+                die("unknown flag: %s" % a)
+            else:
+                traces.append(a)
+            i += 1
+        return cmd_run(traces, repeats, out_dir)
+    die("unknown command: %s" % cmd)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv))

@@ -3,10 +3,14 @@
 *.a
 *.dSYM/
 cli/gt
-bench/gt-harness
+cli/gt-test
 
-# benchmark outputs (regenerate with `make report`)
+# pre-refactor harness output dir (no longer generated; make clean removes it)
 bench/build/
+
+# benchmark reports (regenerate with `make report`; historical/ is checked in)
+bench/reports/*
+!bench/reports/historical/
 
 # stray top-level build dir (ad-hoc artifacts)
 build/

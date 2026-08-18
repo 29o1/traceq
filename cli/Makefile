@@ -27,7 +27,14 @@ libgumtrace.a: $(LIB_OBJ)
 gt: src/main.o libgumtrace.a
 	$(CXX) $(CXXFLAGS) $< libgumtrace.a -o $@ $(LDFLAGS)
 
-clean:
-	rm -f gt libgumtrace.a src/*.o
+# correctness suite: upstream-log fixtures + ExecEvent literals, no simulator
+gt-test: tests/test_main.o libgumtrace.a
+	$(CXX) $(CXXFLAGS) $< libgumtrace.a -o $@ $(LDFLAGS)
 
-.PHONY: all clean
+test: gt-test
+	./gt-test
+
+clean:
+	rm -f gt gt-test libgumtrace.a src/*.o tests/*.o
+
+.PHONY: all test clean

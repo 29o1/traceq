@@ -896,7 +896,7 @@ int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, int seed_q
 // both runs interned sites in the same order, while (module, offset) is stable
 // across ASLR and load-order differences. (v1 META payloads carry no module
 // base; their offsets degrade to absolute addresses, which still compares
-// correctly for same-base corpus recordings.)
+// correctly for same-base native recordings.)
 // ---------------------------------------------------------------------------
 int q_diff(const std::string& a_p, const std::string& b_p, int context, bool json) {
     GtbFile a, b;
@@ -1163,7 +1163,7 @@ int q_stat(const std::string& gtb, bool json) {
     });
     const char* dialect =
         f.dialect & 1 ? (f.dialect & 2 ? "upstream+crlf" : "upstream")
-                      : (f.dialect & 2 ? "corpus+crlf" : "corpus");
+                      : (f.dialect & 2 ? "native+crlf" : "native");
     if (json) {
         std::string o;
         emit::kv_str(o, "file", gtb);

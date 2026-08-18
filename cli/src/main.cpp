@@ -200,8 +200,8 @@ static void usage() {
         "all queries stream the .gtb directly — there is no ingest step.\n"
         "\n"
         "recording: this build has no event source. Tracing a live process needs\n"
-        "a Stalker-backed source; the synthetic A/B corpus lives in the separate\n"
-        "benchmark project (bench/, see `make bench`).\n");
+        "a Stalker-backed source; existing GumTrace text logs convert with\n"
+        "`gt import`. Benchmarks run on real trace files (see bench/).\n");
 }
 
 int main(int argc, char** argv) {

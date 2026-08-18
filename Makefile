@@ -1,32 +1,28 @@
 # GumTrace-ng — two independent subprojects.
 #
-#   cli/    the target project: libgumtrace + the `gt` CLI.
-#           Knows nothing about benchmarks or synthetic corpora.
-#   bench/  the evaluation harness: a python driver that measures cli/ from the
-#           outside, plus a small C++ binary supplying the event source and the
-#           in-process per-event timing that a black-box CLI run cannot provide.
+#   cli/    the product: libgumtrace + the `gt` CLI.
+#           Knows nothing about benchmarks.
+#   bench/  product-self benchmarks: a python driver that measures the
+#           shipping `gt` binary from the outside, on real trace files only
+#           (bench/traces/). Nothing to compile here.
 
-all: cli bench
+all: cli
 
 cli:
 	$(MAKE) -C cli
 
-bench:
-	$(MAKE) -C bench
-
-# correctness: 24 checks against libgumtrace, driven through the corpus
+# correctness: the cli test suite (real-log fixtures + ExecEvent literals)
 test:
-	$(MAKE) -C bench test
+	$(MAKE) -C cli test
 
-# full A/B suite -> bench/build/report.md
-report:
-	$(MAKE) -C bench run
+# benchmark on real traces -> bench/reports/<UTCts>-<gitsha>/
+report: cli
+	cd bench && python3 run.py run
 
 clean:
 	$(MAKE) -C cli clean
-	$(MAKE) -C bench clean
-
-distclean: clean
 	rm -rf bench/build
 
-.PHONY: all cli bench test report clean distclean
+distclean: clean
+
+.PHONY: all cli test report clean distclean

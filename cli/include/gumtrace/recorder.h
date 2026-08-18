@@ -28,7 +28,7 @@
 //                                             observed argument count 0..8)
 //   [FOOTER chunk] stop reason + counters + initial_sp + u8 dialect
 //                  (dialect bit0: 1 = upstream text dialect; bit1: CRLF line
-//                  endings. Absent in older files = 0 = corpus.)
+//                  endings. Absent in older files = 0 = native recording.)
 //
 // Chunk order: recording writes META first; `gt import` (defer_meta) grows the
 // arena while streaming and therefore writes EVENTS first and META just
@@ -215,7 +215,7 @@ private:
     friend struct CrashGate;
 };
 
-// svc number -> name (subset used by the corpus; matches legacy table)
+// svc number -> name (Linux/aarch64 subset; matches the legacy text table)
 const char* svc_name(uint64_t n);
 
 } // namespace gt

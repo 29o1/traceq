@@ -1,0 +1,650 @@
+// gt-test — libgumtrace correctness suite.
+//
+// Fixture philosophy: no behavioral simulator. Tests are driven by
+//   - upstream-dialect text logs (hand-written, byte-exact canonical), which
+//     exercise the import -> gtb -> query/export path that real GumTrace logs
+//     take, and
+//   - ExecEvent literals, which exercise the native recorder path a Stalker
+//     callout would drive.
+//
+// Coverage map (what each group pins down):
+//   t_roundtrip  import/export byte-exactness: LF/CRLF, VERBATIM passthrough,
+//                128-bit SIMD values, non-canonical hex rejection, determinism
+//   t_dump       hexdump row -> mem_r content lanes; find-value dump scan;
+//                verbatim-memcpy taint bridging (dst <- src cells)
+//   t_taint      NZCV as source (subs -> csel), q/SIMD propagation, kill on
+//                overwrite (movz), pure-dataflow (base reg does not taint),
+//                backward walk (demand -> sources), matched counts
+//   t_native     GtbRecorder via ExecEvent literals: group reconstruction,
+//                call/svc/ret, guards (max_events/max_bytes), crash flush,
+//                ring+trigger, dynamic detail escalation
+//   t_queries    query surface + agent contract on an imported file:
+//                stat/find-value/mem-access/func-args/calltree, export windows
+//                and cursor, JSON Lines shape
+//   t_diff       (module, offset) identity: inserted instruction diverges,
+//                rebased copy compares identical
+
+#include <gumtrace/import.h>
+#include <gumtrace/ingest.h>
+#include <gumtrace/queries.h>
+#include <gumtrace/recorder.h>
+#include <gumtrace/site.h>
+
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <string>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+using namespace gt;
+
+static int g_pass = 0, g_fail = 0;
+
+#define CHECK(cond, msg)                                                     \
+    do {                                                                     \
+        if (cond) { g_pass++; }                                              \
+        else {                                                               \
+            g_fail++;                                                        \
+            printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, msg);           \
+        }                                                                    \
+    } while (0)
+
+// capture everything fn() writes to stdout (printf-based query layer)
+static std::string cap_out(const std::function<void()>& fn) {
+    fflush(stdout);
+    int saved = dup(1);
+    int pp[2];
+    if (pipe(pp) != 0) return "";
+    dup2(pp[1], 1);
+    fn();
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    close(pp[1]);
+    std::string s;
+    char b[8192];
+    ssize_t n;
+    while ((n = read(pp[0], b, sizeof b)) > 0) s.append(b, size_t(n));
+    close(pp[0]);
+    return s;
+}
+
+static std::string read_file(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return {};
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::string s(size_t(n), 0);
+    if (n > 0 && fread(&s[0], 1, size_t(n), f) != size_t(n)) s.clear();
+    fclose(f);
+    return s;
+}
+
+static std::string g_dir;
+static std::string tmp_path(const char* name) { return g_dir + "/" + name; }
+
+// ---------------------------------------------------------------------------
+// fixtures (upstream text dialect; every token canonical hex, trailing space)
+// ---------------------------------------------------------------------------
+
+// general round-trip log: exec/mem/call/ret + 128-bit SIMD + 2 verbatim lines
+static const char* kLogRT[] = {
+    "[libc.so] 0x1000!0x0 mov x8, x9; x9=0x5 -> x8=0x5 ",
+    "[libc.so] 0x1004!0x4 ldrb w7, [x4]; x4=0x2000 mem_r=0x2000 -> x7=0xca ",
+    "[libc.so] 0x1008!0x8 strb w7, [x10]; x7=0xca x10=0x3000 mem_w=0x3000 ",
+    "[libc.so] 0x100c!0xc bl #0x2000; ",
+    "call func: memcpy(0x3000, 0x2000)",
+    "[libc.so] 0x1010!0x10 ldr q0, [x1]; "
+        "q0=0xb400007616e40d50b400007706e7fcc0 x1=0x5000 mem_r=0x5000 -> q0=0x0 ",
+    "[libc.so] 0x2000!0x1000 mov x0, xzr; -> x0=0x0 ",
+    "[libc.so] 0x2004!0x1004 ret; ",
+    "ret: 0x0",
+    "GumTrace started on tid=11484",
+    "[libc.so] 0x1014!0x14 mov x8, x9; x9=0x05 -> x8=0x05 ", // non-canonical hex
+};
+
+static std::string join_log(const char* const* lines, int n, const char* nl) {
+    std::string s;
+    for (int i = 0; i < n; i++) {
+        s += lines[i];
+        s += nl;
+    }
+    return s;
+}
+
+// memcpy followed by a source-buffer hexdump (the bridging shape real
+// GumTrace logs produce around __memcpy_chk calls)
+static const char* kLogDump[] = {
+    "[t.so] 0x4000!0x0 mov x10, x11; x11=0x9 -> x10=0x9 ",
+    "[t.so] 0x4004!0x4 bl #0x8000; ",
+    "call func: __memcpy_chk(0x1000, 0x3000, 0x10)",
+    "hexdump at address 0x3000 with length 0x10:",
+    "3000: 41 42 43 44 45 46 47 48 49 4a 4b 4c 4d 4e 4f 50 |ABCDEFGHIJKLMNOP|",
+    "[t.so] 0x4008!0x8 add x10, x10, #1; x10=0x9 -> x10=0xa ",
+};
+
+// taint semantics: NZCV chain, SIMD q chain, kill-on-overwrite, mem round trip
+static const char* kLogTaint[] = {
+    "[t.so] 0x6000!0x0 mov x8, x9; x9=0x5 -> x8=0x5 ",
+    "[t.so] 0x6004!0x4 subs x10, x8, #1; x8=0x5 -> x10=0x4 ",
+    "[t.so] 0x6008!0x8 csel x11, x8, x10, ne; x8=0x5 x10=0x4 -> x11=0x5 ",
+    "[t.so] 0x600c!0xc movz x8, #0; -> x8=0x0 ",
+    "[t.so] 0x6010!0x10 ldr q0, [x11]; x11=0x9000 mem_r=0x9000 -> q0=0x0 ",
+    "[t.so] 0x6014!0x14 eor v0, v0, v1; v0=0x0 v1=0x0 -> v0=0x0 ",
+    "[t.so] 0x6018!0x18 str q0, [x12]; q0=0x0 x12=0xa000 mem_w=0xa000 ",
+    "[t.so] 0x601c!0x1c ldr x13, [x12]; x12=0xa000 mem_r=0xa000 -> x13=0x0 ",
+};
+
+// diff: A vs B (extra instruction at a new offset) vs A rebased (+0x400000)
+static const char* kLogA[] = {
+    "[d.so] 0x101000!0x0 mov x8, x9; x9=0x1 -> x8=0x1 ",
+    "[d.so] 0x101004!0x4 add x8, x8, #1; x8=0x1 -> x8=0x2 ",
+    "[d.so] 0x101008!0x8 ret; ",
+};
+static const char* kLogB[] = {
+    "[d.so] 0x101000!0x0 mov x8, x9; x9=0x1 -> x8=0x1 ",
+    "[d.so] 0x101004!0x4 add x8, x8, #1; x8=0x1 -> x8=0x2 ",
+    "[d.so] 0x101100!0x100 movz x10, #7; -> x10=0x7 ",
+    "[d.so] 0x101008!0x8 ret; ",
+};
+static const char* kLogAR[] = {
+    "[d.so] 0x501000!0x0 mov x8, x9; x9=0x1 -> x8=0x1 ",
+    "[d.so] 0x501004!0x4 add x8, x8, #1; x8=0x1 -> x8=0x2 ",
+    "[d.so] 0x501008!0x8 ret; ",
+};
+
+static bool import_str(const std::string& log, const std::string& out,
+                       ImportResult& res) {
+    RecOptions opts;
+    return import_mem(log.data(), log.size(), out, opts, res);
+}
+
+// ---------------------------------------------------------------------------
+// t_roundtrip
+// ---------------------------------------------------------------------------
+static void t_roundtrip() {
+    printf("t_roundtrip (import/export byte-exactness)\n");
+    std::string lf = join_log(kLogRT, sizeof(kLogRT) / sizeof(kLogRT[0]), "\n");
+    std::string crlf =
+        join_log(kLogRT, sizeof(kLogRT) / sizeof(kLogRT[0]), "\r\n");
+
+    ImportResult r1, r2;
+    CHECK(import_str(lf, tmp_path("rt.gtb"), r1), "import LF log");
+    CHECK(r1.cnt.lines == 11 && r1.cnt.exec == 7 && r1.cnt.call == 1 &&
+              r1.cnt.ret == 1 && r1.cnt.verbatim == 2,
+          "import counts (11 lines, 7 exec, 1 call, 1 ret, 2 verbatim)");
+    CHECK(import_str(crlf, tmp_path("rt_crlf.gtb"), r2), "import CRLF log");
+
+    GtbFile f1, f2;
+    CHECK(f1.load(tmp_path("rt.gtb")) && f2.load(tmp_path("rt_crlf.gtb")),
+          "both gtb files load");
+    CHECK(f1.dialect == 1 && f2.dialect == 3,
+          "dialect byte: LF=1, CRLF=3 (upstream|CRLF)");
+
+    // byte-exact replay in both dialects
+    {
+        std::string o1 = tmp_path("rt.out"), o2 = tmp_path("rt_crlf.out");
+        FILE* f = fopen(o1.c_str(), "wb");
+        Expander(f1).expand_upstream(f);
+        fclose(f);
+        f = fopen(o2.c_str(), "wb");
+        Expander(f2).expand_upstream(f);
+        fclose(f);
+        CHECK(read_file(o1) == lf, "LF export replays input byte-for-byte");
+        CHECK(read_file(o2) == crlf, "CRLF export replays input byte-for-byte");
+    }
+
+    // determinism: same input -> same gtb bytes
+    ImportResult r3;
+    CHECK(import_str(lf, tmp_path("rt2.gtb"), r3), "re-import");
+    CHECK(read_file(tmp_path("rt.gtb")) == read_file(tmp_path("rt2.gtb")),
+          "import is deterministic (identical gtb bytes)");
+
+    // the non-canonical line survived only as verbatim (not parsed as exec)
+    CHECK(r1.cnt.exec == 7, "leading-zero hex line excluded from exec count");
+}
+
+// ---------------------------------------------------------------------------
+// t_dump
+// ---------------------------------------------------------------------------
+static void t_dump() {
+    printf("t_dump (hexdump content lanes + memcpy bridging)\n");
+    std::string log =
+        join_log(kLogDump, sizeof(kLogDump) / sizeof(kLogDump[0]), "\n");
+    ImportResult r;
+    CHECK(import_str(log, tmp_path("dump.gtb"), r), "import dump log");
+    CHECK(r.cnt.exec == 3 && r.cnt.call == 1 && r.cnt.verbatim == 2,
+          "counts: 3 exec, 1 call, 2 verbatim (header + row)");
+
+    GtbFile f;
+    CHECK(f.load(tmp_path("dump.gtb")), "load dump.gtb");
+    // the hexdump row synthesized two value-known mem_r qwords
+    CHECK(f.n_mem == 2, "dump row synthesized 2 mem_r content lanes");
+
+    // qword-aligned 64-bit value: mem lane hit, dump lane suppressed
+    std::string fv = cap_out([&] {
+        q_find_value(tmp_path("dump.gtb"), 0x4847464544434241ULL, 20, 0, false);
+    });
+    CHECK(fv.find("mem_r") != std::string::npos,
+          "find-value hits synthesized mem_r lane");
+    CHECK(fv.find("dump:") == std::string::npos,
+          "qword-aligned match not double-counted as dump lane");
+    // sub-pattern at odd offset: only the dump scan can see it
+    fv = cap_out([&] {
+        q_find_value(tmp_path("dump.gtb"), 0x4d4cULL, 20, 0, false);
+    });
+    // payload bytes ...4c 4d... start at dump offset 11, so the LE value
+    // 0x4d4c matches at 0x300b (not 0x300c)
+    CHECK(fv.find("dump:0x300b") != std::string::npos,
+          "find-value locates 2-byte pattern inside dump payload (0x300b)");
+
+    // forward taint through the verbatim memcpy bridge: src cell -> dst cell
+    std::string tj = cap_out([&] {
+        q_taint(tmp_path("dump.gtb"), 0x3000, -1, -1, false, false, 20, 0, 0,
+                0, "", true);
+    });
+    // JSON output splits the edge "what" field from the "txt" field, so the
+    // full label is not contiguous; match the stable "what" payload instead
+    CHECK(tj.find("dst <- tainted src cells") != std::string::npos,
+          "memcpy bridging edge recorded");
+    CHECK(tj.find("\"0x1000\"") != std::string::npos,
+          "taint reaches the dst buffer (0x1000)");
+}
+
+// ---------------------------------------------------------------------------
+// t_taint
+// ---------------------------------------------------------------------------
+static void t_taint() {
+    printf("t_taint (NZCV/SIMD/kill semantics on imported fixtures)\n");
+    std::string log =
+        join_log(kLogTaint, sizeof(kLogTaint) / sizeof(kLogTaint[0]), "\n");
+    ImportResult r;
+    CHECK(import_str(log, tmp_path("taint.gtb"), r), "import taint log");
+    CHECK(r.cnt.exec == 8, "8 exec events");
+
+    // forward from x8: subs -> nzcv -> csel; movz kills x8. `ldr q0,[x11]`
+    // also counts as matched: its base x11 is tainted, so the event is
+    // "involved" — involvement is recorded even though it does not propagate
+    // taint into q0 (pure data flow through the memory cell only)
+    std::string fwd = cap_out([&] {
+        q_taint(tmp_path("taint.gtb"), 0, 8, -1, false, false, 20, 0, 0, 0,
+                "", true);
+    });
+    CHECK(fwd.find("\"matched\":4") != std::string::npos,
+          "forward matched = seed + subs + csel + tainted-base ldr (4)");
+    CHECK(fwd.find("\"x10\"") != std::string::npos &&
+              fwd.find("\"x11\"") != std::string::npos &&
+              fwd.find("\"nzcv\"") != std::string::npos,
+          "x10, x11, nzcv tainted");
+    CHECK(fwd.find("\"x8\"") == std::string::npos,
+          "movz killed x8 taint");
+    CHECK(fwd.find("\"q0\"") == std::string::npos,
+          "tainted base register does not taint the load (pure data flow)");
+
+    // forward from the memory cell: load taints q0, eor keeps it, store taints
+    // the dst cell, reload taints x13
+    std::string mem = cap_out([&] {
+        q_taint(tmp_path("taint.gtb"), 0x9000, -1, -1, false, false, 20, 0, 0,
+                0, "", true);
+    });
+    CHECK(mem.find("\"matched\":5") != std::string::npos,
+          "mem-seeded forward matched = seed + ldr/eor/str/ldr (5)");
+    CHECK(mem.find("\"q0\"") != std::string::npos,
+          "q0 tainted through the SIMD chain");
+    CHECK(mem.find("\"0xa000\"") != std::string::npos,
+          "store carries q0 taint into memory cell 0xa000");
+    CHECK(mem.find("\"x13\"") != std::string::npos,
+          "reload carries cell taint back to x13");
+
+    // backward from the reloaded cell: demand walks store -> eor -> load
+    std::string bwd = cap_out([&] {
+        q_taint(tmp_path("taint.gtb"), 0xa000, -1, -1, false, true, 20, 0, 0,
+                0, "", true);
+    });
+    CHECK(bwd.find("source reg q0") != std::string::npos &&
+              bwd.find("source mem 0x9000") != std::string::npos,
+          "backward walk reaches q0 then the source cell 0x9000");
+    CHECK(bwd.find("\"matched\":4") != std::string::npos,
+          "backward matched = seed + str/eor/ldr (4)");
+}
+
+// ---------------------------------------------------------------------------
+// t_native — the recorder's own path, fed with ExecEvent literals
+// ---------------------------------------------------------------------------
+static void intern_fixture_sites(SiteArena& arena) {
+    static const char pre_a[] = "[t.so] 0x1000!0x0 mov x8, x9; ";
+    static const char pre_b[] = "[t.so] 0x1004!0x4 str x8, [x10]; ";
+    static const char pre_c[] = "[t.so] 0x1008!0x8 bl #0x2000; ";
+    TextOp a[] = {{"x9", 2, OP_REG_R, 0}, {"x8", 2, OP_REG_W, 0}};
+    TextOp b[] = {{"x8", 2, OP_REG_R, 0}, {"x10", 3, OP_REG_R, 0},
+                  {"mem_w", 5, OP_MEM_W, 8}};
+    CHECK(arena.intern_text(0x1000, pre_a, sizeof(pre_a) - 1, "t.so", 0x1000,
+                            a, 2) != 0xFFFFFFFFu,
+          "intern site A");
+    CHECK(arena.intern_text(0x1004, pre_b, sizeof(pre_b) - 1, "t.so", 0x1004,
+                            b, 3) != 0xFFFFFFFFu,
+          "intern site B");
+    CHECK(arena.intern_text(0x1008, pre_c, sizeof(pre_c) - 1, "t.so", 0x1008,
+                            nullptr, 0) != 0xFFFFFFFFu,
+          "intern site C");
+}
+
+static ExecEvent ev_mov(uint64_t v) {
+    ExecEvent e{};
+    e.pc = 0x1000;
+    e.n_wr = 1;
+    e.wr_id[0] = 8;
+    e.wr_val[0] = v;
+    return e;
+}
+
+static void t_native() {
+    printf("t_native (recorder via ExecEvent literals)\n");
+    SiteArena arena;
+    intern_fixture_sites(arena);
+
+    // full-detail record: exec/mem/call/ret/svc reconstruction
+    {
+        GtbRecorder rec(arena);
+        RecOptions ro;
+        ro.initial_sp = 0x7000100000;
+        CHECK(rec.open(tmp_path("native.gtb"), ro), "open native.gtb");
+        rec.record_event(ev_mov(0x55));
+        ExecEvent e{};
+        e.pc = 0x1004;
+        e.n_mem = 1;
+        e.mem[0] = MemOp{true, 0x3000, 8, 0x55, true};
+        rec.record_event(e);
+        e = ExecEvent{};
+        e.pc = 0x1008;
+        e.is_call = true;
+        e.call_name = "sub_fn";
+        e.x[0] = 0x3000;
+        e.x[1] = 0x2000;
+        e.x[2] = 0x10;
+        e.n_wr = 1;
+        e.wr_id[0] = 30;
+        e.wr_val[0] = 0x100c;
+        rec.record_event(e);
+        rec.record_event(ev_mov(0x66));
+        e = ExecEvent{};
+        e.pc = 0x1000;
+        e.is_ret = true;
+        e.ret_val = 0x66;
+        rec.record_event(e);
+        e = ExecEvent{};
+        e.pc = 0x1004;
+        e.is_svc = true;
+        e.svc_num = 63; // read
+        e.x[0] = 0x7;
+        e.x[1] = 0x3000;
+        e.x[2] = 0x10;
+        rec.record_event(e);
+        rec.finish();
+    }
+    GtbFile f;
+    CHECK(f.load(tmp_path("native.gtb")), "native.gtb loads");
+    CHECK(f.n_exec == 6 && f.n_call == 1 && f.n_ret == 1 && f.n_svc == 1,
+          "counts: 6 exec, 1 call, 1 ret, 1 svc");
+    CHECK(f.n_regw == 3 && f.n_mem == 1,
+          "3 regw (x8 twice + implicit x30), 1 mem");
+    CHECK(f.initial_sp == 0x7000100000, "initial_sp round-trips via footer");
+    {
+        std::string out = tmp_path("native.txt");
+        FILE* o = fopen(out.c_str(), "wb");
+        Expander(f).expand_compact(o);
+        fclose(o);
+        std::string s = read_file(out);
+        CHECK(s.find("+call sub_fn(x0=0x3000, x1=0x2000, x2=0x10, x3=0x0)") !=
+                  std::string::npos,
+              "compact export: call args reconstructed");
+        CHECK(s.find("+svc read(x0=0x7") != std::string::npos,
+              "compact export: svc named and args reconstructed");
+        CHECK(s.find("+ret x0=0x66") != std::string::npos,
+              "compact export: ret value reconstructed");
+        CHECK(s.find("-> x8=0x66") != std::string::npos,
+              "compact export: register write reconstructed");
+    }
+    std::string st = cap_out([&] { q_stat(tmp_path("native.gtb"), false); });
+    CHECK(st.find("dialect native") != std::string::npos,
+          "stat labels native recordings (dialect 0)");
+
+    // guard: max_events
+    {
+        GtbRecorder rec(arena);
+        RecOptions ro;
+        ro.max_events = 3;
+        rec.open(tmp_path("guard_ev.gtb"), ro);
+        for (int i = 0; i < 6; i++) rec.record_event(ev_mov(0x55));
+        RecStats st2 = rec.finish();
+        CHECK(st2.reason == STOP_MAX_EVENTS, "max_events stops recording");
+        CHECK(st2.events_seen == 6 && st2.events_recorded == 3,
+              "seen keeps counting, recorded capped at 3");
+    }
+    // guard: max_bytes (checked every 4096 events). bytes_written only
+    // accumulates when a chunk is handed to the writer, so shrink the chunk
+    // to 1 KB — with the default 256 KB chunk, ~10 KB of events never trip
+    // the byte counter (real granularity property of the recorder)
+    {
+        GtbRecorder rec(arena);
+        RecOptions ro;
+        ro.max_bytes = 300;
+        ro.chunk_size = 1024;
+        rec.open(tmp_path("guard_by.gtb"), ro);
+        for (int i = 0; i < 5000; i++) rec.record_event(ev_mov(0x55));
+        RecStats st2 = rec.finish();
+        CHECK(st2.reason == STOP_MAX_BYTES, "max_bytes stops recording");
+        GtbFile g;
+        CHECK(g.load(tmp_path("guard_by.gtb")) &&
+                  g.stop_reason == STOP_MAX_BYTES,
+              "guard stop reason survives in the footer");
+    }
+    // crash flush: child dies mid-recording, parent reads the footer
+    {
+        std::string path = tmp_path("crash.gtb");
+        pid_t pid = fork();
+        if (pid == 0) {
+            SiteArena carena;
+            intern_fixture_sites(carena);
+            GtbRecorder rec(carena);
+            RecOptions ro;
+            if (!rec.open(path, ro)) _exit(2);
+            for (int i = 0; i < 100; i++) rec.record_event(ev_mov(0x55));
+            *(volatile int*)0 = 1; // SIGSEGV mid-recording
+            _exit(3);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
+              "child died of SIGSEGV");
+        GtbFile g;
+        CHECK(g.load(path), "crashed trace parses");
+        CHECK(g.stop_reason == STOP_CRASH, "footer records reason=crash");
+        CHECK(g.n_exec == 100,
+              "all 100 events survived (signal handler flushed the chunk)");
+    }
+    // flight recorder: ring keeps the tail, trigger symbol dumps and stops
+    {
+        GtbRecorder rec(arena);
+        RecOptions ro;
+        ro.ring_keep_chunks = 1;
+        ro.chunk_size = 256;
+        ro.trigger_sym = "stop_fn";
+        rec.open(tmp_path("ring.gtb"), ro);
+        for (int i = 0; i < 300; i++) rec.record_event(ev_mov(0x55));
+        ExecEvent e{};
+        e.pc = 0x1008;
+        e.is_call = true;
+        e.call_name = "stop_fn";
+        rec.record_event(e);
+        RecStats st2 = rec.finish();
+        CHECK(st2.reason == STOP_TRIGGER, "trigger symbol stops recording");
+        GtbFile g;
+        CHECK(g.load(tmp_path("ring.gtb")), "ring dump parses");
+        CHECK(g.n_exec > 0 && g.n_exec < 300,
+              "ring retained only the tail window");
+        CHECK(g.events_seen == 301, "events_seen counts the full stream");
+    }
+    // dynamic detail escalation: calls-only until the trigger symbol calls
+    {
+        GtbRecorder rec(arena);
+        RecOptions ro;
+        ro.detail = DETAIL_CALLS;
+        ro.escalate_sym = "bomb";
+        ro.escalate_detail = DETAIL_FULL;
+        ro.escalate_events = 20;
+        rec.open(tmp_path("esc.gtb"), ro);
+        for (int i = 0; i < 50; i++) rec.record_event(ev_mov(0x55));
+        ExecEvent e{};
+        e.pc = 0x1008;
+        e.is_call = true;
+        e.call_name = "bomb";
+        rec.record_event(e);
+        CHECK(rec.escalated(), "escalation fired on the trigger symbol");
+        for (int i = 0; i < 100; i++) rec.record_event(ev_mov(0x66));
+        rec.finish();
+        CHECK(rec.current_detail() == DETAIL_CALLS,
+              "detail falls back after the event budget drains");
+        GtbFile g;
+        CHECK(g.load(tmp_path("esc.gtb")), "escalation trace parses");
+        CHECK(g.n_exec == 19,
+              "full-detail window = budget minus the arming event (19)");
+        CHECK(g.n_call == 1, "the arming call recorded in calls-only mode");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// t_queries
+// ---------------------------------------------------------------------------
+static void t_queries() {
+    printf("t_queries (query surface + agent contract)\n");
+    std::string gtb = tmp_path("rt.gtb"); // built by t_roundtrip
+
+    std::string st = cap_out([&] { q_stat(gtb, false); });
+    CHECK(st.find("exec=7") != std::string::npos &&
+              st.find("verbatim=2") != std::string::npos,
+          "stat counts exec/verbatim");
+    std::string sj = cap_out([&] { q_stat(gtb, true); });
+    CHECK(sj.find("\"exec\":7") != std::string::npos &&
+              sj.find("\"dialect\":\"upstream\"") != std::string::npos,
+          "stat --json shape + dialect");
+
+    std::string fv = cap_out([&] { q_find_value(gtb, 0xca, 20, 0, false); });
+    CHECK(fv.find("wr:x7") != std::string::npos &&
+              fv.find("rd:x7") != std::string::npos,
+          "find-value reports write and read lanes");
+    CHECK(fv.find("# suggest:") != std::string::npos,
+          "text mode emits the agent footer");
+
+    std::string ma = cap_out([&] {
+        q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, true);
+    });
+    CHECK(ma.find(" w 0x3000 ") != std::string::npos,
+          "mem-access --write finds the store");
+    ma = cap_out(
+        [&] { q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, false); });
+    CHECK(ma.find(" r 0x3000 ") == std::string::npos,
+          "no read of 0x3000 exists (honest negative)");
+
+    std::string fa = cap_out(
+        [&] { q_func_args(gtb, "memcpy", 1, 5, true); });
+    CHECK(fa.find("\"args\":[\"0x3000\",\"0x2000\"]") != std::string::npos,
+          "func-args reconstructs observed call args");
+    fa = cap_out([&] { q_func_args(gtb, "nosuch", 1, 5, false); });
+    CHECK(fa.find("no call to nosuch") != std::string::npos,
+          "func-args says plainly when the function is absent");
+
+    std::string ct = cap_out(
+        [&] { q_calltree_gtb(gtb, "memcpy", 3, 40, false); });
+    CHECK(ct.find("memcpy(x0=0x3000, x1=0x2000)") != std::string::npos,
+          "calltree prints the matched call with args");
+
+    // export windows + cursor, driven at the Expander level
+    GtbFile f;
+    CHECK(f.load(gtb), "reload for export tests");
+    {
+        std::string out = tmp_path("q_compact.txt");
+        FILE* o = fopen(out.c_str(), "wb");
+        uint64_t stop = UINT64_MAX;
+        uint64_t n = Expander(f).expand_compact(o, 0, UINT64_MAX, 3, &stop);
+        fclose(o);
+        // the module header `== libc.so ==` consumes one line and each exec
+        // event emits one (mem lanes ride the same line), so a 3-line budget
+        // covers ev0+ev1 and the cursor lands on the unprocessed ev2
+        CHECK(n == 3 && stop == 2,
+              "compact --limit 3 emits 3 lines incl. module header");
+        std::string s = read_file(out);
+        CHECK(s.rfind("== libc.so ==", 0) == 0,
+              "compact output opens with a module header");
+        CHECK(s.find("!0x4") != std::string::npos,
+              "compact uses module-relative addressing");
+    }
+    {
+        std::string out = tmp_path("q.jsonl");
+        FILE* o = fopen(out.c_str(), "wb");
+        uint64_t stop = UINT64_MAX;
+        uint64_t n = Expander(f).expand_jsonl(o, 0, UINT64_MAX, 4, &stop);
+        fclose(o);
+        CHECK(n == 4 && stop != UINT64_MAX, "jsonl --limit 4 + cursor");
+        std::string s = read_file(out);
+        CHECK(s.rfind("{\"ev\":0,", 0) == 0, "jsonl lines are ev objects");
+        CHECK(s.find("\"txt\":\"mov x8, x9\"") != std::string::npos,
+              "jsonl carries the disasm text");
+    }
+    {
+        // windowed export: --from/--to select the event range
+        std::string out = tmp_path("q_win.txt");
+        FILE* o = fopen(out.c_str(), "wb");
+        uint64_t n = Expander(f).expand_compact(o, 2, 3);
+        fclose(o);
+        std::string s = read_file(out);
+        CHECK(s.find("!0x8") != std::string::npos &&
+                  s.find("!0xc ") != std::string::npos &&
+                  s.find("!0x0 ") == std::string::npos,
+              "export window [2,3] emits exactly those events");
+        (void)n;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// t_diff
+// ---------------------------------------------------------------------------
+static void t_diff() {
+    printf("t_diff ((module, offset) identity)\n");
+    ImportResult r;
+    CHECK(import_str(join_log(kLogA, 3, "\n"), tmp_path("da.gtb"), r),
+          "import A");
+    CHECK(import_str(join_log(kLogB, 4, "\n"), tmp_path("db.gtb"), r),
+          "import B");
+    CHECK(import_str(join_log(kLogAR, 3, "\n"), tmp_path("dar.gtb"), r),
+          "import A rebased");
+
+    std::string d = cap_out(
+        [&] { q_diff(tmp_path("da.gtb"), tmp_path("db.gtb"), 3, false); });
+    CHECK(d.find("first divergence at exec index 2") != std::string::npos,
+          "inserted instruction diverges at exec index 2");
+    std::string same = cap_out(
+        [&] { q_diff(tmp_path("da.gtb"), tmp_path("dar.gtb"), 3, false); });
+    CHECK(same.find("identical execution sequences") != std::string::npos,
+          "rebased copy compares identical (ASLR-stable identity)");
+}
+
+// ---------------------------------------------------------------------------
+int main() {
+    char tmpl[] = "/tmp/gt-test-XXXXXX";
+    CHECK(mkdtemp(tmpl) != nullptr, "mkdtemp");
+    g_dir = tmpl;
+
+    t_roundtrip();
+    t_dump();
+    t_taint();
+    t_native();
+    t_queries();
+    t_diff();
+
+    printf("\n%d/%d checks passed\n", g_pass, g_pass + g_fail);
+    return g_fail ? 1 : 0;
+}

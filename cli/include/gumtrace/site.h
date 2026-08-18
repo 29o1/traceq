@@ -77,23 +77,6 @@ struct Site {
     int32_t func_sym = -1;           // string id of containing function name
 };
 
-// Faithful re-implementation of GumTrace's CallbackContext ring
-// (CallbackContext.cpp). Kept only to demonstrate the wrap bug in selftest.
-struct RingCtxEmu {
-    static constexpr int CALLBACK_CTX_SIZE = 102400;
-    struct Ctx { uint64_t addr; uint64_t stamp; };
-    Ctx list[CALLBACK_CTX_SIZE];
-    int curr_index = 0;
-    uint64_t stamp = 0;
-    Ctx* pull(uint64_t addr) {
-        if (curr_index >= CALLBACK_CTX_SIZE) curr_index = 0;
-        Ctx* ctx = &list[curr_index++];
-        ctx->addr = addr;
-        ctx->stamp = ++stamp;
-        return ctx;
-    }
-};
-
 struct TextOp; // defined below (text-built sites, gt import)
 
 class SiteArena {

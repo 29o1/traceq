@@ -65,7 +65,7 @@ struct Group {
 };
 
 // Streams groups from a GtbFile, reconstructing register values (reads are
-// rebuilt from write history; sp initialized to the corpus stack top).
+// rebuilt from write history; sp initialized from the footer, 0 = unknown).
 // VERBATIM bodies are appended to f.verbatim on the fly — const GtbFile& is
 // kept for API compatibility; the mutation is append-only and idempotent per
 // file as long as one GtbFile is served by at most one Expander at a time.

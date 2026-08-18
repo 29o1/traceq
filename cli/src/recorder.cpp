@@ -382,7 +382,7 @@ void GtbRecorder::write_footer_locked(uint8_t reason) {
     n += put_uvar(f + n, stats_.events_recorded);
     n += put_uvar(f + n, stats_.bytes_written);
     n += put_uvar(f + n, opt_.initial_sp);
-    f[n++] = dialect_; // absent in older files -> 0 -> corpus
+    f[n++] = dialect_; // absent in older files -> 0 -> native recording
     write_chunk_to_fd(fd_, f, n, CH_FOOTER);
 }
 

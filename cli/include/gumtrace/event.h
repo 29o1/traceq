@@ -2,14 +2,13 @@
 // The recorder input contract.
 //
 // This is the ONE type that crosses the boundary between an event source and
-// the recorders. A source is anything that can observe instruction execution:
-//   - a Frida Stalker callout (the real target)
-//   - the synthetic corpus simulator (bench/harness, for A/B measurement)
+// the recorders. A source is anything that can observe instruction execution —
+// the real target is a Frida Stalker callout.
 //
 // Deliberately free of any source-specific types: the recorder needs the PC to
 // resolve a site id, the register state a callout would see, and the observed
 // effects. It does NOT need to know how the instruction was described or who
-// produced it — that keeps libgumtrace independent of the benchmark corpus.
+// produced it — the library is independent of any particular source.
 
 #include <cstdint>
 
