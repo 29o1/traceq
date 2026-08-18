@@ -1,4 +1,4 @@
-// gt-test — libgumtrace correctness suite.
+// gt-test — libtraceq correctness suite.
 //
 // Fixture philosophy: no behavioral simulator. Tests are driven by
 //   - upstream-dialect text logs (hand-written, byte-exact canonical), which
@@ -24,11 +24,11 @@
 //   t_diff       (module, offset) identity: inserted instruction diverges,
 //                rebased copy compares identical
 
-#include <gumtrace/import.h>
-#include <gumtrace/ingest.h>
-#include <gumtrace/queries.h>
-#include <gumtrace/recorder.h>
-#include <gumtrace/site.h>
+#include <traceq/import.h>
+#include <traceq/ingest.h>
+#include <traceq/queries.h>
+#include <traceq/recorder.h>
+#include <traceq/site.h>
 
 #include <cstdio>
 #include <cstring>

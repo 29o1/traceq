@@ -12,7 +12,7 @@
 // (ev, total, shown, ...) stay decimal numbers.
 //
 // This header deliberately lives in src/, not include/: it is CLI glue, not
-// part of the reusable libgumtrace API.
+// part of the reusable libtraceq API.
 #include <cstdint>
 #include <cstdio>
 #include <string>

@@ -1,6 +1,6 @@
-#include <gumtrace/recorder.h>
-#include <gumtrace/common.h>
-#include <gumtrace/varint.h>
+#include <traceq/recorder.h>
+#include <traceq/common.h>
+#include <traceq/varint.h>
 #include <cassert>
 #include <cstring>
 #include <fcntl.h>

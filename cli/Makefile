@@ -12,29 +12,29 @@ LDFLAGS := $(CAP_LDFLAGS)
 
 LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp src/import.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
-HEADERS := $(wildcard include/gumtrace/*.h)
+HEADERS := $(wildcard include/traceq/*.h)
 
 all: gt
 
-# libgumtrace: the reusable core (site compiler, recorder, expander, queries).
-# Deliberately free of any event source — see include/gumtrace/event.h.
-libgumtrace.a: $(LIB_OBJ)
+# libtraceq: the reusable core (site compiler, recorder, expander, queries).
+# Deliberately free of any event source — see include/traceq/event.h.
+libtraceq.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
 %.o: %.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-gt: src/main.o libgumtrace.a
-	$(CXX) $(CXXFLAGS) $< libgumtrace.a -o $@ $(LDFLAGS)
+gt: src/main.o libtraceq.a
+	$(CXX) $(CXXFLAGS) $< libtraceq.a -o $@ $(LDFLAGS)
 
 # correctness suite: upstream-log fixtures + ExecEvent literals, no simulator
-gt-test: tests/test_main.o libgumtrace.a
-	$(CXX) $(CXXFLAGS) $< libgumtrace.a -o $@ $(LDFLAGS)
+gt-test: tests/test_main.o libtraceq.a
+	$(CXX) $(CXXFLAGS) $< libtraceq.a -o $@ $(LDFLAGS)
 
 test: gt-test
 	./gt-test
 
 clean:
-	rm -f gt gt-test libgumtrace.a src/*.o tests/*.o
+	rm -f gt gt-test libtraceq.a src/*.o tests/*.o
 
 .PHONY: all test clean

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gumtrace-ng benchmark — driven entirely by real trace files.
+"""traceq benchmark — driven entirely by real trace files.
 
 No simulator, no synthetic corpus: every number below is the shipping `gt`
 binary running on real GumTrace text logs (bench/traces/). What is measured:
@@ -205,7 +205,7 @@ def run_trace(log_path, repeats, workdir):
 def write_markdown(rep, path):
     fp = rep["fingerprint"]
     lines = [
-        "# gumtrace-ng benchmark — %s" % rep["timestamp_utc"],
+        "# traceq benchmark — %s" % rep["timestamp_utc"],
         "",
         "- git: `%s`  gt sha256: `%s`" % (fp["git"], fp["gt_sha256"][:16]),
         "- host: `%s`" % fp["uname"],

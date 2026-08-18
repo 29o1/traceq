@@ -1,8 +1,8 @@
-#include <gumtrace/common.h>
-#include <gumtrace/ingest.h>
-#include <gumtrace/queries.h>
-#include <gumtrace/recorder.h>
-#include <gumtrace/site.h>
+#include <traceq/common.h>
+#include <traceq/ingest.h>
+#include <traceq/queries.h>
+#include <traceq/recorder.h>
+#include <traceq/site.h>
 #include "emit.h"
 #include <cstdio>
 #include <cstring>
@@ -169,7 +169,7 @@ int cmd_calltree(int argc, char** argv) {
 
 static void usage() {
     printf(
-        "gt — GumTrace-ng: agent-facing trace CLI\n"
+        "gt — traceq: agent-facing trace CLI\n"
         "usage:\n"
         "  gt import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
         "  gt export    [--format auto|compact|jsonl|upstream]\n"

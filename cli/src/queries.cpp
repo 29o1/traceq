@@ -1,7 +1,7 @@
-#include <gumtrace/queries.h>
-#include <gumtrace/ingest.h>
-#include <gumtrace/import.h>
-#include <gumtrace/site.h>
+#include <traceq/queries.h>
+#include <traceq/ingest.h>
+#include <traceq/import.h>
+#include <traceq/site.h>
 #include "emit.h"
 #include <algorithm>
 #include <cstdio>
@@ -266,7 +266,7 @@ static TaintSite build_taint_site(const Site& s, const char* pool) {
 }
 
 // verbatim-hexdump memcpy bridging and dump-payload search use the shared
-// upstream-dialect parsers from gumtrace/import.h (parse_hexdump_header /
+// upstream-dialect parsers from traceq/import.h (parse_hexdump_header /
 // parse_hexdump_row). The taint walkers bind dumps to the preceding call
 // (args dst, src) and apply copy semantics, so copied buffers stop looking
 // like orphan addresses.

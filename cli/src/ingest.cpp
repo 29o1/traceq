@@ -1,5 +1,5 @@
-#include <gumtrace/ingest.h>
-#include <gumtrace/varint.h>
+#include <traceq/ingest.h>
+#include <traceq/varint.h>
 #include "emit.h"
 #include <cstring>
 #include <cstdio>

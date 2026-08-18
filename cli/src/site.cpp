@@ -1,5 +1,5 @@
-#include <gumtrace/site.h>
-#include <gumtrace/varint.h>
+#include <traceq/site.h>
+#include <traceq/varint.h>
 #include <capstone/capstone.h>
 #include <cassert>
 #include <cstring>

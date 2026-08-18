@@ -26,9 +26,9 @@
 // Call/ret lines ride the preceding group (that is where upstream prints
 // them); a second call on an open group closes it (decoder-side).
 
-#include <gumtrace/import.h>
-#include <gumtrace/site.h>
-#include <gumtrace/common.h>
+#include <traceq/import.h>
+#include <traceq/site.h>
+#include <traceq/common.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>

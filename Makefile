@@ -1,6 +1,6 @@
-# GumTrace-ng — two independent subprojects.
+# traceq — two independent subprojects.
 #
-#   cli/    the product: libgumtrace + the `gt` CLI.
+#   cli/    the product: libtraceq + the `gt` CLI.
 #           Knows nothing about benchmarks.
 #   bench/  product-self benchmarks: a python driver that measures the
 #           shipping `gt` binary from the outside, on real trace files only
