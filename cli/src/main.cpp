@@ -35,6 +35,14 @@ int cmd_taint(int argc, char** argv) {
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
     }
+    if (seed_reg > 31) {
+        fprintf(stderr, "taint: --seed-reg %d out of range (0..31)\n", seed_reg);
+        return 2;
+    }
+    if (seed_q > 31) {
+        fprintf(stderr, "taint: --seed-q %d out of range (0..31)\n", seed_q);
+        return 2;
+    }
     return q_taint(gtb, seed_addr, seed_reg, seed_q, seed_nzcv, back, limit, window,
                    at_ev, off, mod, json);
 }
