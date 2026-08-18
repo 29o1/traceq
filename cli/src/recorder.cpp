@@ -519,6 +519,26 @@ void GtbRecorder::imp_mem(bool is_write, uint64_t addr, uint8_t size) {
     stats_.events_recorded++;
 }
 
+void GtbRecorder::imp_mem_val(bool is_write, uint64_t addr, uint8_t size,
+                              uint64_t value) {
+    if (!open_) return;
+    uint8_t tmp[16], tmp2[16];
+    int64_t ad = int64_t(addr) - int64_t(last_mem_addr_);
+    size_t n1 = put_var(tmp, ad);
+    int64_t vd = int64_t(value) - int64_t(last_mem_val_[is_write ? 1 : 0]);
+    size_t n2 = put_var(tmp2, vd);
+    ensure_space(2 + n1 + n2);
+    push_u8(EV_MEM); // same tag/flags layout the native path emits
+    push_u8(uint8_t(size << 1) | uint8_t(is_write ? 1 : 0));
+    memcpy(cur_->buf.data() + cur_->n, tmp, n1);
+    cur_->n += n1;
+    memcpy(cur_->buf.data() + cur_->n, tmp2, n2);
+    cur_->n += n2;
+    last_mem_addr_ = addr;
+    last_mem_val_[is_write ? 1 : 0] = value;
+    stats_.events_recorded++;
+}
+
 // shared body of RDVAL/SIMDV (kind 0: delta-coded <=64-bit observed value)
 void GtbRecorder::imp_rdval(uint32_t name_id, uint64_t v) {
     if (!open_) return;

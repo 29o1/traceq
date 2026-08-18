@@ -1074,15 +1074,17 @@ static void test_import_agent_fixes() {
     }
 
     // (4) verbatim hexdump after a memcpy-class call bridges taint across the
-    // copy, in both directions (the AES-key orphan-address break in the eval)
+    // copy, in both directions (the AES-key orphan-address break in the eval).
+    // The dump row uses the real upstream colon format; its bytes carry the
+    // field16 anchor "A7QXXUYR" so the content lanes can be tested too.
     static const char log4[] =
-        "[m.so] 0x1000!0x0 str x8, [x9]; x8=0x1111 x9=0x5000 mem_w=0x5000 \n"
+        "[m.so] 0x1000!0x0 str x8, [x9]; x8=0x5259555858513741 x9=0x5000 mem_w=0x5000 \n"
         "[m.so] 0x1004!0x4 br x16; x16=0x3000 \n"
         "call func: __memcpy_aarch64_simd(0x7000, 0x5000, 0x8)\n"
         "hexdump at address 0x5000 with length 0x8:\n"
-        "0000000000005000  11 11 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|\n"
+        "0000000000005000: 41 37 51 58 58 55 59 52 00 00 00 00 00 00 00 00 |A7QXXUYR........|\n"
         "ret: 0x7000\n"
-        "[m.so] 0x1008!0x8 ldr x10, [x12]; x10=0x0 x12=0x7000 mem_r=0x7000 -> x10=0x1111 \n";
+        "[m.so] 0x1008!0x8 ldr x10, [x12]; x10=0x0 x12=0x7000 mem_r=0x7000 -> x10=0x5259555858513741 \n";
     ImportResult r4;
     CHECK(import_mem(log4, sizeof(log4) - 1, "build/t33d.gtb", ro, r4),
           "fixture 4 imports");
@@ -1114,6 +1116,29 @@ static void test_import_agent_fixes() {
         CHECK(trunc.find("next: gt taint --seed-addr 0x5000 --limit") !=
                   std::string::npos,
               "meta.next re-emits --seed-addr in hex, not decimal");
+
+        // (5) hexdump payload becomes searchable memory content: the importer
+        // synthesizes value-known mem_r lanes from full qwords, and
+        // find-value additionally byte-scans rows at any offset
+        std::string fq = capture_stdout([] {
+            q_find_value("build/t33d.gtb", 0x5259555858513741ULL, 10, 0,
+                         false);
+        });
+        CHECK(fq.find("mem_r") != std::string::npos,
+              "full qword in a dump row is found via the synthesized mem lane");
+        CHECK(fq.find("dump:") == std::string::npos,
+              "qword-aligned full-width match is not double-reported as dump");
+        std::string sub = capture_stdout([] {
+            q_find_value("build/t33d.gtb", 0x5955, 10, 0, false);
+        });
+        CHECK(sub.find("dump:0x5005") != std::string::npos,
+              "sub-qword LE byte pattern found at the exact dump offset");
+        std::string ma = capture_stdout([] {
+            q_mem_access("build/t33d.gtb", 0x5000, false, 0, 0, 20, 0, false);
+        });
+        CHECK(ma.find("w 0x5000") != std::string::npos &&
+                  ma.find("r 0x5000") != std::string::npos,
+              "mem-access shows both the store and the dump content lane");
     }
 }
 

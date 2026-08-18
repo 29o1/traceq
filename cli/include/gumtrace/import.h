@@ -27,4 +27,18 @@ bool import_mem(const char* p, size_t len, const std::string& out_path,
 bool import_log(const std::string& in_path, const std::string& out_path,
                 const RecOptions& opts, ImportResult& res);
 
+// Upstream text-dialect hexdump parsing (shared by the importer, which
+// synthesizes content-observation mem events from dump rows, and by the
+// query layer, which searches dump payloads byte-exactly).
+//   header: "hexdump at address 0x<addr> with length 0x<len>:"
+//   row:    "<hexaddr>: 68 74 ... 6f |ascii|" / "<hexaddr>  11 11 ... |...|"
+// parse_hexdump_header needs only the header prefix; trailing text is ignored.
+bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
+                          uint64_t& len);
+// parse_hexdump_row parses one body row: address (4-16 hex digits, optional
+// ':'), then 1..16 space-separated byte pairs, stopped by the '|' gutter,
+// line end, or CRLF. Bytes land in out (LE memory order), n_out = count.
+bool parse_hexdump_row(const char* p, size_t n, uint64_t& addr,
+                       uint8_t out[16], int& n_out);
+
 } // namespace gt

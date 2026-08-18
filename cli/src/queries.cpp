@@ -1,5 +1,6 @@
 #include <gumtrace/queries.h>
 #include <gumtrace/ingest.h>
+#include <gumtrace/import.h>
 #include <gumtrace/site.h>
 #include "emit.h"
 #include <algorithm>
@@ -264,35 +265,11 @@ static TaintSite build_taint_site(const Site& s, const char* pool) {
     return ts;
 }
 
-// "hexdump at address 0x<addr> with length 0x<len>:" — upstream dumps the
-// SOURCE buffer of a memcpy-class call right after the call line. The taint
-// walkers bind such dumps to the preceding call (args dst, src) and apply
-// copy semantics, so copied buffers stop looking like orphan addresses.
-static bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
-                                 uint64_t& len) {
-    static const char kPre[] = "hexdump at address 0x";
-    static const char kMid[] = " with length 0x";
-    size_t i = 0;
-    auto eat = [&](const char* w, size_t l) {
-        if (i + l > n || memcmp(p + i, w, l)) return false;
-        i += l;
-        return true;
-    };
-    auto hex = [&](uint64_t& v) {
-        size_t s = i;
-        v = 0;
-        while (i < n && ((p[i] >= '0' && p[i] <= '9') ||
-                         (p[i] >= 'a' && p[i] <= 'f') ||
-                         (p[i] >= 'A' && p[i] <= 'F'))) {
-            char c = p[i++];
-            v = (v << 4) | uint64_t(c <= '9' ? c - '0'
-                                             : (c | 32) - 'a' + 10);
-        }
-        return i > s;
-    };
-    return eat(kPre, sizeof(kPre) - 1) && hex(addr) &&
-           eat(kMid, sizeof(kMid) - 1) && hex(len);
-}
+// verbatim-hexdump memcpy bridging and dump-payload search use the shared
+// upstream-dialect parsers from gumtrace/import.h (parse_hexdump_header /
+// parse_hexdump_row). The taint walkers bind dumps to the preceding call
+// (args dst, src) and apply copy semantics, so copied buffers stop looking
+// like orphan addresses.
 
 static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      int seed_q, bool seed_nzcv, bool backward, int limit,
@@ -1427,6 +1404,19 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    // dump-payload scan pattern: minimal-width LE bytes of val. Values that
+    // only ever exist as memory bytes (protobuf payloads inside memcpy dumps)
+    // have no register/obs lane; the verbatim hexdump rows are the only place
+    // they appear. Width < 2 is too noisy for a byte-substring search.
+    uint8_t pat[8];
+    int pat_n = 0;
+    {
+        uint64_t v = val;
+        do {
+            pat[pat_n++] = uint8_t(v & 0xff);
+            v >>= 8;
+        } while (v && pat_n < 8);
+    }
     auto row = [&](uint64_t gi, const char* lane, const Group& g) {
         if (total++ < offset) return;
         if (shown >= lim) return;
@@ -1450,6 +1440,30 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
     };
     Expander(f).for_each([&](uint64_t gi, const Group& g) {
         char rb[16];
+        if (g.has_verbatim) {
+            // hexdump rows: byte-exact content search at any offset. Qword-
+            // aligned full-width matches are already covered by the mem_r
+            // lanes the importer synthesized from the same rows.
+            if (pat_n >= 2) {
+                const std::string& vb = f.verbatim;
+                uint64_t raddr = 0;
+                uint8_t bytes[16];
+                int nb = 0;
+                if (g.verbatim_off + g.verbatim_len <= vb.size() &&
+                    parse_hexdump_row(vb.data() + g.verbatim_off,
+                                      g.verbatim_len, raddr, bytes, nb))
+                    for (int o = 0; o + pat_n <= nb; o++)
+                        if (!memcmp(bytes + o, pat, size_t(pat_n)) &&
+                            !(pat_n == 8 && (o & 7) == 0)) {
+                            char lb[48];
+                            snprintf(lb, sizeof lb, "dump:0x%llx",
+                                     (unsigned long long)(raddr +
+                                                          uint64_t(o)));
+                            row(gi, lb, g);
+                        }
+            }
+            // fall through: verbatim groups may carry synthesized mem lanes
+        }
         // imported files dual-record writes (REGW + wobs token) — the wr:
         // lanes below already cover them, so skip the bare lane to avoid
         // counting one logical write twice

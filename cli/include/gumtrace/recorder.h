@@ -130,6 +130,10 @@ public:
     void imp_exec(uint32_t site_id);
     void imp_regw(int reg, uint64_t v);
     void imp_mem(bool is_write, uint64_t addr, uint8_t size);
+    // mem event WITH a known value (hexdump content observations); the import
+    // twin of the native path's EV_MEM emission in record_event
+    void imp_mem_val(bool is_write, uint64_t addr, uint8_t size,
+                     uint64_t value);
     void imp_rdval(uint32_t name_id, uint64_t v);
     void imp_rdval128(uint32_t name_id, unsigned __int128 v);
     void imp_wval(uint32_t name_id, uint64_t v);

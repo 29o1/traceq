@@ -20,8 +20,12 @@ all: gt-harness
 gt-harness: $(OBJ) $(CLI)/libgumtrace.a
 	$(CXX) $(CXXFLAGS) $(OBJ) $(CLI)/libgumtrace.a -o $@ $(LDFLAGS)
 
-$(CLI)/libgumtrace.a:
+# delegate to the cli Makefile every time: the .a's prereqs live there, so a
+# plain file rule here would link a stale archive after cli/src edits
+$(CLI)/libgumtrace.a: FORCE
 	$(MAKE) -C $(CLI) libgumtrace.a
+
+FORCE:
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@

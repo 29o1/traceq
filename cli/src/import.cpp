@@ -111,6 +111,7 @@ struct Importer {
     uint64_t last_base = 0;
     bool crlf = false;
     bool stopped = false;
+    bool in_hexdump_ = false; // verbatim lines currently inside a dump block
 
     Importer(const char* p, size_t n) : base(p), len(n), rec(arena) {}
 
@@ -344,8 +345,29 @@ struct Importer {
             }
             if (!ok) {
                 // unterminated last line included: the renderer always
-                // appends a line ending, so only VERBATIM replays it exactly
+                // appends a line ending, so only VERBATIM replays it exactly.
+                // hexdump content observations: inside a dump block each row
+                // synthesizes value-known mem READ lanes (full qwords only),
+                // recorded BEFORE its verbatim record so they ride the same
+                // group (a mem-only group never flushes on its own). The raw
+                // line is still stored verbatim — byte-exact replay is kept.
+                uint64_t raddr = 0, hlen = 0;
+                uint8_t bytes[16];
+                int nb = 0;
+                if (in_hexdump_ &&
+                    parse_hexdump_row(p, size_t(be - p), raddr, bytes, nb)) {
+                    for (int k = 0; k + 8 <= nb; k += 8) {
+                        uint64_t v;
+                        memcpy(&v, bytes + k, 8);
+                        rec.imp_mem_val(false, raddr + uint64_t(k), 8, v);
+                    }
+                } else {
+                    in_hexdump_ =
+                        parse_hexdump_header(p, size_t(be - p), raddr, hlen);
+                }
                 verbatim(p, le);
+            } else {
+                in_hexdump_ = false;
             }
             p = le;
         }
@@ -360,6 +382,80 @@ struct Importer {
 };
 
 } // namespace
+
+// "hexdump at address 0x<addr> with length 0x<len>:" — upstream dumps the
+// SOURCE buffer of a memcpy-class call right after the call line. Shared by
+// the importer (row content synthesis) and the query layer (taint bridging,
+// find-value payload scan).
+bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
+                          uint64_t& len) {
+    static const char kPre[] = "hexdump at address 0x";
+    static const char kMid[] = " with length 0x";
+    size_t i = 0;
+    auto eat = [&](const char* w, size_t l) {
+        if (i + l > n || memcmp(p + i, w, l)) return false;
+        i += l;
+        return true;
+    };
+    auto hex = [&](uint64_t& v) {
+        size_t s = i;
+        v = 0;
+        while (i < n && ((p[i] >= '0' && p[i] <= '9') ||
+                         (p[i] >= 'a' && p[i] <= 'f') ||
+                         (p[i] >= 'A' && p[i] <= 'F'))) {
+            char c = p[i++];
+            v = (v << 4) | uint64_t(c <= '9' ? c - '0'
+                                             : (c | 32) - 'a' + 10);
+        }
+        return i > s;
+    };
+    return eat(kPre, sizeof(kPre) - 1) && hex(addr) &&
+           eat(kMid, sizeof(kMid) - 1) && hex(len);
+}
+
+bool parse_hexdump_row(const char* p, size_t n, uint64_t& addr,
+                       uint8_t out[16], int& n_out) {
+    auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    size_t i = 0;
+    // address: 4..16 hex digits (the 4-digit floor keeps banner fragments
+    // like "ab cd" from parsing as rows), optional ':'
+    uint64_t a = 0;
+    int hd = 0;
+    while (i < n && hd < 16) {
+        int v = hexval(p[i]);
+        if (v < 0) break;
+        a = (a << 4) | uint64_t(v);
+        i++;
+        hd++;
+    }
+    if (hd < 4) return false;
+    if (i < n && p[i] == ':') i++;
+    if (i >= n || p[i] != ' ') return false;
+    while (i < n && p[i] == ' ') i++;
+    // 1..16 byte pairs, space-separated; '|' gutter or line ending ends it
+    int nb = 0;
+    while (i < n && nb < 16) {
+        if (p[i] == '|' || p[i] == '\r' || p[i] == '\n') break;
+        int hi = hexval(p[i]);
+        if (hi < 0 || i + 1 >= n) return false;
+        int lo = hexval(p[i + 1]);
+        if (lo < 0) return false;
+        out[nb++] = uint8_t((hi << 4) | lo);
+        i += 2;
+        if (i >= n || p[i] == '|' || p[i] == '\r' || p[i] == '\n') break;
+        if (p[i] != ' ') return false; // adjacent pairs are not the format
+        while (i < n && p[i] == ' ') i++;
+    }
+    if (!nb) return false;
+    addr = a;
+    n_out = nb;
+    return true;
+}
 
 bool import_mem(const char* p, size_t len, const std::string& out_path,
                 const RecOptions& opts_in, ImportResult& res) {
