@@ -1,13 +1,10 @@
 #pragma once
-// .gtb parsing, legacy-identical text expansion, SQLite ingest.
+// .gtb parsing and the Expander (legacy/upstream/compact/jsonl expansion).
 #include "event.h"
 #include "recorder.h"
 #include "site.h"
 #include <cstdint>
 #include <functional>
-#ifndef GT_NO_SQLITE
-#include <sqlite3.h>
-#endif
 #include <string>
 #include <vector>
 
@@ -107,17 +104,5 @@ private:
     const GtbFile& f_;
     uint64_t regs_[32] = {0};
 };
-
-// SQLite ingest. Returns rows inserted per table via out-params.
-struct IngestResult {
-    uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_svc = 0, n_ret = 0;
-};
-#ifndef GT_NO_SQLITE
-IngestResult ingest_sqlite(const GtbFile& f, const std::string& db_path);
-#endif
-
-#ifndef GT_NO_SQLITE
-sqlite3* db_open(const std::string& path, bool read_only);
-#endif
 
 } // namespace gt

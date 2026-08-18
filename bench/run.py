@@ -99,12 +99,11 @@ def main():
     os.chdir(HERE)
 
     have_py_baseline = True  # we ARE python; the text baselines are local
-    have_sql = "requires host sqlite" not in gt("query stats /dev/null")[1]
 
     R = {}
 
     # ---------------------------------------------------------------- hot path
-    print("[1/7] hot path (in-process, per-event timing)")
+    print("[1/6] hot path (in-process, per-event timing)")
     _, out = harness(
         f"hotpath --outer {OUTER} --inner {INNER} "
         f"--legacy-out {b('bench_legacy.txt')} --gtb-out {b('bench_full.gtb')}")
@@ -119,7 +118,7 @@ def main():
           f"{sz_legacy/MB:.1f} vs {sz_gtb/MB:.1f} MB")
 
     # ------------------------------------------------------- detail level scan
-    print("[2/7] detail levels (via CLI-facing recorder)")
+    print("[2/6] detail levels (via CLI-facing recorder)")
     harness(f"record --format gtb --detail mem  --outer {OUTER} --inner {INNER} "
             f"-o {b('bench_mem.gtb')}")
     harness(f"record --format gtb --detail calls --outer {OUTER} --inner {INNER} "
@@ -128,29 +127,15 @@ def main():
     print(f"      mem {sz_mem/MB:.1f} MB, calls {sz_calls/MB:.3f} MB")
 
     # -------------------------------------------------------- equivalence (T3)
-    print("[3/7] expansion equivalence (gt export vs legacy text)")
+    print("[3/6] expansion equivalence (gt export vs legacy text)")
     gt(f"export {b('bench_full.gtb')}", b("expanded.txt"))
     exp_ok = (size(b("expanded.txt")) == sz_legacy and
               subprocess.run(["cmp", "-s", b("bench_legacy.txt"),
                               b("expanded.txt")]).returncode == 0)
     print(f"      byte-identical: {exp_ok}")
 
-    # -------------------------------------------------------------- SQL ingest
-    print("[4/7] sqlite ingest")
-    ingest_ns, db_sz = 0, 0
-    if have_sql:
-        _, out = harness(f"ingest {b('bench_full.gtb')} -o {b('bench_full.db')}")
-        try:
-            ingest_ns = json.loads(out)["ingest_ns"]
-        except (json.JSONDecodeError, KeyError):
-            pass
-        db_sz = size(b("bench_full.db"))
-        print(f"      {ms(ingest_ns):.0f} ms, db {db_sz/MB:.0f} MB")
-    else:
-        print("      skipped (no sqlite in this build)")
-
     # ------------------------------------------------- variant corpus for diff
-    print("[5/7] variant corpus (diff A/B)")
+    print("[4/6] variant corpus (diff A/B)")
     harness(f"record --format text --outer {OUTER} --inner {INNER} --variant 0x2B00 "
             f"-o {b('bench_legacy_v2.txt')}")
     harness(f"record --format gtb  --outer {OUTER} --inner {INNER} --variant 0x2B00 "
@@ -161,24 +146,23 @@ def main():
     legacy_lost = hp["legacy"]["pending_bytes"]
 
     # ----------------------------------------------------------- query A/B set
-    print("[6/7] query A/B (text pipeline vs gt CLI)")
+    print("[5/6] query A/B (text pipeline vs gt CLI)")
     Q = []
 
-    if have_sql:
-        q1a, _ = sh(
-            f"grep -a 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')} | head -5; "
-            f"grep -ac 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')}",
-            b("q1a.out"), check=False)
-        q1b, _ = gt(f"query mem-writes --addr 0x{HOT_ADDR:x} --limit 5 "
-                    f"{b('bench_full.db')}", b("q1b.out"))
-        Q.append((f"writes to 0x{HOT_ADDR:x} (top5+count)", q1a, q1b))
+    q1a, _ = sh(
+        f"grep -a 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')} | head -5; "
+        f"grep -ac 'mem_w=0x{HOT_ADDR:x}' {b('bench_legacy.txt')}",
+        b("q1a.out"), check=False)
+    q1b, _ = gt(f"mem-access --addr 0x{HOT_ADDR:x} --write --limit 5 "
+                f"{b('bench_full.gtb')}", b("q1b.out"))
+    Q.append((f"writes to 0x{HOT_ADDR:x} (top5+count)", q1a, q1b))
 
-        q2a, _ = sh(f"grep -an '^call func: transform_block_0' "
-                    f"{b('bench_legacy.txt')} | sed -n 3p", b("q2a.out"),
-                    check=False)
-        q2b, _ = gt(f"query func-args --func transform_block_0 --nth 3 "
-                    f"{b('bench_full.db')}", b("q2b.out"))
-        Q.append(("3rd call args of transform_block_0", q2a, q2b))
+    q2a, _ = sh(f"grep -an '^call func: transform_block_0' "
+                f"{b('bench_legacy.txt')} | sed -n 3p", b("q2a.out"),
+                check=False)
+    q2b, _ = gt(f"func-args --func transform_block_0 --nth 3 "
+                f"{b('bench_full.gtb')}", b("q2b.out"))
+    Q.append(("3rd call args of transform_block_0", q2a, q2b))
 
     q3a, _ = sh(rf"grep -ac 'ldrb   w7, \[x4\]' {b('bench_legacy.txt')}",
                 b("q3a.out"), check=False)
@@ -197,7 +181,6 @@ def main():
                   b("q5b.out"))
     Q.append(("diff two runs", q5a, q5b))
 
-    # W3b streaming queries (no sqlite ingest on the gt side at all)
     q6a, _ = sh(f"wc -l {b('bench_legacy.txt')}; "
                 f"grep -ac 'call func:' {b('bench_legacy.txt')}",
                 b("q6a.out"), check=False)
@@ -210,7 +193,7 @@ def main():
                 b("q7a.out"), check=False)
     q7b, _ = gt(f"mem-access --addr 0x{HOT_ADDR:x} --limit 1000000 "
                 f"{b('bench_full.gtb')}", b("q7b.out"))
-    Q.append(("mem accesses of hot addr, full count (no db)", q7a, q7b))
+    Q.append(("mem accesses of hot addr, full count", q7a, q7b))
 
     q8a, _ = sh(f"grep -ac '2a00' {b('bench_legacy.txt')}", b("q8a.out"),
                 check=False)
@@ -259,7 +242,7 @@ def main():
     print(f"      diff divergence match: {diff_match} {oa} vs {ob}")
 
     # ------------------------------------------------- agent token proxy (W2)
-    print("[7/7] agent token proxy (compact vs legacy, same event window)")
+    print("[6/6] agent token proxy (compact vs legacy, same event window)")
     EVENTS_WIN = 5000
     gt(f"export --format compact --from 0 --to {EVENTS_WIN - 1} "
        f"{b('bench_full.gtb')}", b("tok_compact.txt"))
@@ -328,14 +311,6 @@ def main():
     w(f"| mem-only | {sz_mem/MB:.4g} MB | {shrink_mem:.4g}x |")
     w(f"| calls-only | {sz_calls/MB:.4g} MB | {shrink_calls:.4g}x |\n")
 
-    if have_sql and ingest_ns:
-        w(f"ingest to SQLite: {ms(ingest_ns):.4g} ms "
-          f"({hp['gtb']['events']/ms(ingest_ns)/1000.0:.4g}M events/s), "
-          f"db {db_sz/MB:.4g} MB")
-        w(f"note: the SQL layer is a convenience/index tradeoff — it costs "
-          f"~{ratio(db_sz, sz_gtb):.4g}x the compact .gtb for indexed "
-          f"querying; streaming commands (taint/diff/fold/export) run directly "
-          f"on the .gtb without it")
     w(f"site compile (transform time): {ms(hp['site_compile_ns']):.4g} ms for "
       f"{hp['sites']} sites; corpus build {ms(hp['corpus_build_ns']):.4g} ms\n")
 
@@ -345,9 +320,6 @@ def main():
     for name, a_ns, b_ns in Q:
         w(f"| {name} | {ms(a_ns):.4g} ms | {ms(b_ns):.4g} ms | "
           f"{ratio(a_ns, b_ns):.4g}x |")
-    if not have_sql:
-        w("| indexed queries (mem-writes / func-args) | n/a | n/a (host "
-          "sqlite build) | see host report |")
     w("")
 
     w("## Durability\n")
@@ -377,9 +349,7 @@ def main():
       f"{leg_bytes} B / {leg_words} tokens -> compact {c_bytes} B / "
       f"{c_words} tokens (**{ratio(leg_bytes, c_bytes):.2f}x bytes, "
       f"{ratio(leg_words, c_words):.2f}x tokens**)")
-    w("- `gt stat` / `mem-access` / `find-value` stream the raw .gtb — no "
-      "sqlite ingest step; their latencies are the last three rows of the "
-      "query table\n")
+    w("- 全部命令流式直读 .gtb，无入库步骤；查询延迟见上表\n")
 
     w("## Acceptance criteria\n")
     w("| criterion | target | actual | verdict |")
@@ -390,9 +360,9 @@ def main():
     w(f"| output size (tiered detail) | >= 20x at a usable tier | mem-only "
       f"{shrink_mem:.4g}x, calls-only {shrink_calls:.4g}x | "
       f"{'PASS' if shrink_mem >= 20 or shrink_calls >= 20 else 'FAIL'} |")
-    if have_sql and Q:
+    if Q:
         qv = ratio(Q[0][1], Q[0][2])
-        w(f"| indexed query vs grep | >= 10x | {qv:.4g}x | "
+        w(f"| mem-write query vs grep | >= 10x | {qv:.4g}x | "
           f"{'PASS' if qv >= 10 else 'FAIL'} |")
     w("| crash loss window | gtb <= 1MB, crash-safe | 0.25MB by design "
       "(T5-verified); legacy workload-dependent | PASS |")

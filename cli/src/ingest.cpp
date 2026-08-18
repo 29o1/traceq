@@ -442,6 +442,35 @@ static const char* idx_name(int ctx_idx) {
     return names[ctx_idx & 31];
 }
 
+// plan reads (pre-event values) and writes (matched against the group's
+// write records), in plan order — the same pairing expand_text uses for its
+// deferred write tail. SIMD reads have no value lane and are skipped.
+//
+// Imported groups carry the upstream-observed token values: obs = read tokens
+// (incl. mem tokens) in plan order, wobs = "-> " write tokens. When the counts
+// pair up exactly, those are the true values — register reconstruction cannot
+// know a register nobody wrote yet (imported logs have no initial context).
+// Native groups have no observations and always reconstruct.
+struct ObsMap {
+    bool use_obs, use_wobs;
+    int obs_at[8], wobs_at[8]; // plan op index -> obs/wobs slot, -1 = none
+};
+static ObsMap obs_map(const Site& s, const Group& g) {
+    ObsMap m{};
+    int n_rd = 0, n_wr = 0, k = 0, kw = 0;
+    for (uint8_t i = 0; i < s.n_ops; i++) {
+        uint8_t kd = s.ops[i].kind;
+        bool rd_kind = kd == OP_REG_R || kd == OP_MEM_R || kd == OP_MEM_W;
+        if (rd_kind) n_rd++;
+        else if (kd == OP_REG_W) n_wr++;
+        m.obs_at[i] = rd_kind ? k++ : -1;
+        m.wobs_at[i] = kd == OP_REG_W ? kw++ : -1;
+    }
+    m.use_obs = n_rd > 0 && g.n_obs == n_rd;
+    m.use_wobs = n_wr > 0 && g.n_wobs == n_wr;
+    return m;
+}
+
 uint64_t Expander::expand_text(FILE* out, uint64_t from_idx, uint64_t to_idx,
                                bool print_idx, uint64_t max_lines, uint64_t* stop_gi) {
     if (stop_gi) *stop_gi = UINT64_MAX;
@@ -528,13 +557,19 @@ uint64_t Expander::expand_text(FILE* out, uint64_t from_idx, uint64_t to_idx,
 
         bool is_write = false;
         int mem_idx = 0;
+        // imported groups carry upstream-observed read values: prefer them over
+        // the write-history shadow, which goes stale across unrecorded calls
+        const ObsMap om = obs_map(s, g);
         for (uint8_t i = 0; i < s.n_ops; i++) {
             const OpPlan& op = s.ops[i];
             if (op.kind == OP_REG_R) {
                 if (op.ctx_idx < 0) continue; // SIMD dep-only plan entry: no value lane
                 line.append(idx_name(op.ctx_idx));
                 line.append("=0x");
-                emit_hex64(line, op.ctx_idx == 31 ? regs_[31] : regs_[op.ctx_idx & 31]);
+                emit_hex64(line, om.use_obs ? uint64_t(g.obs[om.obs_at[i]].val)
+                                            : op.ctx_idx == 31
+                                   ? regs_[31]
+                                   : regs_[op.ctx_idx & 31]);
                 line.append(" ");
             } else if (op.kind == OP_REG_W) {
                 is_write = true;
@@ -544,8 +579,11 @@ uint64_t Expander::expand_text(FILE* out, uint64_t from_idx, uint64_t to_idx,
                     if (op.base_ctx_idx >= 0) {
                         line.append(idx_name(op.base_ctx_idx));
                         line.append("=0x");
-                        emit_hex64(line, op.base_ctx_idx == 31 ? regs_[31]
-                                                               : regs_[op.base_ctx_idx & 31]);
+                        emit_hex64(line, om.use_obs
+                                             ? uint64_t(g.obs[om.obs_at[i]].val)
+                                             : op.base_ctx_idx == 31
+                                                   ? regs_[31]
+                                                   : regs_[op.base_ctx_idx & 31]);
                         line.append(" ");
                     }
                     line.append(op.kind == OP_MEM_W ? "mem_w=0x" : "mem_r=0x");
@@ -743,35 +781,6 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
 // ---------------------------------------------------------------------------
 struct AgentRegVal { int ctx; uint64_t val; };
 struct AgentMemVal { bool is_w; uint64_t addr; uint64_t val; bool known; };
-
-// plan reads (pre-event values) and writes (matched against the group's
-// write records), in plan order — the same pairing expand_text uses for its
-// deferred write tail. SIMD reads have no value lane and are skipped.
-//
-// Imported groups carry the upstream-observed token values: obs = read tokens
-// (incl. mem tokens) in plan order, wobs = "-> " write tokens. When the counts
-// pair up exactly, those are the true values — register reconstruction cannot
-// know a register nobody wrote yet (imported logs have no initial context).
-// Native groups have no observations and always reconstruct.
-struct ObsMap {
-    bool use_obs, use_wobs;
-    int obs_at[8], wobs_at[8]; // plan op index -> obs/wobs slot, -1 = none
-};
-static ObsMap obs_map(const Site& s, const Group& g) {
-    ObsMap m{};
-    int n_rd = 0, n_wr = 0, k = 0, kw = 0;
-    for (uint8_t i = 0; i < s.n_ops; i++) {
-        uint8_t kd = s.ops[i].kind;
-        bool rd_kind = kd == OP_REG_R || kd == OP_MEM_R || kd == OP_MEM_W;
-        if (rd_kind) n_rd++;
-        else if (kd == OP_REG_W) n_wr++;
-        m.obs_at[i] = rd_kind ? k++ : -1;
-        m.wobs_at[i] = kd == OP_REG_W ? kw++ : -1;
-    }
-    m.use_obs = n_rd > 0 && g.n_obs == n_rd;
-    m.use_wobs = n_wr > 0 && g.n_wobs == n_wr;
-    return m;
-}
 
 static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
                        std::vector<AgentRegVal>& rd, std::vector<AgentRegVal>& wr) {
@@ -1062,207 +1071,5 @@ uint64_t Expander::expand_jsonl(FILE* out, uint64_t from_idx, uint64_t to_idx,
                                 uint64_t max_lines, uint64_t* stop_gi) {
     return expand_agent(f_, *this, out, true, from_idx, to_idx, max_lines, stop_gi);
 }
-
-// ---------------------------------------------------------------------------
-// SQLite ingest
-// ---------------------------------------------------------------------------
-#ifndef GT_NO_SQLITE
-
-sqlite3* db_open(const std::string& path, bool read_only) {
-    sqlite3* db = nullptr;
-    int flags = read_only ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE;
-    if (sqlite3_open_v2(path.c_str(), &db, flags, nullptr) != SQLITE_OK) return nullptr;
-    sqlite3_exec(db, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-65536;",
-                 nullptr, nullptr, nullptr);
-    return db;
-}
-
-static int op_base_of(const Site& s, const MemOp& m) {
-    (void)m;
-    for (uint8_t i = 0; i < s.n_ops; i++)
-        if (s.ops[i].kind == OP_MEM_R || s.ops[i].kind == OP_MEM_W)
-            return s.ops[i].base_ctx_idx;
-    return -1;
-}
-
-IngestResult ingest_sqlite(const GtbFile& f, const std::string& db_path) {
-    sqlite3* db = db_open(db_path, false);
-    IngestResult r;
-    if (!db) return r;
-    // SQLite has no multi-table DROP; each object needs its own statement.
-    // Views must be dropped explicitly (DROP TABLE removes a table's indexes
-    // but not views built on it), otherwise re-ingesting into an existing db
-    // fails at CREATE VIEW and leaves stale rows behind.
-    static const char* kResetSchema =
-        "DROP VIEW  IF EXISTS v_func_stats;"
-        "DROP VIEW  IF EXISTS v_mem_hot;"
-        "DROP TABLE IF EXISTS meta;"
-        "DROP TABLE IF EXISTS insn;"
-        "DROP TABLE IF EXISTS exec;"
-        "DROP TABLE IF EXISTS regw;"
-        "DROP TABLE IF EXISTS mem;"
-        "DROP TABLE IF EXISTS call;"
-        "DROP TABLE IF EXISTS svc;"
-        "DROP TABLE IF EXISTS ret;";
-    char* err = nullptr;
-    if (sqlite3_exec(db, kResetSchema, nullptr, nullptr, &err) != SQLITE_OK) {
-        fprintf(stderr, "ingest: schema reset failed: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        sqlite3_close(db);
-        return r;
-    }
-    sqlite3_exec(db, "BEGIN;", nullptr, nullptr, nullptr);
-    if (sqlite3_exec(db,
-        "CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);"
-        "CREATE TABLE insn(id INTEGER PRIMARY KEY, off INTEGER, txt TEXT, kind INTEGER, func TEXT);"
-        "CREATE TABLE exec(ev INTEGER PRIMARY KEY, site INTEGER);"
-        "CREATE TABLE regw(ev INTEGER, reg INTEGER, val INTEGER);"
-        "CREATE TABLE mem(ev INTEGER, is_w INTEGER, addr INTEGER, size INTEGER, val INTEGER);"
-        "CREATE TABLE call(ev INTEGER PRIMARY KEY, site INTEGER, sym TEXT, x0 INTEGER, x1 INTEGER, x2 INTEGER, x3 INTEGER);"
-        "CREATE TABLE svc(ev INTEGER PRIMARY KEY, num INTEGER, nm TEXT, x0 INTEGER, x1 INTEGER, x2 INTEGER);"
-        "CREATE TABLE ret(ev INTEGER PRIMARY KEY, x0 INTEGER);",
-        nullptr, nullptr, &err) != SQLITE_OK) {
-        fprintf(stderr, "ingest: schema create failed: %s\n", err ? err : "?");
-        sqlite3_free(err);
-        sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, nullptr);
-        sqlite3_close(db);
-        return r;
-    }
-
-    sqlite3_stmt *st_meta, *st_insn, *st_exec, *st_regw, *st_mem, *st_call, *st_svc, *st_ret;
-    sqlite3_prepare_v2(db, "INSERT OR REPLACE INTO meta VALUES(?,?)", -1, &st_meta, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO insn VALUES(?,?,?,?,?)", -1, &st_insn, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO exec VALUES(?,?)", -1, &st_exec, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO regw VALUES(?,?,?)", -1, &st_regw, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO mem VALUES(?,?,?,?,?)", -1, &st_mem, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO call VALUES(?,?,?,?,?,?,?)", -1, &st_call, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO svc VALUES(?,?,?,?,?,?)", -1, &st_svc, nullptr);
-    sqlite3_prepare_v2(db, "INSERT INTO ret VALUES(?,?)", -1, &st_ret, nullptr);
-
-    auto bind_txt = [](sqlite3_stmt* s, int i, const std::string& v) {
-        sqlite3_bind_text(s, i, v.c_str(), int(v.size()), SQLITE_TRANSIENT);
-    };
-
-    // static tables
-    for (uint32_t i = 0; i < f.arena.size(); i++) {
-        const Site& s = f.arena.get(i);
-        sqlite3_reset(st_insn);
-        sqlite3_bind_int(st_insn, 1, int(i));
-        sqlite3_bind_int64(st_insn, 2, sqlite3_int64(s.addr));
-        std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
-        bind_txt(st_insn, 3, txt);
-        sqlite3_bind_int(st_insn, 4, int(s.kind));
-        if (s.func_sym >= 0) bind_txt(st_insn, 5, f.arena.str(uint32_t(s.func_sym)));
-        else sqlite3_bind_null(st_insn, 5);
-        sqlite3_step(st_insn);
-    }
-    sqlite3_reset(st_meta);
-    bind_txt(st_meta, 1, "module");
-    bind_txt(st_meta, 2, f.modules.empty() ? "?" : f.modules[0]);
-    sqlite3_step(st_meta);
-
-    // event stream
-    Expander ex(f);
-    const uint64_t* rf = ex.regfile();
-    auto store_value_of = [&](const Group& g, const MemOp& m) -> uint64_t {
-        // first plan REG_R that is not the mem base/index is the stored
-        // register; its pre-event value equals the stored value
-        if (!g.has_exec) return 0;
-        const Site& s = f.arena.get(g.site_id);
-        for (uint8_t i = 0; i < s.n_ops; i++) {
-            const OpPlan& op = s.ops[i];
-            if (op.kind != OP_REG_R || op.ctx_idx < 0) continue;
-            if (op.ctx_idx == op_base_of(s, m)) continue;
-            return op.ctx_idx == 31 ? rf[31] : rf[op.ctx_idx & 31];
-        }
-        return 0;
-    };
-    ex.for_each([&](uint64_t gi, const Group& g) {
-        uint64_t ev = gi + 1;
-        if (g.has_exec) {
-            sqlite3_reset(st_exec);
-            sqlite3_bind_int64(st_exec, 1, sqlite3_int64(ev));
-            sqlite3_bind_int(st_exec, 2, int(g.site_id));
-            sqlite3_step(st_exec);
-            r.n_exec++;
-        }
-        for (int i = 0; i < g.n_wr; i++) {
-            sqlite3_reset(st_regw);
-            sqlite3_bind_int64(st_regw, 1, sqlite3_int64(ev));
-            sqlite3_bind_int(st_regw, 2, g.wr_id[i]);
-            sqlite3_bind_int64(st_regw, 3, sqlite3_int64(g.wr_val[i]));
-            sqlite3_step(st_regw);
-            r.n_regw++;
-        }
-        for (int i = 0; i < g.n_mem; i++) {
-            MemOp m = g.mem[i];
-            if (!m.value_known) m.value = store_value_of(g, m);
-            sqlite3_reset(st_mem);
-            sqlite3_bind_int64(st_mem, 1, sqlite3_int64(ev));
-            sqlite3_bind_int(st_mem, 2, m.is_write ? 1 : 0);
-            sqlite3_bind_int64(st_mem, 3, sqlite3_int64(m.addr));
-            sqlite3_bind_int(st_mem, 4, m.size);
-            sqlite3_bind_int64(st_mem, 5, sqlite3_int64(m.value));
-            sqlite3_step(st_mem);
-            r.n_mem++;
-        }
-        if (g.is_call) {
-            sqlite3_reset(st_call);
-            sqlite3_bind_int64(st_call, 1, sqlite3_int64(ev));
-            sqlite3_bind_int(st_call, 2, int(g.site_id));
-            if (g.call_name) bind_txt(st_call, 3, g.call_name);
-            else sqlite3_bind_null(st_call, 3);
-            for (int i = 0; i < 4; i++)
-                sqlite3_bind_int64(st_call, 4 + i, sqlite3_int64(g.args[i]));
-            sqlite3_step(st_call);
-            r.n_call++;
-        }
-        if (g.is_svc) {
-            sqlite3_reset(st_svc);
-            sqlite3_bind_int64(st_svc, 1, sqlite3_int64(ev));
-            sqlite3_bind_int64(st_svc, 2, sqlite3_int64(g.svc_num));
-            const char* nm = svc_name(g.svc_num);
-            if (nm) bind_txt(st_svc, 3, nm); else sqlite3_bind_null(st_svc, 3);
-            for (int i = 0; i < 3; i++)
-                sqlite3_bind_int64(st_svc, 4 + i, sqlite3_int64(g.svc_args[i]));
-            sqlite3_step(st_svc);
-            r.n_svc++;
-        }
-        if (g.is_ret) {
-            sqlite3_reset(st_ret);
-            sqlite3_bind_int64(st_ret, 1, sqlite3_int64(ev));
-            sqlite3_bind_int64(st_ret, 2, sqlite3_int64(g.ret_val));
-            sqlite3_step(st_ret);
-            r.n_ret++;
-        }
-        return true;
-    });
-    sqlite3_exec(db, "COMMIT;", nullptr, nullptr, nullptr);
-
-    // indexes built after the bulk load (2-3x faster ingest)
-    sqlite3_exec(db,
-        "CREATE INDEX i_regw_ev ON regw(ev);"
-        "CREATE INDEX i_mem_addr ON mem(addr);"
-        "CREATE INDEX i_mem_ev ON mem(ev);"
-        "CREATE INDEX i_call_sym ON call(sym);",
-        nullptr, nullptr, nullptr);
-
-    // precomputed aggregates for agents
-    sqlite3_exec(db,
-        "CREATE VIEW v_func_stats AS "
-        "SELECT i.func AS func, COUNT(*) AS execs FROM exec e JOIN insn i ON i.id=e.site GROUP BY i.func;"
-        "CREATE VIEW v_mem_hot AS "
-        "SELECT addr, is_w, COUNT(*) AS hits FROM mem GROUP BY addr, is_w ORDER BY hits DESC;",
-        nullptr, nullptr, nullptr);
-
-    sqlite3_finalize(st_meta); sqlite3_finalize(st_insn); sqlite3_finalize(st_exec);
-    sqlite3_finalize(st_regw); sqlite3_finalize(st_mem); sqlite3_finalize(st_call);
-    sqlite3_finalize(st_svc); sqlite3_finalize(st_ret);
-    sqlite3_close(db);
-    return r;
-}
-
-
-#endif // GT_NO_SQLITE
 
 } // namespace gt

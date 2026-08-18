@@ -18,7 +18,6 @@
 #include "harness.h"
 #include "legacy.h"
 #include <gumtrace/common.h>
-#include <gumtrace/ingest.h>
 #include <gumtrace/queries.h>
 #include <gumtrace/recorder.h>
 #include <gumtrace/site.h>
@@ -220,27 +219,6 @@ int cmd_hotpath(int argc, char** argv) {
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// ingest: host-side SQLite index build (timed, for the report)
-// ---------------------------------------------------------------------------
-#ifndef GT_NO_SQLITE
-int cmd_ingest_timed(int argc, char** argv) {
-    std::string in, db = "trace.db";
-    for (int i = 0; i < argc; i++) {
-        if (!strcmp(argv[i], "-o") && i + 1 < argc) db = argv[++i];
-        else if (argv[i][0] != '-') in = argv[i];
-    }
-    GtbFile f;
-    if (!f.load(in)) { fprintf(stderr, "load %s failed\n", in.c_str()); return 1; }
-    uint64_t t0 = now_ns();
-    IngestResult r = ingest_sqlite(f, db);
-    printf("{\"ingest_ns\":%llu,\"exec\":%llu,\"regw\":%llu,\"mem\":%llu}\n",
-           (unsigned long long)(now_ns() - t0), (unsigned long long)r.n_exec,
-           (unsigned long long)r.n_regw, (unsigned long long)r.n_mem);
-    return 0;
-}
-#endif
-
 void usage() {
     printf(
         "gt-harness — GumTrace-ng benchmark event source + in-process timer\n"
@@ -249,7 +227,6 @@ void usage() {
         "           [--variant V] [--events N] [--max-mb N] [--max-ms N]\n"
         "           [--ring-chunks N --trigger FUNC] [--crash-at N] -o FILE\n"
         "  hotpath  [--outer N] [--inner N] [--legacy-out F] [--gtb-out F]   -> JSON\n"
-        "  ingest   trace.gtb -o trace.db                                    -> JSON\n"
         "  selftest\n"
         "\n"
         "Driven by run.py; the queryable side is the `gt` CLI from ../cli.\n");
@@ -263,9 +240,6 @@ int main(int argc, char** argv) {
     if (cmd == "record") return cmd_record(argc - 2, argv + 2);
     if (cmd == "hotpath") return cmd_hotpath(argc - 2, argv + 2);
     if (cmd == "selftest") return cmd_selftest();
-#ifndef GT_NO_SQLITE
-    if (cmd == "ingest") return cmd_ingest_timed(argc - 2, argv + 2);
-#endif
     usage();
     return 2;
 }

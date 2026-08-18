@@ -8,13 +8,7 @@ ifneq ($(CAPSTONE_PREFIX),)
   CAP_LDFLAGS := -L$(CAPSTONE_PREFIX)/lib -lcapstone
 endif
 
-ifndef GT_NO_SQLITE
-  SQL_LDFLAGS := -lsqlite3
-else
-  CXXFLAGS += -DGT_NO_SQLITE
-endif
-
-LDFLAGS := $(SQL_LDFLAGS) $(CAP_LDFLAGS)
+LDFLAGS := $(CAP_LDFLAGS)
 
 SRC := harness/corpus.cpp harness/legacy.cpp harness/selftest.cpp harness/main.cpp
 OBJ := $(SRC:.cpp=.o)

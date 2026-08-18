@@ -8,15 +8,7 @@ ifneq ($(CAPSTONE_PREFIX),)
   CAP_LDFLAGS := -L$(CAPSTONE_PREFIX)/lib -lcapstone
 endif
 
-# The SQL layer is a host-side convenience; -DGT_NO_SQLITE drops it (used for
-# the Android cross build, where only recording + streaming queries are needed).
-ifndef GT_NO_SQLITE
-  SQL_LDFLAGS := -lsqlite3
-else
-  CXXFLAGS += -DGT_NO_SQLITE
-endif
-
-LDFLAGS := $(SQL_LDFLAGS) $(CAP_LDFLAGS)
+LDFLAGS := $(CAP_LDFLAGS)
 
 LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp src/import.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)

@@ -1,380 +1,18 @@
 #include <gumtrace/queries.h>
 #include <gumtrace/ingest.h>
-#ifndef GT_NO_SQLITE
-#define GT_SQLITE_Q 1
-#else
-#define GT_SQLITE_Q 0
-#endif
 #include <gumtrace/site.h>
 #include "emit.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 using namespace gt;
-
-// ---------------------------------------------------------------------------
-// shared helpers for the dual-mode (text / JSON Lines) contract
-// ---------------------------------------------------------------------------
-// db/gtb path counterpart: "<x>.db" -> "<x>.gtb" and back. When the sibling
-// does not exist the caller substitutes a "<trace.gtb>" placeholder — the
-// suggestion stays copy-executable after the agent fills the real path.
-static std::string sibling_path(const std::string& in, const char* from, const char* to,
-                                const char* placeholder) {
-    size_t n = strlen(from);
-    if (in.size() > n && in.compare(in.size() - n, n, from) == 0) {
-        std::string s = in.substr(0, in.size() - n) + to;
-        FILE* probe = fopen(s.c_str(), "rb");
-        if (probe) { fclose(probe); return s; }
-    }
-    return placeholder;
-}
-
-// ---------------------------------------------------------------------------
-// SQL-backed queries
-// ---------------------------------------------------------------------------
-#if GT_SQLITE_Q
-int q_stats(const std::string& dbp, uint64_t offset, bool json) {
-    (void)offset; // stats is a fixed-shape summary; nothing to page
-    sqlite3* db = db_open(dbp, true);
-    if (!db) { fprintf(stderr, "cannot open %s\n", dbp.c_str()); return 1; }
-    sqlite3_exec(db, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;", nullptr, nullptr, nullptr);
-    char* err = nullptr;
-    std::string module = "?";
-    sqlite3_exec(db, "SELECT v FROM meta WHERE k='module';",
-                 [](void* u, int c, char** v, char**) -> int {
-                     if (c >= 1 && v[0]) *static_cast<std::string*>(u) = v[0];
-                     return 0;
-                 }, &module, &err);
-    struct FuncRow { std::string name; uint64_t execs; };
-    struct MemRow { std::string addr; bool is_w; uint64_t hits; };
-    std::vector<FuncRow> funcs;
-    std::vector<MemRow> mems;
-    uint64_t total_funcs = 0, total_mems = 0;
-    {
-        sqlite3_stmt* s;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM v_func_stats", -1, &s, nullptr);
-        if (sqlite3_step(s) == SQLITE_ROW) total_funcs = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM v_mem_hot", -1, &s, nullptr);
-        if (sqlite3_step(s) == SQLITE_ROW) total_mems = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    {
-        sqlite3_stmt* s;
-        sqlite3_prepare_v2(db,
-            "SELECT func, execs FROM v_func_stats ORDER BY execs DESC LIMIT 10;", -1, &s, nullptr);
-        while (sqlite3_step(s) == SQLITE_ROW) {
-            const char* fn = (const char*)sqlite3_column_text(s, 0);
-            funcs.push_back({fn ? fn : "?", uint64_t(sqlite3_column_int64(s, 1))});
-        }
-        sqlite3_finalize(s);
-        sqlite3_prepare_v2(db,
-            "SELECT printf('0x%x',addr), is_w, hits FROM v_mem_hot LIMIT 10;", -1, &s, nullptr);
-        while (sqlite3_step(s) == SQLITE_ROW) {
-            const char* a = (const char*)sqlite3_column_text(s, 0);
-            mems.push_back({a ? a : "?", sqlite3_column_int(s, 1) == 1,
-                            uint64_t(sqlite3_column_int64(s, 2))});
-        }
-        sqlite3_finalize(s);
-    }
-    if (err) { sqlite3_free(err); err = nullptr; }
-    sqlite3_close(db);
-
-    if (json) {
-        std::string o;
-        emit::kv_str(o, "module", module);
-        o += ",\"counts\":{";
-        const std::pair<const char*, const char*> tabs[] = {
-            {"exec", "SELECT COUNT(*) FROM exec"}, {"regw", "SELECT COUNT(*) FROM regw"},
-            {"mem", "SELECT COUNT(*) FROM mem"}, {"call", "SELECT COUNT(*) FROM call"},
-            {"svc", "SELECT COUNT(*) FROM svc"}, {"insns", "SELECT COUNT(*) FROM insn"}};
-        // counts need the db again — reopen instead of keeping two paths open
-        sqlite3* db2 = db_open(dbp, true);
-        for (size_t i = 0; i < 6; i++) {
-            sqlite3_stmt* s = nullptr;
-            uint64_t r = 0;
-            if (db2 && sqlite3_prepare_v2(db2, tabs[i].second, -1, &s, nullptr) == SQLITE_OK &&
-                sqlite3_step(s) == SQLITE_ROW)
-                r = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-            if (i) o += ',';
-            emit::kv_u64(o, tabs[i].first, r);
-        }
-        if (db2) sqlite3_close(db2);
-        o += "},\"funcs\":[";
-        for (size_t i = 0; i < funcs.size(); i++) {
-            if (i) o += ',';
-            char b[96];
-            snprintf(b, sizeof b, "[\"%s\",%llu]", funcs[i].name.c_str(),
-                     (unsigned long long)funcs[i].execs);
-            o += b;
-        }
-        o += "],\"mems\":[";
-        for (size_t i = 0; i < mems.size(); i++) {
-            if (i) o += ',';
-            o += "[\"" + mems[i].addr + "\",\"" + (mems[i].is_w ? "W" : "R") + "\"," +
-                 std::to_string(mems[i].hits) + ']';
-        }
-        o += "]";
-        printf("{\"stats\":{%s}}\n", o.c_str());
-    } else {
-        printf("== trace stats ==\n");
-        printf("module: %s\n", module.c_str());
-        sqlite3* db2 = db_open(dbp, true);
-        const std::pair<const char*, const char*> tabs[] = {
-            {"exec", "SELECT COUNT(*) FROM exec"}, {"regw", "SELECT COUNT(*) FROM regw"},
-            {"mem", "SELECT COUNT(*) FROM mem"}, {"call", "SELECT COUNT(*) FROM call"},
-            {"svc", "SELECT COUNT(*) FROM svc"}, {"insns", "SELECT COUNT(*) FROM insn"}};
-        for (auto& t : tabs) {
-            sqlite3_stmt* s = nullptr;
-            uint64_t r = 0;
-            if (db2 && sqlite3_prepare_v2(db2, t.second, -1, &s, nullptr) == SQLITE_OK &&
-                sqlite3_step(s) == SQLITE_ROW)
-                r = sqlite3_column_int64(s, 0);
-            sqlite3_finalize(s);
-            printf("%-8s %llu\n", t.first, (unsigned long long)r);
-        }
-        if (db2) sqlite3_close(db2);
-        printf("\ntop functions by executions:\n");
-        for (auto& f : funcs) printf("  %-28s %llu\n", f.name.c_str(), (unsigned long long)f.execs);
-        printf("\nmemory hotspots:\n");
-        for (auto& m : mems)
-            printf("  %-14s %s  x%llu\n", m.addr.c_str(), m.is_w ? "W" : "R",
-                   (unsigned long long)m.hits);
-    }
-    emit::Meta meta;
-    meta.total = total_funcs + total_mems;
-    meta.shown = funcs.size() + mems.size();
-    meta.truncated = meta.total > meta.shown;
-    if (!funcs.empty()) {
-        char b[256];
-        snprintf(b, sizeof b, "gt calltree --func %s %s", funcs[0].name.c_str(), dbp.c_str());
-        meta.suggest.push_back(b);
-    }
-    if (!mems.empty()) {
-        char b[256];
-        snprintf(b, sizeof b, "gt query mem-writes --addr %s --limit 10 %s",
-                 mems[0].addr.c_str(), dbp.c_str());
-        meta.suggest.push_back(b);
-    }
-    emit::finish(meta, json);
-    return 0;
-}
-
-#endif // stats
-#if GT_SQLITE_Q
-int q_mem_writes(const std::string& dbp, uint64_t addr, int limit, uint64_t offset, bool json) {
-    sqlite3* db = db_open(dbp, true);
-    if (!db) return 1;
-    sqlite3_exec(db, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;", nullptr, nullptr, nullptr);
-    uint64_t total = 0;
-    {
-        sqlite3_stmt* s;
-        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM mem WHERE addr=?1", -1, &s, nullptr);
-        sqlite3_bind_int64(s, 1, sqlite3_int64(addr));
-        if (sqlite3_step(s) == SQLITE_ROW) total = sqlite3_column_int64(s, 0);
-        sqlite3_finalize(s);
-    }
-    struct Row {
-        uint64_t ev; bool is_w; int size; uint64_t val; bool has_off; uint64_t off;
-        std::string txt;
-    };
-    std::vector<Row> rows;
-    sqlite3_stmt* s;
-    sqlite3_prepare_v2(db,
-        "SELECT m.ev, m.is_w, m.size, m.val, i.off, i.txt "
-        "FROM mem m LEFT JOIN exec e ON e.ev=m.ev LEFT JOIN insn i ON i.id=e.site "
-        "WHERE m.addr=?1 ORDER BY m.ev LIMIT ?2 OFFSET ?3;", -1, &s, nullptr);
-    sqlite3_bind_int64(s, 1, sqlite3_int64(addr));
-    sqlite3_bind_int(s, 2, limit);
-    sqlite3_bind_int64(s, 3, sqlite3_int64(offset));
-    bool txt_null = false;
-    while (sqlite3_step(s) == SQLITE_ROW) {
-        Row r{};
-        r.ev = sqlite3_column_int64(s, 0);
-        r.is_w = sqlite3_column_int(s, 1) == 1;
-        r.size = sqlite3_column_int(s, 2);
-        r.val = uint64_t(sqlite3_column_int64(s, 3));
-        r.has_off = sqlite3_column_type(s, 4) != SQLITE_NULL;
-        r.off = r.has_off ? uint64_t(sqlite3_column_int64(s, 4)) : 0;
-        const char* t = (const char*)sqlite3_column_text(s, 5);
-        if (t) r.txt = t; else txt_null = true;
-        rows.push_back(r);
-    }
-    sqlite3_finalize(s);
-    sqlite3_close(db);
-
-    if (json) {
-        for (auto& r : rows) {
-            std::string o;
-            emit::kv_u64(o, "ev", r.ev);
-            o += ',';
-            emit::kv_bool(o, "w", r.is_w);
-            o += ',';
-            emit::kv_u64(o, "size", uint64_t(r.size));
-            o += ',';
-            emit::kv_hex(o, "val", r.val);
-            if (r.has_off) { o += ','; emit::kv_hex(o, "off", r.off); }
-            if (!r.txt.empty()) { o += ','; emit::kv_str(o, "txt", r.txt); }
-            printf("{\"access\":{%s}}\n", o.c_str());
-        }
-    } else {
-        printf("accesses to 0x%llx (total %llu):\n", (unsigned long long)addr,
-               (unsigned long long)total);
-        for (auto& r : rows)
-            printf("  ev=%-8llu %s size=%d val=0x%llx  [off 0x%llx] %s\n",
-                   (unsigned long long)r.ev, r.is_w ? "W" : "R", r.size,
-                   (unsigned long long)r.val, (unsigned long long)r.off, r.txt.c_str());
-    }
-    (void)txt_null;
-    emit::Meta meta;
-    meta.total = total;
-    meta.shown = offset + rows.size();
-    meta.truncated = meta.shown < total;
-    if (meta.truncated) {
-        char b[256];
-        snprintf(b, sizeof b, "gt query mem-writes --addr 0x%llx --limit %d --offset %llu %s",
-                 (unsigned long long)addr, limit, (unsigned long long)meta.shown, dbp.c_str());
-        meta.next = b;
-    }
-    if (!rows.empty()) {
-        char b[256];
-        snprintf(b, sizeof b, "gt taint --seed-addr 0x%llx --back %s",
-                 (unsigned long long)addr,
-                 sibling_path(dbp, ".db", ".gtb", "<trace.gtb>").c_str());
-        meta.suggest.push_back(b);
-    }
-    emit::finish(meta, json);
-    return 0;
-}
-
-#endif // mem_writes
-#if GT_SQLITE_Q
-int q_func_args(const std::string& dbp, const std::string& func, int nth, int limit,
-                uint64_t offset, bool json) {
-    sqlite3* db = db_open(dbp, true);
-    if (!db) return 1;
-    sqlite3_exec(db, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;", nullptr, nullptr, nullptr);
-    // pair calls with their true (stack-matched) returns
-    struct Row { uint64_t ev; uint64_t x[4]; uint64_t ret; uint64_t ret_x0; bool has_ret; };
-    std::vector<Row> rows;
-    {
-        std::vector<std::pair<uint64_t, Row>> calls; // ev -> row
-        sqlite3_stmt* s;
-        sqlite3_prepare_v2(db, "SELECT ev, x0, x1, x2, x3 FROM call WHERE sym=?1 ORDER BY ev",
-                           -1, &s, nullptr);
-        sqlite3_bind_text(s, 1, func.c_str(), int(func.size()), SQLITE_TRANSIENT);
-        while (sqlite3_step(s) == SQLITE_ROW) {
-            Row r{};
-            r.ev = sqlite3_column_int64(s, 0);
-            for (int i = 0; i < 4; i++) r.x[i] = uint64_t(sqlite3_column_int64(s, 1 + i));
-            calls.push_back({r.ev, r});
-        }
-        sqlite3_finalize(s);
-        std::unordered_set<uint64_t> call_ev;
-        for (auto& c : calls) call_ev.insert(c.first);
-        // walk all calls + rets to pair (LIFO)
-        sqlite3_stmt *sc, *sr;
-        sqlite3_prepare_v2(db, "SELECT ev, sym FROM call ORDER BY ev", -1, &sc, nullptr);
-        sqlite3_prepare_v2(db, "SELECT ev, x0 FROM ret ORDER BY ev", -1, &sr, nullptr);
-        std::vector<std::pair<uint64_t, uint64_t>> stack; // (call_ev, ret_ev)
-        bool have_c = sqlite3_step(sc) == SQLITE_ROW;
-        bool have_r = sqlite3_step(sr) == SQLITE_ROW;
-        std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> ret_of; // call_ev -> (ret_ev, x0)
-        while (have_c || have_r) {
-            uint64_t cev = have_c ? sqlite3_column_int64(sc, 0) : UINT64_MAX;
-            uint64_t rev = have_r ? sqlite3_column_int64(sr, 0) : UINT64_MAX;
-            if (cev < rev) {
-                stack.push_back({cev, 0});
-                have_c = sqlite3_step(sc) == SQLITE_ROW;
-            } else {
-                if (!stack.empty()) {
-                    auto pr = stack.back();
-                    stack.pop_back();
-                    if (call_ev.count(pr.first))
-                        ret_of[pr.first] = {rev, uint64_t(sqlite3_column_int64(sr, 1))};
-                }
-                have_r = sqlite3_step(sr) == SQLITE_ROW;
-            }
-        }
-        sqlite3_finalize(sc);
-        sqlite3_finalize(sr);
-        for (auto& c : calls) {
-            auto it = ret_of.find(c.first);
-            c.second.has_ret = it != ret_of.end();
-            c.second.ret = it == ret_of.end() ? 0 : it->second.first;
-            c.second.ret_x0 = it == ret_of.end() ? 0 : it->second.second;
-            rows.push_back(c.second);
-        }
-    }
-    sqlite3_close(db);
-
-    size_t base = nth > 0 ? size_t(nth - 1) : size_t(offset); // --nth wins over --offset
-    size_t to = nth > 0 ? size_t(nth) : rows.size();
-    if (nth <= 0 && limit > 0 && base + size_t(limit) < to) to = base + size_t(limit);
-    uint64_t shown = 0;
-    if (json) {
-        for (size_t i = base; i < to && i < rows.size(); i++, shown++) {
-            std::string o;
-            emit::kv_u64(o, "n", i + 1);
-            o += ',';
-            emit::kv_u64(o, "ev", rows[i].ev);
-            o += ",\"args\":[";
-            for (int k = 0; k < 4; k++) {
-                if (k) o += ',';
-                o += '"' + emit::hex64(rows[i].x[k]) + '"';
-            }
-            o += ']';
-            if (rows[i].has_ret) {
-                o += ',';
-                emit::kv_u64(o, "ret_ev", rows[i].ret);
-                o += ',';
-                emit::kv_hex(o, "ret_x0", rows[i].ret_x0);
-            }
-            printf("{\"call\":{%s}}\n", o.c_str());
-        }
-    } else {
-        printf("calls to %s: %llu total\n", func.c_str(), (unsigned long long)rows.size());
-        for (size_t i = base; i < to && i < rows.size(); i++, shown++) {
-            printf("  #%-6llu ev=%-8llu x0=0x%-10llx x1=0x%-10llx x2=0x%-10llx x3=0x%-10llx",
-                   (unsigned long long)(i + 1), (unsigned long long)rows[i].ev,
-                   (unsigned long long)rows[i].x[0], (unsigned long long)rows[i].x[1],
-                   (unsigned long long)rows[i].x[2], (unsigned long long)rows[i].x[3]);
-            if (rows[i].has_ret) printf(" -> ret ev=%llu x0=0x%llx", (unsigned long long)rows[i].ret,
-                                        (unsigned long long)rows[i].ret_x0);
-            printf("\n");
-        }
-    }
-    emit::Meta meta;
-    meta.total = rows.size();
-    meta.shown = base + shown;
-    meta.truncated = meta.shown < rows.size();
-    if (meta.truncated && nth <= 0) {
-        char b[256];
-        snprintf(b, sizeof b, "gt query func-args --func %s --limit %d --offset %llu %s",
-                 func.c_str(), limit, (unsigned long long)meta.shown, dbp.c_str());
-        meta.next = b;
-    }
-    if (!rows.empty()) {
-        uint64_t ev0 = rows[std::min(base, rows.size() - 1)].ev;
-        char b[256];
-        uint64_t lo = ev0 > 5 ? ev0 - 5 : 0;
-        snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)lo, (unsigned long long)(ev0 + 5),
-                 sibling_path(dbp, ".db", ".gtb", "<trace.gtb>").c_str());
-        meta.suggest.push_back(b);
-    }
-    emit::finish(meta, json);
-    return 0;
-}
-
-#endif // func_args
 
 // ---------------------------------------------------------------------------
 // taint (gtb-based stream walk)
@@ -417,6 +55,10 @@ struct TaintRec {  // compact per-group record for backward walks
     uint32_t site_id;  // 0xFFFFFFFF for non-exec groups (call/svc/ret-only)
     uint8_t n_mem;
     struct { uint64_t addr; bool is_write; } mem[2];
+};
+
+struct CopyRec {  // verbatim-hexdump memcpy: dst <- src (n bytes), keyed by ev
+    uint64_t dst, src, n;
 };
 
 static const char* taint_reg_name(int slot, char* buf) {
@@ -520,9 +162,9 @@ static void taint_parse_ops(const char* ops, size_t ops_len, TaintSite& ts) {
             if (e > s) {
                 o[no].p = ops + s;
                 o[no].n = e - s;
-                o[no].is_mem = false;
-                for (size_t j = s; j < e; j++)
-                    if (ops[j] == '[') { o[no].is_mem = true; break; }
+                // a memory operand starts with '['; a SIMD lane reference
+                // ("v2.b[0]") has the bracket mid-token and is NOT memory
+                o[no].is_mem = ops[s] == '[';
                 no++;
             }
             seg = i + 1;
@@ -622,6 +264,36 @@ static TaintSite build_taint_site(const Site& s, const char* pool) {
     return ts;
 }
 
+// "hexdump at address 0x<addr> with length 0x<len>:" — upstream dumps the
+// SOURCE buffer of a memcpy-class call right after the call line. The taint
+// walkers bind such dumps to the preceding call (args dst, src) and apply
+// copy semantics, so copied buffers stop looking like orphan addresses.
+static bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
+                                 uint64_t& len) {
+    static const char kPre[] = "hexdump at address 0x";
+    static const char kMid[] = " with length 0x";
+    size_t i = 0;
+    auto eat = [&](const char* w, size_t l) {
+        if (i + l > n || memcmp(p + i, w, l)) return false;
+        i += l;
+        return true;
+    };
+    auto hex = [&](uint64_t& v) {
+        size_t s = i;
+        v = 0;
+        while (i < n && ((p[i] >= '0' && p[i] <= '9') ||
+                         (p[i] >= 'a' && p[i] <= 'f') ||
+                         (p[i] >= 'A' && p[i] <= 'F'))) {
+            char c = p[i++];
+            v = (v << 4) | uint64_t(c <= '9' ? c - '0'
+                                             : (c | 32) - 'a' + 10);
+        }
+        return i > s;
+    };
+    return eat(kPre, sizeof(kPre) - 1) && hex(addr) &&
+           eat(kMid, sizeof(kMid) - 1) && hex(len);
+}
+
 static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      int seed_q, bool seed_nzcv, bool backward, int limit,
                      uint64_t window, uint64_t at_ev, uint64_t off,
@@ -717,6 +389,11 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         bool seeded = false;
         bool stopped = false;      // early-stop: keep streaming to count total
         uint64_t since_involved = 0;
+        // verbatim-hexdump copy bridging: a memcpy-class call followed by a
+        // source-buffer dump (upstream dialect) transfers src-cell taint to
+        // the dst range — without it copied buffers look like orphan addresses
+        bool pend_copy = false;
+        uint64_t pend_dst = 0, pend_src = 0;
         Expander(f).for_each([&](uint64_t gi, const Group& g) -> bool {
             total = gi + 1;
             if (!seeded) {
@@ -738,7 +415,40 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 return true;
             }
             walked++;
-            if (!g.has_exec) return true;
+            if (g.has_verbatim) {
+                if (pend_copy) {
+                    pend_copy = false;
+                    uint64_t ha = 0, hl = 0;
+                    const std::string& vb = f.verbatim;
+                    if (g.verbatim_off + g.verbatim_len <= vb.size() &&
+                        parse_hexdump_header(vb.data() + g.verbatim_off,
+                                             g.verbatim_len, ha, hl) &&
+                        ha == pend_src && hl > 0 && hl <= (1u << 20)) {
+                        std::vector<uint64_t> deltas;
+                        for (uint64_t a : addr_t)
+                            if (a >= pend_src && a - pend_src < hl)
+                                deltas.push_back(a - pend_src);
+                        for (auto it = addr_t.begin(); it != addr_t.end();) {
+                            uint64_t a = *it;
+                            it = (a >= pend_dst && a - pend_dst < hl)
+                                     ? addr_t.erase(it)
+                                     : std::next(it);
+                        }
+                        for (uint64_t d : deltas) addr_t.insert(pend_dst + d);
+                        if (!deltas.empty()) {
+                            add_edge(gi, "memcpy : dst <- tainted src cells");
+                            matched++;
+                            since_involved = 0;
+                        }
+                    }
+                }
+                return true;
+            }
+            if (!g.has_exec) {
+                pend_copy = g.is_call && g.n_call_args >= 2;
+                if (pend_copy) { pend_dst = g.args[0]; pend_src = g.args[1]; }
+                return true;
+            }
             const TaintSite& ts = taint_site(g.site_id);
             uint64_t mr, mw;
             bool has_mr, has_mw;
@@ -831,6 +541,8 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 stopped = true;
                 stop = "all taint cleared";
             }
+            pend_copy = g.is_call && g.n_call_args >= 2;
+            if (pend_copy) { pend_dst = g.args[0]; pend_src = g.args[1]; }
             return true;
         });
         if (!seeded) {
@@ -848,8 +560,27 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         uint64_t pushed = 0;
         uint64_t last_match = UINT64_MAX;
         bool hit_end = false;
+        // verbatim-hexdump memcpy sites (ev -> copy), gathered on the same pass
+        std::unordered_map<uint64_t, CopyRec> copies;
+        bool pend_copy = false;
+        uint64_t pend_dst = 0, pend_src = 0;
         Expander(f).for_each([&](uint64_t gi, const Group& g) -> bool {
             if (at_ev && gi > at_ev) return false;
+            if (g.has_verbatim) {
+                if (pend_copy) {
+                    pend_copy = false;
+                    uint64_t ha = 0, hl = 0;
+                    const std::string& vb = f.verbatim;
+                    if (g.verbatim_off + g.verbatim_len <= vb.size() &&
+                        parse_hexdump_header(vb.data() + g.verbatim_off,
+                                             g.verbatim_len, ha, hl) &&
+                        ha == pend_src && hl > 0 && hl <= (1u << 20))
+                        copies[gi] = {pend_dst, pend_src, hl};
+                }
+            } else {
+                pend_copy = g.is_call && g.n_call_args >= 2;
+                if (pend_copy) { pend_dst = g.args[0]; pend_src = g.args[1]; }
+            }
             if (g.has_exec && !off_sites.empty() && off_sites.count(g.site_id))
                 last_match = gi;
             TaintRec r{};
@@ -911,6 +642,27 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         for (uint64_t i = seed_ev + 1; i-- > ring_base;) {
             const TaintRec& r = ring[size_t((i - ring_base + head) % ring.size())];
             walked++;
+            if (!copies.empty()) {
+                auto cp = copies.find(i);
+                if (cp != copies.end()) {
+                    // backward copy: a demand on dst cells was produced by the
+                    // corresponding src cells — move the demand across
+                    const CopyRec& c = cp->second;
+                    std::vector<uint64_t> deltas;
+                    for (uint64_t a : addr_t)
+                        if (a >= c.dst && a - c.dst < c.n)
+                            deltas.push_back(a - c.dst);
+                    for (uint64_t d : deltas) {
+                        addr_t.erase(c.dst + d);
+                        addr_t.insert(c.src + d);
+                    }
+                    if (!deltas.empty()) {
+                        add_edge(i, "memcpy : demand -> src cells");
+                        matched++;
+                        since_involved = 0;
+                    }
+                }
+            }
             const TaintSite& ts = taint_site(r.site_id);
             uint64_t mr = 0, mw = 0;
             bool has_mr = false, has_mw = false;
@@ -1002,13 +754,14 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     }
 
     // seed renderers + rerun command for the not-resumable cursor
+    auto hex_s = [](uint64_t v) {
+        char hb[24];
+        snprintf(hb, sizeof hb, "0x%llx", (unsigned long long)v);
+        return std::string(hb);
+    };
     auto seed_desc = [&]() -> std::string {
         std::string s;
-        char hb[24];
-        if (seed_addr) {
-            snprintf(hb, sizeof hb, "0x%llx", (unsigned long long)seed_addr);
-            s += " addr=" + std::string(hb);
-        }
+        if (seed_addr) s += " addr=" + hex_s(seed_addr);
         if (seed_reg >= 0) {
             char rb[16];
             s += " reg=" + std::string(taint_reg_name(seed_reg & 31, rb));
@@ -1016,12 +769,12 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         if (seed_q >= 0) s += " reg=q" + std::to_string(seed_q);
         if (seed_nzcv) s += " nzcv";
         if (at_ev) s += " at ev=" + std::to_string(at_ev);
-        if (off) s += " at " + (mod.empty() ? "*" : mod) + "!0x" + std::to_string(off);
+        if (off) s += " at " + (mod.empty() ? "*" : mod) + "!" + hex_s(off);
         return s.empty() ? " (none)" : s;
     };
     auto taint_cmd = [&](int new_limit) -> std::string {
         std::string s = "gt taint";
-        if (seed_addr) s += " --seed-addr 0x" + std::to_string(seed_addr);
+        if (seed_addr) s += " --seed-addr " + hex_s(seed_addr);
         if (seed_reg >= 0) s += " --seed-reg " + std::to_string(seed_reg);
         if (seed_q >= 0) s += " --seed-q " + std::to_string(seed_q);
         if (seed_nzcv) s += " --seed-nzcv";
@@ -1030,7 +783,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         if (window) s += " --window " + std::to_string(window);
         if (at_ev) s += " --at-ev " + std::to_string(at_ev);
         if (off) {
-            s += " --off 0x" + std::to_string(off);
+            s += " --off " + hex_s(off);
             if (!mod.empty()) s += " --mod " + mod;
         }
         return s + " " + gtb;
@@ -1132,11 +885,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     // suggestions: first tainted addrs -> mem queries; seed ev -> export window
     std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
     std::sort(addrs.begin(), addrs.end());
-    std::string dbp = sibling_path(gtb, ".gtb", ".db", "<trace.db>");
     for (size_t i = 0; i < addrs.size() && i < 3; i++) {
         char b[256];
-        snprintf(b, sizeof b, "gt query mem-writes --addr 0x%llx --limit 10 %s",
-                 (unsigned long long)addrs[i], dbp.c_str());
+        snprintf(b, sizeof b, "gt mem-access --addr 0x%llx --limit 10 %s",
+                 (unsigned long long)addrs[i], gtb.c_str());
         meta.suggest.push_back(b);
     }
     {
@@ -1380,224 +1132,8 @@ int q_fold(const std::string& gtb, int top, bool json) {
 }
 
 // ---------------------------------------------------------------------------
-// calltree (db)
-// ---------------------------------------------------------------------------
-#if GT_SQLITE_Q
-int q_calltree(const std::string& dbp, const std::string& func, int depth, int limit,
-               bool json) {
-    sqlite3* db = db_open(dbp, true);
-    if (!db) return 1;
-    sqlite3_exec(db, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;", nullptr, nullptr, nullptr);
-    struct Node {
-        uint64_t ev;
-        std::string sym;
-        uint64_t ret_ev = 0;
-        std::vector<int> children;
-        uint64_t subtree_execs = 0;
-    };
-    std::vector<Node> nodes;
-    std::vector<int> stack;
-    sqlite3_stmt *sc, *sr;
-    sqlite3_prepare_v2(db, "SELECT ev, sym FROM call ORDER BY ev", -1, &sc, nullptr);
-    sqlite3_prepare_v2(db, "SELECT ev FROM ret ORDER BY ev", -1, &sr, nullptr);
-    bool have_c = sqlite3_step(sc) == SQLITE_ROW;
-    bool have_r = sqlite3_step(sr) == SQLITE_ROW;
-    int root = -1;
-    while (have_c || have_r) {
-        uint64_t cev = have_c ? sqlite3_column_int64(sc, 0) : UINT64_MAX;
-        uint64_t rev = have_r ? sqlite3_column_int64(sr, 0) : UINT64_MAX;
-        if (cev < rev) {
-            const char* sym = (const char*)sqlite3_column_text(sc, 1);
-            nodes.push_back({cev, sym ? sym : "?", 0, {}, 0});
-            int id = int(nodes.size() - 1);
-            if (!stack.empty()) nodes[stack.back()].children.push_back(id);
-            else if (root == -1 && nodes[id].sym == func) root = id;
-            stack.push_back(id);
-            have_c = sqlite3_step(sc) == SQLITE_ROW;
-        } else {
-            if (!stack.empty()) {
-                nodes[stack.back()].ret_ev = rev;
-                stack.pop_back();
-            }
-            have_r = sqlite3_step(sr) == SQLITE_ROW;
-        }
-    }
-    sqlite3_finalize(sc);
-    sqlite3_finalize(sr);
-    if (root == -1) {
-        if (json) {
-            std::string o;
-            emit::kv_str(o, "error", "function " + func + " not found at top level");
-            printf("{\"calltree\":{%s}}\n", o.c_str());
-        } else {
-            printf("function %s not found at top level\n", func.c_str());
-        }
-        sqlite3_close(db);
-        return 1;
-    }
-
-    // aggregate repeated children; budget caps emitted nodes
-    struct JNode { int d; const Node* n; uint64_t x; };
-    std::vector<JNode> emitted;
-    bool budget_out = false;
-    std::function<void(int, int, uint64_t&)> print = [&](int id, int d, uint64_t& budget) {
-        if (d > depth || budget == 0) { if (budget == 0) budget_out = true; return; }
-        budget--;
-        std::unordered_map<std::string, std::pair<int, int>> agg; // sym -> (count, first_child)
-        for (int c : nodes[id].children) {
-            auto& e = agg[nodes[c].sym];
-            e.first++;
-            if (e.second == 0) e.second = c;
-        }
-        if (json) emitted.push_back({d, &nodes[id], 0});
-        else printf("%*s%s  [ev %llu..%llu]\n", d * 2, "", nodes[id].sym.c_str(),
-                    (unsigned long long)nodes[id].ev,
-                    (unsigned long long)(nodes[id].ret_ev ? nodes[id].ret_ev : nodes[id].ev));
-        for (auto& [sym, e] : agg) {
-            if (e.first > 1) {
-                if (json) emitted.push_back({d + 1, &nodes[e.second], uint64_t(e.first)});
-                else printf("%*s├─%s x%llu\n", d * 2 + 2, "", sym.c_str(),
-                            (unsigned long long)e.first);
-            } else {
-                print(e.second, d + 1, budget);
-            }
-        }
-        if (!json && agg.empty() && !nodes[id].children.empty())
-            printf("%*s(leaf calls collapsed)\n", d * 2 + 2, "");
-    };
-    uint64_t budget = limit;
-    if (json) {
-        print(root, 0, budget);
-        std::string o;
-        emit::kv_str(o, "func", func);
-        o += ',';
-        emit::kv_u64(o, "depth", uint64_t(depth));
-        o += ",\"nodes\":[";
-        for (size_t i = 0; i < emitted.size(); i++) {
-            if (i) o += ',';
-            o += '{';
-            emit::kv_u64(o, "ev", emitted[i].n->ev);
-            o += ',';
-            emit::kv_u64(o, "end", emitted[i].n->ret_ev ? emitted[i].n->ret_ev : emitted[i].n->ev);
-            o += ',';
-            emit::kv_str(o, "sym", emitted[i].n->sym);
-            o += ',';
-            emit::kv_u64(o, "d", uint64_t(emitted[i].d));
-            if (emitted[i].x) { o += ','; emit::kv_u64(o, "x", emitted[i].x); }
-            o += '}';
-        }
-        o += ']';
-        printf("{\"calltree\":{%s}}\n", o.c_str());
-    } else {
-        printf("call tree from %s (depth %d):\n", func.c_str(), depth);
-        print(root, 0, budget);
-        if (budget == 0) printf("... [output limit reached]\n");
-    }
-    sqlite3_close(db);
-    emit::Meta meta;
-    meta.total = emitted.size(); // json: nodes printed; text mode has no count
-    meta.shown = emitted.size();
-    // budget==0 also marks truncation: aggregated leaf lines keep printing
-    // after the budget drains, so budget_out alone misses the cut
-    if (budget_out || budget == 0) {
-        meta.truncated = true;
-        char b[256];
-        snprintf(b, sizeof b, "gt calltree --func %s --depth %d --limit %d %s",
-                 func.c_str(), depth, limit * 5, dbp.c_str());
-        meta.next = b;
-    }
-    emit::finish(meta, json);
-    if (meta.truncated && !json)
-        printf("note: raise --limit / --depth to expand the tree\n");
-    return 0;
-}
-#endif // calltree
-
-// ---------------------------------------------------------------------------
-// schema (db introspection: DDL + row counts + example SQL)
-// ---------------------------------------------------------------------------
-#if GT_SQLITE_Q
-int q_schema(const std::string& dbp, bool json) {
-    sqlite3* db = db_open(dbp, true);
-    if (!db) { fprintf(stderr, "cannot open %s\n", dbp.c_str()); return 1; }
-    struct Obj { std::string type, name, ddl; uint64_t rows; };
-    std::vector<Obj> objs;
-    sqlite3_stmt* s;
-    sqlite3_prepare_v2(db,
-        "SELECT type, name, sql FROM sqlite_master WHERE type IN ('table','view') "
-        "AND name NOT LIKE 'sqlite_%' ORDER BY type, name;", -1, &s, nullptr);
-    while (sqlite3_step(s) == SQLITE_ROW) {
-        Obj o;
-        o.type = (const char*)sqlite3_column_text(s, 0);
-        o.name = (const char*)sqlite3_column_text(s, 1);
-        const char* ddl = (const char*)sqlite3_column_text(s, 2);
-        o.ddl = ddl ? ddl : "";
-        o.rows = 0;
-        if (o.type == "table") {
-            sqlite3_stmt* c;
-            std::string q = "SELECT COUNT(*) FROM \"" + o.name + "\"";
-            if (sqlite3_prepare_v2(db, q.c_str(), -1, &c, nullptr) == SQLITE_OK &&
-                sqlite3_step(c) == SQLITE_ROW)
-                o.rows = uint64_t(sqlite3_column_int64(c, 0));
-            sqlite3_finalize(c);
-        }
-        objs.push_back(std::move(o));
-    }
-    sqlite3_finalize(s);
-    sqlite3_close(db);
-    static const char* kExamples[] = {
-        "SELECT func, execs FROM v_func_stats ORDER BY execs DESC LIMIT 5;",
-        "SELECT printf('0x%x',addr), is_w, COUNT(*) FROM mem GROUP BY addr, is_w "
-        "ORDER BY 3 DESC LIMIT 5;",
-        "SELECT c.ev, c.sym, c.x0, c.x1 FROM call c WHERE c.sym='worker_1' LIMIT 5;",
-        "SELECT m.ev, m.is_w, printf('0x%x',m.addr), m.val FROM mem m "
-        "WHERE m.addr=4294971904 ORDER BY m.ev LIMIT 10;",
-        "SELECT r.ev, r.reg, printf('0x%llx',r.val) FROM regw r WHERE r.ev BETWEEN 100 AND 120;",
-    };
-    if (json) {
-        std::string o;
-        emit::kv_str(o, "db", dbp);
-        o += ",\"objects\":[";
-        for (size_t i = 0; i < objs.size(); i++) {
-            if (i) o += ',';
-            o += '{';
-            emit::kv_str(o, "type", objs[i].type);
-            o += ',';
-            emit::kv_str(o, "name", objs[i].name);
-            o += ',';
-            emit::kv_u64(o, "rows", objs[i].rows);
-            o += ',';
-            emit::kv_str(o, "ddl", objs[i].ddl);
-            o += '}';
-        }
-        o += "],\"examples\":[";
-        for (size_t i = 0; i < 5; i++) {
-            if (i) o += ',';
-            emit::esc_append(o, kExamples[i]);
-        }
-        o += ']';
-        printf("{\"schema\":{%s}}\n", o.c_str());
-    } else {
-        printf("== schema %s ==\n", dbp.c_str());
-        for (auto& ob : objs) {
-            if (ob.type == "table")
-                printf("-- table %s (%llu rows)\n", ob.name.c_str(), (unsigned long long)ob.rows);
-            else
-                printf("-- view %s\n", ob.name.c_str());
-            printf("%s;\n", ob.ddl.c_str());
-        }
-        printf("example SQL:\n");
-        for (size_t i = 0; i < 5; i++) printf("  %s\n", kExamples[i]);
-    }
-    emit::Meta meta;
-    emit::finish(meta, json);
-    return 0;
-}
-#endif // schema
-
-// ---------------------------------------------------------------------------
-// W3b: streaming gtb queries (no sqlite). One Expander pass each, the same
-// dual-mode + meta-footer contract as the db-backed queries.
+// W3b: streaming gtb queries. One Expander pass each, the dual-mode
+// (text / JSON Lines) + meta-footer contract.
 // ---------------------------------------------------------------------------
 
 // "mod!0xoff" for a site (or "<no-site>" for call/svc/ret-only groups)
@@ -1729,7 +1265,7 @@ int q_stat(const std::string& gtb, bool json) {
 
 int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                  uint64_t range_base, uint64_t range_len, int limit,
-                 uint64_t offset, bool json) {
+                 uint64_t offset, bool json, bool writes_only) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     uint64_t total = 0, shown = 0;
@@ -1737,6 +1273,7 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
     Expander(f).for_each([&](uint64_t gi, const Group& g) {
         for (int k = 0; k < g.n_mem; k++) {
             const MemOp& m = g.mem[k];
+            if (writes_only && !m.is_write) continue;
             bool hit = use_range ? (m.addr >= range_base && m.addr < range_base + range_len)
                                  : (m.addr == addr);
             if (!hit) continue;
@@ -1784,12 +1321,102 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                      (unsigned long long)(offset + shown), gtb.c_str(),
                      json ? " --json" : "");
         else
-            snprintf(b, sizeof b, "gt mem-access --addr 0x%llx --offset %llu %s%s",
-                     (unsigned long long)addr, (unsigned long long)(offset + shown),
-                     gtb.c_str(), json ? " --json" : "");
+            snprintf(b, sizeof b, "gt mem-access --addr 0x%llx%s --offset %llu %s%s",
+                     (unsigned long long)addr, writes_only ? " --write" : "",
+                     (unsigned long long)(offset + shown), gtb.c_str(),
+                     json ? " --json" : "");
         meta.next = b;
     }
     meta.suggest.push_back("gt export --format compact --from EV --to EV+200 " + gtb);
+    emit::finish(meta, json);
+    return 0;
+}
+
+// function call sites directly on a gtb: streams the CALL events whose symbol
+// matches --func and prints the arguments (x0..x3, delta-reconstructed) of the
+// --nth (1-based) call onward. Named calls carry an exec context (module
+// offset); target-only calls (crash-truncated or numeric) fall back to the
+// raw branch target.
+int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
+                bool json) {
+    GtbFile f;
+    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    struct Row { uint64_t ev; std::string at; uint64_t target; uint64_t x[4]; int nargs; };
+    std::vector<Row> rows;
+    uint64_t total = 0;
+    size_t base = nth > 1 ? size_t(nth - 1) : 0; // --nth 1-based; --nth 0/negative = from the top
+    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    Expander(f).for_each([&](uint64_t gi, const Group& g) {
+        if (!g.is_call) return true;
+        const char* name = g.call_name;
+        if (!name || strcmp(name, func.c_str()) != 0) return true;
+        total++;
+        if (total - 1 < base) return true; // skip before the --nth window
+        if (rows.size() >= lim) return true;
+        Row r{};
+        r.ev = gi;
+        r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
+        r.target = g.call_target;
+        r.nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
+        if (r.nargs > 4) r.nargs = 4;
+        for (int i = 0; i < 4; i++) r.x[i] = g.args[i];
+        rows.push_back(r);
+        return true;
+    });
+    uint64_t shown = 0;
+    if (json) {
+        for (size_t i = 0; i < rows.size(); i++, shown++) {
+            const Row& r = rows[i];
+            std::string o = "{";
+            emit::kv_u64(o, "n", base + i + 1);
+            o += ',';
+            emit::kv_u64(o, "ev", r.ev);
+            o += ',';
+            emit::kv_str(o, "at", r.at);
+            o += ",\"args\":[";
+            for (int k = 0; k < r.nargs; k++) {
+                if (k) o += ',';
+                o += '"' + emit::hex64(r.x[k]) + '"';
+            }
+            o += ']';
+            if (r.target) {
+                o += ',';
+                emit::kv_hex(o, "target", r.target);
+            }
+            o += '}';
+            printf("%s\n", o.c_str());
+        }
+    } else {
+        printf("calls to %s: %llu total\n", func.c_str(), (unsigned long long)total);
+        for (size_t i = 0; i < rows.size(); i++, shown++) {
+            const Row& r = rows[i];
+            printf("  #%-8llu ev=%-8llu", (unsigned long long)(base + i + 1),
+                   (unsigned long long)r.ev);
+            for (int k = 0; k < r.nargs; k++)
+                printf(" x%d=0x%-14llx", k, (unsigned long long)r.x[k]);
+            printf("  %s\n", r.at.c_str());
+        }
+        if (total == 0) printf("  (no call to %s in %s)\n", func.c_str(), gtb.c_str());
+    }
+    emit::Meta meta;
+    meta.total = total;
+    meta.shown = shown;
+    meta.truncated = base + shown < total;
+    if (meta.truncated) {
+        char b[320];
+        snprintf(b, sizeof b, "gt func-args --func %s --nth %llu --limit %llu %s%s",
+                 func.c_str(), (unsigned long long)(base + shown + 1),
+                 (unsigned long long)lim, gtb.c_str(), json ? " --json" : "");
+        meta.next = b;
+    }
+    if (!rows.empty()) {
+        uint64_t ev0 = rows[std::min(base, rows.size() - 1)].ev;
+        char b[320];
+        uint64_t lo = ev0 > 5 ? ev0 - 5 : 0;
+        snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",
+                 (unsigned long long)lo, (unsigned long long)(ev0 + 5), gtb.c_str());
+        meta.suggest.push_back(b);
+    }
     emit::finish(meta, json);
     return 0;
 }
@@ -1829,12 +1456,27 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         for (int k = 0; k < g.n_wr; k++)
             if (g.n_wobs == 0 && g.wr_val[k] == val)
                 row(gi, taint_reg_name(g.wr_id[k] & 31, rb), g);
-        for (int k = 0; k < g.n_obs; k++)
-            if (g.obs[k].val <= UINT64_MAX && uint64_t(g.obs[k].val) == val)
-                row(gi, (std::string("rd:") + f.arena.str(g.obs[k].name_id)).c_str(), g);
-        for (int k = 0; k < g.n_wobs; k++)
-            if (g.wobs[k].val <= UINT64_MAX && uint64_t(g.wobs[k].val) == val)
-                row(gi, (std::string("wr:") + f.arena.str(g.wobs[k].name_id)).c_str(), g);
+        for (int k = 0; k < g.n_obs; k++) {
+            unsigned __int128 v = g.obs[k].val;
+            std::string ln = std::string("rd:") + f.arena.str(g.obs[k].name_id);
+            if (v <= UINT64_MAX) {
+                if (uint64_t(v) == val) row(gi, ln.c_str(), g);
+            } else {
+                // 128-bit SIMD observation: match either 64-bit lane exactly
+                if (uint64_t(v) == val) row(gi, (ln + ".lo").c_str(), g);
+                else if (uint64_t(v >> 64) == val) row(gi, (ln + ".hi").c_str(), g);
+            }
+        }
+        for (int k = 0; k < g.n_wobs; k++) {
+            unsigned __int128 v = g.wobs[k].val;
+            std::string ln = std::string("wr:") + f.arena.str(g.wobs[k].name_id);
+            if (v <= UINT64_MAX) {
+                if (uint64_t(v) == val) row(gi, ln.c_str(), g);
+            } else {
+                if (uint64_t(v) == val) row(gi, (ln + ".lo").c_str(), g);
+                else if (uint64_t(v >> 64) == val) row(gi, (ln + ".hi").c_str(), g);
+            }
+        }
         for (int k = 0; k < g.n_mem; k++)
             if (g.mem[k].value_known && g.mem[k].value == val)
                 row(gi, g.mem[k].is_write ? "mem_w" : "mem_r", g);

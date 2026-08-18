@@ -709,7 +709,6 @@ static void test_agent_output() {
 
     // --json meta line: truncation flag + copy-executable continuation
     {
-        ingest_sqlite(f, "build/t29.db");
         std::unordered_map<uint64_t, int> cnt;
         Expander(f).for_each([&](uint64_t, const Group& g) {
             for (int k = 0; k < g.n_mem; k++) cnt[g.mem[k].addr]++;
@@ -721,18 +720,18 @@ static void test_agent_output() {
             if (kv.second > best) { best = kv.second; hot = kv.first; }
         CHECK(best >= 3, "trace has a hot address with >= 3 accesses");
         std::string out = capture_stdout(
-            [&] { q_mem_writes("build/t29.db", hot, 2, 0, true); });
+            [&] { q_mem_access("build/t28.gtb", hot, false, 0, 0, 2, 0, true); });
         CHECK(out.find("\"meta\":{\"truncated\":true") != std::string::npos,
-              "mem-writes --json ends with a meta line, truncated=true");
-        CHECK(out.find("\"next\":\"gt query mem-writes --addr 0x") != std::string::npos &&
+              "mem-access --json ends with a meta line, truncated=true");
+        CHECK(out.find("\"next\":\"gt mem-access --addr 0x") != std::string::npos &&
                   out.find("--offset 2") != std::string::npos,
               "meta.next is the full continuation command (--offset 2)");
-        std::string st = capture_stdout([&] { q_stats("build/t29.db", 0, true); });
+        std::string st = capture_stdout([&] { q_stat("build/t28.gtb", true); });
         CHECK(st.find("\"meta\":{") != std::string::npos &&
-                  st.find("gt calltree --func ") != std::string::npos,
-              "stats --json meta carries suggested next commands");
+                  st.find("\"suggest\":[") != std::string::npos,
+              "stat --json meta carries suggested next commands");
         std::string tf = capture_stdout(
-            [&] { q_mem_writes("build/t29.db", hot, best, 0, true); });
+            [&] { q_mem_access("build/t28.gtb", hot, false, 0, 0, best, 0, true); });
         CHECK(tf.find("\"truncated\":false") != std::string::npos,
               "meta truncated=false when the window covers every row");
     }
@@ -899,6 +898,34 @@ static void test_stat_queries() {
     CHECK(mr.find("0x70000010") != std::string::npos &&
               mr.find("0x70000020") != std::string::npos,
           "mem-access --range covers store and load");
+    std::string mwonly = capture_stdout([sp] {
+        q_mem_access("build/t31.gtb", sp + 0x10, false, 0, 0, 10, 0, false, true);
+    });
+    CHECK(mwonly.find(" w 0x70000010") != std::string::npos,
+          "mem-access --write keeps the store row");
+    std::string mrw = capture_stdout([sp] {
+        q_mem_access("build/t31.gtb", sp + 0x20, false, 0, 0, 10, 0, false, true);
+    });
+    CHECK(mrw.find(" r 0x70000020") == std::string::npos &&
+              mrw.find("no rows") == std::string::npos,
+          "mem-access --write filters out read-only addresses");
+
+    std::string fa = capture_stdout([] {
+        q_func_args("build/t31.gtb", "inner", 1, 1, false);
+    });
+    CHECK(fa.find("ev=") != std::string::npos && fa.find("x0=") != std::string::npos,
+          "func-args prints the call's reconstructed arguments");
+    std::string fj = capture_stdout([] {
+        q_func_args("build/t31.gtb", "inner", 1, 1, true);
+    });
+    CHECK(fj.find("\"args\":[\"0xaa\",\"0xbb\",\"0x0\",\"0x0\"]") != std::string::npos &&
+              fj.find("\"meta\":{") != std::string::npos,
+          "func-args --json emits args as hex strings + the meta line");
+    std::string fn = capture_stdout([] {
+        q_func_args("build/t31.gtb", "nosuch", 1, 1, false);
+    });
+    CHECK(fn.find("no call to nosuch") != std::string::npos,
+          "func-args reports a missing function plainly");
 
     std::string fv = capture_stdout([] {
         q_find_value("build/t31.gtb", 0xdeadbeef, 10, 0, false);
@@ -971,6 +998,125 @@ static void test_escalate() {
           "calls-only prefix precedes the escalated full-detail window");
 }
 
+// ---------------------------------------------------------------------------
+// T33: regressions for the four defects found in the agent-methodology eval —
+// obs-preferring legacy export, SIMD-lane taint operands, 128-bit find-value
+// lanes, and verbatim-hexdump memcpy bridging in taint
+// ---------------------------------------------------------------------------
+static void test_import_agent_fixes() {
+    printf("[T33] import-fed fixes: obs export / lane taint / 128b lanes / memcpy bridge\n");
+    RecOptions ro;
+
+    // (1) legacy export must print the observed reads, not the stale shadow:
+    // x0/x9 are produced inside the unrecorded foo() call, so the write-history
+    // shadow never saw them (it would print 0x0). NOTE: upstream grammar
+    // requires a trailing space after the last token of an instruction line.
+    static const char log1[] =
+        "[liba.so] 0x7523a15064!0x1c3064 blr x8; x8=0x1000 \n"
+        "call func: foo()\n"
+        "ret: 0xdead\n"
+        "[liba.so] 0x7523a15068!0x1c3068 str x0, [x9]; x0=0xdead x9=0x5000 mem_w=0x5000 \n";
+    ImportResult r1;
+    CHECK(import_mem(log1, sizeof(log1) - 1, "build/t33a.gtb", ro, r1),
+          "fixture 1 imports");
+    CHECK(r1.cnt.exec == 2 && r1.cnt.call == 1 && r1.cnt.ret == 1,
+          "fixture 1 lines parse as instructions (trailing-space grammar)");
+    {
+        GtbFile f;
+        CHECK(f.load("build/t33a.gtb"), "t33a.gtb loads");
+        std::string out =
+            capture_stdout([&] { Expander(f).expand_text(stdout); });
+        CHECK(out.find("x0=0xdead x9=0x5000") != std::string::npos,
+              "legacy export prints observed reads, not the stale shadow");
+    }
+
+    // (2) taint propagates through umov/mov vN.lane[i]: the operand parser
+    // treated any operand containing '[' as memory, so "v2.b[0]" killed the
+    // chain — only operands STARTING with '[' are memory
+    static const char log2[] =
+        "[m.so] 0x1000!0x0 ldr q2, [x13]; x13=0x6000 mem_r=0x6000 -> q2=0x61616161616161616161616161616161 \n"
+        "[m.so] 0x1004!0x4 umov w14, v2.b[0]; w14=0x0 -> w14=0x61 \n"
+        "[m.so] 0x1008!0x8 mov v1.h[0], w14; w14=0x61 \n";
+    ImportResult r2;
+    CHECK(import_mem(log2, sizeof(log2) - 1, "build/t33b.gtb", ro, r2),
+          "fixture 2 imports");
+    CHECK(r2.cnt.exec == 3, "fixture 2 lines parse as instructions");
+    {
+        std::string out = capture_stdout([] {
+            q_taint("build/t33b.gtb", 0, -1, 2, false, false, 20, 0, 0, 0, "",
+                    false);
+        });
+        CHECK(out.find("x14 <- reg") != std::string::npos,
+              "umov w14, v2.b[0] propagates q2 -> x14");
+        CHECK(out.find("q1 <- reg") != std::string::npos,
+              "mov v1.h[0], w14 propagates x14 -> q1");
+    }
+
+    // (3) find-value matches the 64-bit lanes of a 128-bit SIMD observation,
+    // reported as .lo / .hi
+    static const char log3[] =
+        "[m.so] 0x1000!0x0 ldr q5, [x10]; x10=0x7000 mem_r=0x7000 -> q5=0x7f8e175ae2e7edbbaa1cdb90f22c26a8 \n";
+    ImportResult r3;
+    CHECK(import_mem(log3, sizeof(log3) - 1, "build/t33c.gtb", ro, r3),
+          "fixture 3 imports");
+    CHECK(r3.cnt.exec == 1, "fixture 3 line parses as an instruction");
+    {
+        std::string lo = capture_stdout([] {
+            q_find_value("build/t33c.gtb", 0xaa1cdb90f22c26a8, 10, 0, false);
+        });
+        CHECK(lo.find("wr:q5.lo") != std::string::npos,
+              "find-value matches the low lane of a 128-bit write obs");
+        std::string hi = capture_stdout([] {
+            q_find_value("build/t33c.gtb", 0x7f8e175ae2e7edbb, 10, 0, false);
+        });
+        CHECK(hi.find("wr:q5.hi") != std::string::npos,
+              "find-value matches the high lane of a 128-bit write obs");
+    }
+
+    // (4) verbatim hexdump after a memcpy-class call bridges taint across the
+    // copy, in both directions (the AES-key orphan-address break in the eval)
+    static const char log4[] =
+        "[m.so] 0x1000!0x0 str x8, [x9]; x8=0x1111 x9=0x5000 mem_w=0x5000 \n"
+        "[m.so] 0x1004!0x4 br x16; x16=0x3000 \n"
+        "call func: __memcpy_aarch64_simd(0x7000, 0x5000, 0x8)\n"
+        "hexdump at address 0x5000 with length 0x8:\n"
+        "0000000000005000  11 11 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|\n"
+        "ret: 0x7000\n"
+        "[m.so] 0x1008!0x8 ldr x10, [x12]; x10=0x0 x12=0x7000 mem_r=0x7000 -> x10=0x1111 \n";
+    ImportResult r4;
+    CHECK(import_mem(log4, sizeof(log4) - 1, "build/t33d.gtb", ro, r4),
+          "fixture 4 imports");
+    CHECK(r4.cnt.exec == 3 && r4.cnt.verbatim == 2,
+          "fixture 4: 3 instructions + 2 verbatim hexdump lines");
+    {
+        std::string fwd = capture_stdout([] {
+            q_taint("build/t33d.gtb", 0x5000, -1, -1, false, false, 20, 0, 0,
+                    0, "", false);
+        });
+        CHECK(fwd.find("memcpy : dst <- tainted src cells") != std::string::npos,
+              "forward: verbatim hexdump bridges the memcpy src -> dst");
+        CHECK(fwd.find("x10 <- mem") != std::string::npos,
+              "forward: the load from the copy destination is reached");
+        std::string bwd = capture_stdout([] {
+            q_taint("build/t33d.gtb", 0x7000, -1, -1, false, true, 20, 0, 0, 0,
+                    "", false);
+        });
+        CHECK(bwd.find("memcpy : demand -> src cells") != std::string::npos,
+              "backward: demand on the copy destination moves to the source");
+        CHECK(bwd.find("source reg x8") != std::string::npos,
+              "backward: the chain reaches the original store's source reg");
+        // limit 1 truncates the edge list -> meta.next must re-emit the seed
+        // address in hex (a decimal "0x20480" would send the agent elsewhere)
+        std::string trunc = capture_stdout([] {
+            q_taint("build/t33d.gtb", 0x5000, -1, -1, false, false, 1, 0, 0,
+                    0, "", false);
+        });
+        CHECK(trunc.find("next: gt taint --seed-addr 0x5000 --limit") !=
+                  std::string::npos,
+              "meta.next re-emits --seed-addr in hex, not decimal");
+    }
+}
+
 int cmd_selftest() {
     site_compiler_init();
     system("mkdir -p build");
@@ -989,6 +1135,7 @@ int cmd_selftest() {
     test_import();
     test_stat_queries();
     test_escalate();
+    test_import_agent_fixes();
     printf("\n%s (%d failures)\n", g_fail ? "SELFTEST FAILED" : "ALL TESTS PASSED", g_fail);
     site_compiler_shutdown();
     return g_fail ? 1 : 0;
