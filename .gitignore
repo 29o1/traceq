@@ -8,5 +8,8 @@ bench/gt-harness
 # benchmark outputs (regenerate with `make report`)
 bench/build/
 
+# stray top-level build dir (ad-hoc artifacts)
+build/
+
 # macOS
 .DS_Store
