@@ -18,7 +18,7 @@ endif
 
 LDFLAGS := $(SQL_LDFLAGS) $(CAP_LDFLAGS)
 
-LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp
+LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp src/import.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 HEADERS := $(wildcard include/gumtrace/*.h)
 

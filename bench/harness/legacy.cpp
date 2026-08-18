@@ -99,6 +99,7 @@ void LegacyRecorder::record_event(const ExecEvent& ev) {
     for (uint8_t i = 0; i < s.n_ops; i++) {
         const OpPlan& op = s.ops[i];
         if (op.kind == OP_REG_R) {
+            if (op.ctx_idx < 0) continue; // SIMD dep-only plan entry: no value lane
             const char* nm = reg_name(op.ctx_idx);
             append(nm, strlen(nm));
             append("=0x", 3);

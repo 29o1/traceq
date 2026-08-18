@@ -1,0 +1,30 @@
+#pragma once
+// Upstream GumTrace text log -> .gtb importer (see src/import.cpp for the
+// byte-exactness contract).
+#include "recorder.h"
+#include <cstdint>
+#include <string>
+
+namespace gt {
+
+struct ImportCounts {
+    uint64_t lines = 0, exec = 0, call = 0, ret = 0, verbatim = 0;
+};
+
+struct ImportResult {
+    ImportCounts cnt;
+    RecStats stats;
+    uint64_t in_bytes = 0, gtb_bytes = 0;
+    bool stopped = false; // a max-* guard cut the import short
+};
+
+// Parse an upstream log held in memory and record it as a gtb. defer_meta is
+// forced on (the arena grows while events stream in). Returns false on output
+// I/O failure.
+bool import_mem(const char* p, size_t len, const std::string& out_path,
+                const RecOptions& opts, ImportResult& res);
+// mmaps in_path and feeds it to import_mem.
+bool import_log(const std::string& in_path, const std::string& out_path,
+                const RecOptions& opts, ImportResult& res);
+
+} // namespace gt

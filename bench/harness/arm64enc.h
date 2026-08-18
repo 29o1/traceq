@@ -44,6 +44,24 @@ inline uint32_t cmp_imm(int rn, uint16_t imm12) { // subs xzr, xn, #imm
 inline uint32_t cmp_reg(int rn, int rm) { // subs xzr, xn, xm
     return 0xEB000000u | (rm << 16) | (rn << 5) | XZ;
 }
+inline uint32_t subs_reg(int rd, int rn, int rm) { // flag-setting subtract, keeps result
+    return 0xEB000000u | (rm << 16) | (rn << 5) | rd;
+}
+// conds: 0=eq 1=ne ...
+inline uint32_t csel(int rd, int rn, int rm, int cond) {
+    return 0x9A800000u | (rm << 16) | (cond << 12) | (rn << 5) | rd;
+}
+inline uint32_t eor_v16b(int rd, int rn, int rm) { // eor vd.16b, vn.16b, vm.16b
+    return 0x6E201C00u | (rm << 16) | (rn << 5) | rd;
+}
+inline uint32_t str_q(int rt, int rn, uint32_t off_bytes) { // off % 16 == 0
+    assert(off_bytes % 16 == 0 && off_bytes < (1u << 16));
+    return 0x3D800000u | ((off_bytes / 16) << 10) | (rn << 5) | rt;
+}
+inline uint32_t ldr_q(int rt, int rn, uint32_t off_bytes) {
+    assert(off_bytes % 16 == 0 && off_bytes < (1u << 16));
+    return 0x3DC00000u | ((off_bytes / 16) << 10) | (rn << 5) | rt;
+}
 inline uint32_t ldr_x(int rt, int rn, uint32_t off_bytes) { // off % 8 == 0
     assert(off_bytes % 8 == 0 && off_bytes < (1u << 15));
     return 0xF9400000u | ((off_bytes / 8) << 10) | (rn << 5) | rt;

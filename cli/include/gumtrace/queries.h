@@ -2,17 +2,40 @@
 // Agent-facing query surface. Design rule: every output is bounded with an
 // explicit truncation marker — the consumer is an agent with a limited
 // context window, so queries must return small structured answers, never raw
-// dumps.
+// dumps. W2 contract: every command runs in text or --json mode (JSON Lines,
+// u64 values as hex strings) and ends with a meta footer carrying the cursor
+// (truncated/total/shown/next) and suggested next commands.
 #include <string>
 
 // implemented in queries.cpp
-int q_stats(const std::string& db);
-int q_mem_writes(const std::string& db, uint64_t addr, int limit);
-int q_func_args(const std::string& db, const std::string& func, int nth, int limit);
+// offset pages the row listing (independent of --nth); json selects JSONL.
+int q_stats(const std::string& db, uint64_t offset = 0, bool json = false);
+int q_mem_writes(const std::string& db, uint64_t addr, int limit, uint64_t offset = 0,
+                 bool json = false);
+int q_func_args(const std::string& db, const std::string& func, int nth, int limit,
+                uint64_t offset = 0, bool json = false);
 
 // taint/diff/fold/calltree implemented in queries.cpp too (gtb/db mixed)
-int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, bool backward,
-            int limit, uint64_t window);
-int q_diff(const std::string& a_gtb, const std::string& b_gtb, int context);
-int q_fold(const std::string& gtb, int top);
-int q_calltree(const std::string& db, const std::string& func, int depth, int limit);
+// taint coordinates: seeds are --seed-addr/--seed-reg/--seed-q/--seed-nzcv,
+// placement is --at-ev N (event index) and/or --off O (module offset, --mod M
+// to pick the module). window 0 = unlimited (forward) / 2M-event ring
+// (backward); window-limited results are marked PARTIAL.
+int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, int seed_q,
+            bool seed_nzcv, bool backward, int limit, uint64_t window,
+            uint64_t at_ev, uint64_t off, const std::string& mod, bool json = false);
+int q_diff(const std::string& a_gtb, const std::string& b_gtb, int context,
+           bool json = false);
+int q_fold(const std::string& gtb, int top, bool json = false);
+int q_calltree(const std::string& db, const std::string& func, int depth, int limit,
+               bool json = false);
+// W3b streaming gtb queries (no sqlite)
+int q_stat(const std::string& gtb, bool json = false);
+int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
+                 uint64_t range_base, uint64_t range_len, int limit,
+                 uint64_t offset = 0, bool json = false);
+int q_find_value(const std::string& gtb, uint64_t val, int limit,
+                 uint64_t offset = 0, bool json = false);
+int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
+                   int limit, bool json = false);
+// schema of an ingested db: DDL + row counts + example SQL
+int q_schema(const std::string& db, bool json = false);

@@ -31,6 +31,11 @@ BUILD = os.path.join(HERE, "build")
 # corpus size: matches the historical report so numbers stay comparable
 OUTER, INNER = 1500, 60
 HOT_ADDR = 0x100000030100
+# taint seed: the first key cell. The old hot-cell seed is rewritten before it
+# is ever read, which kill-on-overwrite semantics (upstream-compatible) turn
+# into instant taint death; a key byte is load-consumed and fans out into the
+# eor/strb chain, so both sides exercise real propagation.
+TAINT_ADDR = 0x10000020000
 
 MB = 1024.0 * 1024.0
 
@@ -99,7 +104,7 @@ def main():
     R = {}
 
     # ---------------------------------------------------------------- hot path
-    print("[1/6] hot path (in-process, per-event timing)")
+    print("[1/7] hot path (in-process, per-event timing)")
     _, out = harness(
         f"hotpath --outer {OUTER} --inner {INNER} "
         f"--legacy-out {b('bench_legacy.txt')} --gtb-out {b('bench_full.gtb')}")
@@ -114,7 +119,7 @@ def main():
           f"{sz_legacy/MB:.1f} vs {sz_gtb/MB:.1f} MB")
 
     # ------------------------------------------------------- detail level scan
-    print("[2/6] detail levels (via CLI-facing recorder)")
+    print("[2/7] detail levels (via CLI-facing recorder)")
     harness(f"record --format gtb --detail mem  --outer {OUTER} --inner {INNER} "
             f"-o {b('bench_mem.gtb')}")
     harness(f"record --format gtb --detail calls --outer {OUTER} --inner {INNER} "
@@ -123,7 +128,7 @@ def main():
     print(f"      mem {sz_mem/MB:.1f} MB, calls {sz_calls/MB:.3f} MB")
 
     # -------------------------------------------------------- equivalence (T3)
-    print("[3/6] expansion equivalence (gt export vs legacy text)")
+    print("[3/7] expansion equivalence (gt export vs legacy text)")
     gt(f"export {b('bench_full.gtb')}", b("expanded.txt"))
     exp_ok = (size(b("expanded.txt")) == sz_legacy and
               subprocess.run(["cmp", "-s", b("bench_legacy.txt"),
@@ -131,7 +136,7 @@ def main():
     print(f"      byte-identical: {exp_ok}")
 
     # -------------------------------------------------------------- SQL ingest
-    print("[4/6] sqlite ingest")
+    print("[4/7] sqlite ingest")
     ingest_ns, db_sz = 0, 0
     if have_sql:
         _, out = harness(f"ingest {b('bench_full.gtb')} -o {b('bench_full.db')}")
@@ -145,7 +150,7 @@ def main():
         print("      skipped (no sqlite in this build)")
 
     # ------------------------------------------------- variant corpus for diff
-    print("[5/6] variant corpus (diff A/B)")
+    print("[5/7] variant corpus (diff A/B)")
     harness(f"record --format text --outer {OUTER} --inner {INNER} --variant 0x2B00 "
             f"-o {b('bench_legacy_v2.txt')}")
     harness(f"record --format gtb  --outer {OUTER} --inner {INNER} --variant 0x2B00 "
@@ -156,7 +161,7 @@ def main():
     legacy_lost = hp["legacy"]["pending_bytes"]
 
     # ----------------------------------------------------------- query A/B set
-    print("[6/6] query A/B (text pipeline vs gt CLI)")
+    print("[6/7] query A/B (text pipeline vs gt CLI)")
     Q = []
 
     if have_sql:
@@ -181,16 +186,37 @@ def main():
     Q.append(("loop iteration count", q3a, q3b))
 
     q4a, t4a = sh(f"python3 baselines/text_taint.py {b('bench_legacy.txt')} "
-                  f"0x{HOT_ADDR:x}", b("q4a.out"))
-    q4b, t4b = gt(f"taint --seed-addr 0x{HOT_ADDR:x} --limit 20 "
+                  f"0x{TAINT_ADDR:x}", b("q4a.out"))
+    q4b, t4b = gt(f"taint --seed-addr 0x{TAINT_ADDR:x} --limit 20 "
                   f"{b('bench_full.gtb')}", b("q4b.out"))
-    Q.append((f"forward taint from 0x{HOT_ADDR:x}", q4a, q4b))
+    Q.append((f"forward taint from 0x{TAINT_ADDR:x}", q4a, q4b))
 
     q5a, t5a = sh(f"python3 baselines/text_diff.py {b('bench_legacy.txt')} "
                   f"{b('bench_legacy_v2.txt')}", b("q5a.out"))
     q5b, t5b = gt(f"diff {b('bench_full.gtb')} {b('bench_v2.gtb')}",
                   b("q5b.out"))
     Q.append(("diff two runs", q5a, q5b))
+
+    # W3b streaming queries (no sqlite ingest on the gt side at all)
+    q6a, _ = sh(f"wc -l {b('bench_legacy.txt')}; "
+                f"grep -ac 'call func:' {b('bench_legacy.txt')}",
+                b("q6a.out"), check=False)
+    q6b, _ = gt(f"stat {b('bench_full.gtb')}", b("q6b.out"))
+    Q.append(("run overview (wc+grep ritual vs gt stat)", q6a, q6b))
+
+    # both sides scan the whole input: grep -c exits after the full pass, so
+    # the gt side is asked for every row too (limit > any plausible count)
+    q7a, _ = sh(f"grep -ac 'mem_[rw]=0x{HOT_ADDR:x}' {b('bench_legacy.txt')}",
+                b("q7a.out"), check=False)
+    q7b, _ = gt(f"mem-access --addr 0x{HOT_ADDR:x} --limit 1000000 "
+                f"{b('bench_full.gtb')}", b("q7b.out"))
+    Q.append(("mem accesses of hot addr, full count (no db)", q7a, q7b))
+
+    q8a, _ = sh(f"grep -ac '2a00' {b('bench_legacy.txt')}", b("q8a.out"),
+                check=False)
+    q8b, _ = gt(f"find-value 0x2a00 --limit 1000000 {b('bench_full.gtb')}",
+                b("q8b.out"))
+    Q.append(("value search 0x2a00 (full scan)", q8a, q8b))
 
     for name, a_ns, b_ns in Q:
         print(f"      {name}: {ms(a_ns):.1f} -> {ms(b_ns):.1f} ms "
@@ -201,16 +227,26 @@ def main():
         m = re.search(r"regs[=:]\s*(.*)", text)
         return set(re.findall(r"x\d+", m.group(1))) if m else set()
 
+    def naddrs_of(text):
+        m = re.search(r"n_addrs=(\d+)", text) or re.search(
+            r"final tainted addrs: (\d+)", text)
+        return int(m.group(1)) if m else -1
+
     ra, rb = regs_of(t4a), regs_of(t4b)
-    taint_match = bool(ra) and ra == rb
+    na, nb = naddrs_of(t4a), naddrs_of(t4b)
+    taint_match = na >= 0 and na == nb and ra == rb
 
     def offsets_of(text):
         m = re.search(r"offsets 0x([0-9a-f]+) vs 0x([0-9a-f]+)", text)
         if m:
             return int(m.group(1), 16), int(m.group(2), 16)
-        # gt's DIVERGES marker: take the A:/B: offsets on that line
+        # gt's DIVERGES marker: "A: <mod>!0xoff ... B: <mod>!0xoff" (W1 format,
+        # module-qualified) or the older bare "A: 0xoff" form
         for line in text.splitlines():
             if "<-- DIVERGES" in line:
+                got = re.findall(r"[AB]: \S+!0x([0-9a-f]+)", line)
+                if len(got) >= 2:
+                    return int(got[0], 16), int(got[1], 16)
                 got = re.findall(r"[AB]: 0x([0-9a-f]+)", line)
                 if len(got) >= 2:
                     return int(got[0], 16), int(got[1], 16)
@@ -221,6 +257,30 @@ def main():
 
     print(f"      taint regs match: {taint_match} {sorted(ra)}")
     print(f"      diff divergence match: {diff_match} {oa} vs {ob}")
+
+    # ------------------------------------------------- agent token proxy (W2)
+    print("[7/7] agent token proxy (compact vs legacy, same event window)")
+    EVENTS_WIN = 5000
+    gt(f"export --format compact --from 0 --to {EVENTS_WIN - 1} "
+       f"{b('bench_full.gtb')}", b("tok_compact.txt"))
+    # legacy side: lines until the window's 5000th instruction line ('['-lines);
+    # interleaved call/ret lines inside the window count, like compact's do
+    leg_bytes = leg_words = insn = 0
+    with open(b("bench_legacy.txt"), "rb") as fh:
+        for line in fh:
+            if line[:1] == b"[":
+                if insn == EVENTS_WIN:
+                    break
+                insn += 1
+            leg_bytes += len(line)
+            leg_words += len(line.split())
+    with open(b("tok_compact.txt"), "rb") as fh:
+        cdat = fh.read()
+    c_bytes = len(cdat)
+    c_words = len(cdat.split())
+    print(f"      {EVENTS_WIN} events: legacy {leg_bytes} B/{leg_words} tok -> "
+          f"compact {c_bytes} B/{c_words} tok "
+          f"({ratio(leg_bytes, c_bytes):.1f}x / {ratio(leg_words, c_words):.1f}x)")
 
     # --------------------------------------------------------------- the report
     speedup = ratio(legacy_per_ev, gtb_per_ev)
@@ -312,6 +372,15 @@ def main():
       f"ordinals (upstream merges pure-store lines), so the comparison is on "
       f"first-diverging-instruction offsets\n")
 
+    w("## Agent surface (compact format + streaming queries)\n")
+    w(f"- token proxy over the same {EVENTS_WIN}-event window: legacy text "
+      f"{leg_bytes} B / {leg_words} tokens -> compact {c_bytes} B / "
+      f"{c_words} tokens (**{ratio(leg_bytes, c_bytes):.2f}x bytes, "
+      f"{ratio(leg_words, c_words):.2f}x tokens**)")
+    w("- `gt stat` / `mem-access` / `find-value` stream the raw .gtb — no "
+      "sqlite ingest step; their latencies are the last three rows of the "
+      "query table\n")
+
     w("## Acceptance criteria\n")
     w("| criterion | target | actual | verdict |")
     w("|---|---|---|---|")
@@ -334,6 +403,12 @@ def main():
     w(f"| byte-identical expansion | match | "
       f"{'match' if exp_ok else 'MISMATCH'} | "
       f"{'PASS' if exp_ok else 'FAIL'} |")
+    w(f"| agent token proxy (compact vs legacy, {EVENTS_WIN} events) | "
+      f">= 1.5x bytes | {ratio(leg_bytes, c_bytes):.4g}x bytes / "
+      f"{ratio(leg_words, c_words):.4g}x ws-tokens | "
+      f"{'PASS' if ratio(leg_bytes, c_bytes) >= 1.5 else 'FAIL'} — whitespace "
+      f"splitting undercounts LLM tokens; values are the entropy floor on both "
+      f"sides, real-log module prefixes widen the gap (see real_report) |")
 
     out_path = b("report.md")
     with open(out_path, "w") as fh:

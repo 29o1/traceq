@@ -3,10 +3,12 @@
 // These live on the benchmark side because every one of them needs an event
 // source to produce input, and the product deliberately has none.
 
+#include "arm64enc.h"
 #include "corpus.h"
 #include "harness.h"
 #include "legacy.h"
 #include <gumtrace/common.h>
+#include <gumtrace/import.h>
 #include <gumtrace/ingest.h>
 #include <gumtrace/queries.h>
 #include <gumtrace/recorder.h>
@@ -22,8 +24,10 @@
 #include <functional>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 
 using namespace gt;
+using namespace gt::enc;
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -378,6 +382,595 @@ static void test_diff() {
     CHECK(div > 10, "divergence happens after prologue (input-dependent branch)");
 }
 
+// ---------------------------------------------------------------------------
+// stdout capture helper for tests that assert on query output
+// ---------------------------------------------------------------------------
+static std::string capture_stdout(std::function<void()> fn) {
+    fflush(stdout);
+    int saved = dup(fileno(stdout));
+    FILE* tmp = tmpfile();
+    dup2(fileno(tmp), fileno(stdout));
+    fn();
+    fflush(stdout);
+    dup2(saved, fileno(stdout));
+    close(saved);
+    rewind(tmp);
+    std::string out;
+    char b[4096];
+    size_t n;
+    while ((n = fread(b, 1, sizeof b, tmp)) > 0) out.append(b, n);
+    fclose(tmp);
+    return out;
+}
+
+// record a hand-built instruction stream: (word, wr_reg or -1, mem op or none)
+struct MiniInsn {
+    uint32_t word;
+    int wr;           // xN written by this insn (-1 = none; q writes need no lane)
+    uint64_t wr_val;
+    int mem_is_write; // -1 = no mem, 0 = read, 1 = write
+    uint64_t mem_addr;
+};
+static void record_mini(const char* path, const char* module, uint64_t base,
+                        const std::vector<MiniInsn>& prog) {
+    SiteArena arena;
+    for (size_t i = 0; i < prog.size(); i++)
+        arena.intern(base + i * 4, prog[i].word, module, base, -1);
+    RecOptions ro;
+    ro.initial_sp = 0x70000000;
+    GtbRecorder g(arena);
+    g.open(path, ro);
+    for (size_t i = 0; i < prog.size(); i++) {
+        ExecEvent ev{};
+        ev.pc = base + i * 4;
+        ev.sp = 0x70000000;
+        if (prog[i].wr >= 0) {
+            ev.n_wr = 1;
+            ev.wr_id[0] = prog[i].wr;
+            ev.wr_val[0] = prog[i].wr_val;
+        }
+        if (prog[i].mem_is_write >= 0) {
+            ev.n_mem = 1;
+            ev.mem[0].is_write = prog[i].mem_is_write == 1;
+            ev.mem[0].addr = prog[i].mem_addr;
+            ev.mem[0].size = 16;
+            ev.mem[0].value = 0;
+        }
+        g.record_event(ev);
+    }
+    g.finish();
+}
+
+// ---------------------------------------------------------------------------
+// T25: diff identity is (module, offset) — a rebased run must compare equal
+// ---------------------------------------------------------------------------
+static void test_diff_module_offset() {    printf("[T25] diff across rebased module (ASLR) via (module, offset) identity\n");
+    CorpusConfig cfg;
+    cfg.outer_iters = 20;
+    cfg.inner_iters = 15;
+    Program p = build_program(cfg);
+    SiteArena a1 = compile_sites(p);
+    RecOptions ro;
+    ro.initial_sp = corpus_stack_top();
+    {
+        GtbRecorder g(a1);
+        g.open("build/d25a.gtb", ro);
+        run_program(p, cfg, 0, [](const ExecEvent& ev, void* u) {
+            static_cast<GtbRecorder*>(u)->record_event(ev);
+        }, &g);
+        g.finish();
+    }
+    // run B: same image relocated 16MB up (same words, same module name)
+    const uint64_t slide = 0x1000000;
+    SiteArena a2;
+    for (const auto& d : p.insns)
+        a2.intern(d.addr + slide, d.word, p.module_name.c_str(), p.base + slide, -1);
+    {
+        GtbRecorder g(a2);
+        g.open("build/d25b.gtb", ro);
+        run_program(p, cfg, 0, [](const ExecEvent& ev, void* u) {
+            ExecEvent e2 = ev;
+            e2.pc += 0x1000000;
+            static_cast<GtbRecorder*>(u)->record_event(e2);
+        }, &g);
+        g.finish();
+    }
+    std::string same = capture_stdout([] { q_diff("build/d25a.gtb", "build/d25b.gtb", 2); });
+    CHECK(same.find("identical execution sequences") != std::string::npos,
+          "rebased run compares identical under (module, offset) keys");
+    // negative control: a variant run rebased must still diverge, at the same
+    // exec index as the same-base diff
+    CorpusConfig c2;
+    c2.outer_iters = cfg.outer_iters;
+    c2.inner_iters = cfg.inner_iters;
+    c2.variant_const = 0x2B00;
+    Program p2 = build_program(c2);
+    SiteArena a3;
+    for (const auto& d : p2.insns)
+        a3.intern(d.addr + slide, d.word, p.module_name.c_str(), p.base + slide, -1);
+    {
+        GtbRecorder g(a3);
+        g.open("build/d25c.gtb", ro);
+        run_program(p2, c2, 0, [](const ExecEvent& ev, void* u) {
+            ExecEvent e2 = ev;
+            e2.pc += 0x1000000;
+            static_cast<GtbRecorder*>(u)->record_event(e2);
+        }, &g);
+        g.finish();
+    }
+    std::string dSameBase = capture_stdout([] { q_diff("build/v1.gtb", "build/v2.gtb", 2); });
+    std::string dRebased = capture_stdout([] { q_diff("build/d25a.gtb", "build/d25c.gtb", 2); });
+    auto div_of = [](const std::string& s) -> long {
+        size_t p1 = s.find("first divergence at exec index ");
+        if (p1 == std::string::npos) return -1;
+        return atol(s.c_str() + p1 + 29);
+    };
+    CHECK(div_of(dSameBase) >= 0 && div_of(dSameBase) == div_of(dRebased),
+          "rebased variant diverges at the same exec index as the same-base diff");
+}
+
+// ---------------------------------------------------------------------------
+// T26: backward taint propagates through NZCV (subs -> csel chain)
+// ---------------------------------------------------------------------------
+static void test_taint_nzcv() {
+    printf("[T26] backward taint through NZCV (subs -> csel)\n");
+    uint64_t base = 0x10000;
+    std::vector<MiniInsn> prog = {
+        {enc::movz(0, 5), 0, 5, -1, 0},                    // movz x0, #5
+        {enc::movz(1, 9), 1, 9, -1, 0},                    // movz x1, #9
+        {enc::movz(4, 1), 4, 1, -1, 0},                    // movz x4, #1
+        {enc::movz(5, 2), 5, 2, -1, 0},                    // movz x5, #2
+        {enc::subs_reg(2, 0, 1), 2, 0, -1, 0},             // subs x2, x0, x1  -> NZCV
+        {enc::csel(3, 4, 5, 0), 3, 1, -1, 0},              // csel x3, x4, x5, eq
+    };
+    // self-verify the hand-rolled encodings through capstone
+    site_compiler_init();
+    SiteArena chk;
+    uint32_t s5 = chk.intern(base + 5 * 4, prog[5].word, "mini.so", base, -1);
+    const Site& cs = chk.get(s5);
+    bool cc_ok = false, uw_ok = false;
+    for (uint8_t i = 0; i < cs.n_ops; i++)
+        if (cs.ops[i].op_flags & OPF_R_NZCV) cc_ok = true;
+    uint32_t s4 = chk.intern(base + 4 * 4, prog[4].word, "mini.so", base, -1);
+    for (uint8_t i = 0; i < chk.get(s4).n_ops; i++)
+        if (chk.get(s4).ops[i].op_flags & OPF_W_NZCV) uw_ok = true;
+    CHECK(cc_ok && uw_ok, "plan marks csel as NZCV reader and subs as NZCV writer");
+
+    record_mini("build/t26.gtb", "mini.so", base, prog);
+    std::string out = capture_stdout([] {
+        q_taint("build/t26.gtb", 0, 3, -1, false, true, 30, 0, 0, 0, "");
+    });
+    CHECK(out.find("source reg x0") != std::string::npos &&
+              out.find("source reg x1") != std::string::npos,
+          "backward from x3 reaches x0/x1 through NZCV");
+    CHECK(out.find("source reg nzcv") != std::string::npos,
+          "NZCV edge reported explicitly");
+}
+
+// ---------------------------------------------------------------------------
+// T27: backward taint propagates through SIMD registers (ldr q / eor v / str q)
+// ---------------------------------------------------------------------------
+static void test_taint_simd() {
+    printf("[T27] backward taint through q registers (no SIMD values recorded)\n");
+    uint64_t base = 0x20000;
+    uint64_t src = 0x4000, dst = 0x5000;
+    std::vector<MiniInsn> prog = {
+        {enc::ldr_q(1, 20, 0), -1, 0, 0, src},       // ldr q1, [x20]
+        {enc::eor_v16b(0, 1, 2), -1, 0, -1, 0},      // eor v0.16b, v1.16b, v2.16b
+        {enc::str_q(0, 21, 0), -1, 0, 1, dst},       // str q0, [x21]
+    };
+    site_compiler_init();
+    SiteArena chk;
+    bool ok = chk.intern(base, prog[0].word, "mini.so", base, -1) != 0xFFFFFFFFu;
+    CHECK(ok, "SIMD encodings disassemble");
+    record_mini("build/t27.gtb", "mini.so", base, prog);
+    std::string out = capture_stdout([dst] {
+        q_taint("build/t27.gtb", dst, -1, -1, false, true, 30, 0, 0, 0, "");
+    });
+    CHECK(out.find("source reg q0") != std::string::npos &&
+              out.find("source reg q1") != std::string::npos,
+          "backward from stored mem reaches q0/q1 through the v-reg eor");
+    CHECK(out.find("source mem 0x4000") != std::string::npos ||
+              out.find("source mem 16384") != std::string::npos,
+          "chain ends at the source load address");
+}
+
+// ---------------------------------------------------------------------------
+// T28: taint coordinates (--at-ev / --off) and loud PARTIAL on window limits
+// ---------------------------------------------------------------------------
+static void test_taint_coords() {
+    printf("[T28] taint --at-ev/--off coordinates + PARTIAL marker\n");
+    CorpusConfig cfg;
+    cfg.outer_iters = 10;
+    cfg.inner_iters = 8;
+    Program p = build_program(cfg);
+    SiteArena arena = compile_sites(p);
+    RecOptions ro;
+    ro.initial_sp = corpus_stack_top();
+    {
+        GtbRecorder g(arena);
+        g.open("build/t28.gtb", ro);
+        run_program(p, cfg, 0, [](const ExecEvent& ev, void* u) {
+            static_cast<GtbRecorder*>(u)->record_event(ev);
+        }, &g);
+        g.finish();
+    }
+    // --off: pick a site inside the inner loop (executed many times)
+    uint64_t off = p.insns[5].addr - p.base;
+    std::string out = capture_stdout([&] {
+        q_taint("build/t28.gtb", 0, 0, -1, false, false, 5, 0, 0, off, "");
+    });
+    CHECK(out.find("(event") != std::string::npos,
+          "--off seed resolves to an event coordinate");
+    // window-limited forward walk must announce PARTIAL on the first line
+    std::string pw = capture_stdout([] {
+        q_taint("build/t28.gtb", 0, 0, -1, false, false, 5, 3, 0, 0, "");
+    });
+    CHECK(pw.rfind("PARTIAL:", 0) == 0, "window-limited forward taint prints PARTIAL first");
+    // --at-ev: seeds later in the stream
+    std::string ae = capture_stdout([] {
+        q_taint("build/t28.gtb", 0, 0, -1, false, false, 5, 0, 1000, 0, "");
+    });
+    CHECK(ae.find("ev=1000") != std::string::npos || ae.find("(event 1000)") != std::string::npos,
+          "--at-ev 1000 seeds at event 1000");
+}
+
+// ---------------------------------------------------------------------------
+// T29: agent output contract — export compact/jsonl, cursor, --json meta
+// ---------------------------------------------------------------------------
+static void test_agent_output() {
+    printf("[T29] export compact/jsonl + cursor + --json meta line\n");
+    // reuses build/t28.gtb (recorded by T28; selftest order guarantees it)
+    GtbFile f;
+    CHECK(f.load("build/t28.gtb"), "t28.gtb parses (T29 runs after T28)");
+
+    // compact: module header, ev-prefixed event lines, no module repetition
+    {
+        FILE* o = fopen("build/t29c.txt", "wb");
+        Expander(f).expand_compact(o);
+        fclose(o);
+        std::ifstream sf("build/t29c.txt");
+        std::stringstream ss;
+        ss << sf.rdbuf();
+        std::string txt = ss.str();
+        CHECK(txt.rfind("== ", 0) == 0, "compact starts with a '== ' module header");
+        bool ok_lines = true, saw_ev = false;
+        size_t pos = 0;
+        while (pos < txt.size()) {
+            size_t e = txt.find('\n', pos);
+            std::string ln = txt.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+            pos = e == std::string::npos ? txt.size() : e + 1;
+            if (ln.empty()) continue;
+            if (ln.rfind("== ", 0) == 0) continue;         // module switch header
+            if (ln[0] == '+' || ln[0] == 'n') continue;    // +call/+ret/+svc/next
+            if (ln[0] >= '0' && ln[0] <= '9') {
+                saw_ev = true;
+                if (ln.find(" !0x") == std::string::npos ||
+                    ln.find("libtarget.so") != std::string::npos)
+                    ok_lines = false;
+            } else {
+                ok_lines = false;
+            }
+        }
+        CHECK(ok_lines && saw_ev,
+              "compact event lines are '<ev> !0x<off> ...' without module names");
+    }
+
+    // jsonl: every line is one object carrying an ev field
+    {
+        FILE* o = fopen("build/t29j.txt", "wb");
+        Expander(f).expand_jsonl(o);
+        fclose(o);
+        std::ifstream sf("build/t29j.txt");
+        std::stringstream ss;
+        ss << sf.rdbuf();
+        std::string txt = ss.str();
+        bool ok = !txt.empty();
+        int lines = 0;
+        size_t pos = 0;
+        while (pos < txt.size() && ok) {
+            size_t e = txt.find('\n', pos);
+            std::string ln = txt.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+            pos = e == std::string::npos ? txt.size() : e + 1;
+            if (ln.empty()) continue;
+            lines++;
+            if (ln[0] != '{' || ln.find("\"ev\":") == std::string::npos) ok = false;
+        }
+        CHECK(ok && lines > 100, "jsonl lines are objects with \"ev\" (N lines)");
+    }
+
+    // cursor: --limit 5 stops and reports the 6th event's ev
+    {
+        FILE* o = fopen("build/t29l.txt", "wb");
+        uint64_t stop = 0;
+        uint64_t n = Expander(f).expand_compact(o, 0, UINT64_MAX, 5, &stop);
+        fclose(o);
+        CHECK(n == 5, "compact --limit 5 emits 5 lines");
+        CHECK(stop != 0 && stop != UINT64_MAX, "cursor reports the stop event");
+        FILE* o2 = fopen("build/t29n.txt", "wb");
+        Expander(f).expand_compact(o2, stop, stop, 0);
+        fclose(o2);
+        std::ifstream sf("build/t29n.txt");
+        std::stringstream ss;
+        ss << sf.rdbuf();
+        std::string all = ss.str(), first;
+        size_t p2 = 0;
+        while (p2 < all.size()) { // first event line (page may open with == header)
+            size_t e = all.find('\n', p2);
+            std::string ln = all.substr(p2, e == std::string::npos ? std::string::npos : e - p2);
+            p2 = e == std::string::npos ? all.size() : e + 1;
+            if (!ln.empty() && ln[0] >= '0' && ln[0] <= '9') { first = ln; break; }
+        }
+        char expect[32];
+        snprintf(expect, sizeof expect, "%llu ", (unsigned long long)stop);
+        CHECK(first.rfind(expect, 0) == 0,
+              "cursor ev is the next (6th) event — '--from stop' re-emits exactly it");
+    }
+
+    // --json meta line: truncation flag + copy-executable continuation
+    {
+        ingest_sqlite(f, "build/t29.db");
+        std::unordered_map<uint64_t, int> cnt;
+        Expander(f).for_each([&](uint64_t, const Group& g) {
+            for (int k = 0; k < g.n_mem; k++) cnt[g.mem[k].addr]++;
+            return true;
+        });
+        uint64_t hot = 0;
+        int best = 0;
+        for (auto& kv : cnt)
+            if (kv.second > best) { best = kv.second; hot = kv.first; }
+        CHECK(best >= 3, "trace has a hot address with >= 3 accesses");
+        std::string out = capture_stdout(
+            [&] { q_mem_writes("build/t29.db", hot, 2, 0, true); });
+        CHECK(out.find("\"meta\":{\"truncated\":true") != std::string::npos,
+              "mem-writes --json ends with a meta line, truncated=true");
+        CHECK(out.find("\"next\":\"gt query mem-writes --addr 0x") != std::string::npos &&
+                  out.find("--offset 2") != std::string::npos,
+              "meta.next is the full continuation command (--offset 2)");
+        std::string st = capture_stdout([&] { q_stats("build/t29.db", 0, true); });
+        CHECK(st.find("\"meta\":{") != std::string::npos &&
+                  st.find("gt calltree --func ") != std::string::npos,
+              "stats --json meta carries suggested next commands");
+        std::string tf = capture_stdout(
+            [&] { q_mem_writes("build/t29.db", hot, best, 0, true); });
+        CHECK(tf.find("\"truncated\":false") != std::string::npos,
+              "meta truncated=false when the window covers every row");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T30: upstream log import — byte-exact round trip, dialect byte, group decode
+// ---------------------------------------------------------------------------
+static void test_import() {
+    printf("[T30] import upstream log -> gtb -> byte-identical export\n");
+    // one line per grammar shape, CRLF endings, plus off-grammar lines that
+    // must land in VERBATIM (string preview, banner, non-canonical hex,
+    // >8 tokens, mem token after "->")
+    static const char log[] =
+        "[liba.so] 0x7523a15064!0x1c3064 stp x20, x19, [sp, #0x40]; x20=0x25647380 x19=0x765f0cc050 sp=0x765f0cb8e0 mem_w=0x765f0cb920 \r\n"
+        "[liba.so] 0x7523a15068!0x1c3068 mov x29, sp; fp=0x765f0cc920 sp=0x765f0cb8e0 -> fp=0x765f0cb8e0 \r\n"
+        "[liba.so] 0x7523a1507c!0x1c307c bl #0x7523ac2d20; \r\n"
+        "[liba.so] 0x7523ac2d2c!0x270d2c br x17; x17=0x79ab967260 \r\n"
+        "call func: getpid()\r\n"
+        "ret: 0x3341\r\n"
+        "[liba.so] 0x7523a15084!0x1c3084 movi v0.2d, #0000000000000000; v0=0xa2a2a2a2a2a2a2a2 -> v0=0x0 \r\n"
+        "[liba.so] 0x7523a15074!0x1c3074 ldr x8, [x25, #0x28]; x8=0x75239ea168 x25=0x765f0cdac0 mem_r=0x765f0cdae8 -> x8=0xfdfc9d0dd48405de \r\n"
+        "[liba.so] 0x7523a15094!0x1c3094 stp q0, q0, [x29, #-0x90]; q0=0x0 q0=0x0 fp=0x765f0cb8e0 mem_w=0x765f0cb850 \r\n"
+        "args0: /proc/13121/mounts\r\n"
+        "call func: fopen64(0x765f0cb850, 0x75238dc6c5)\r\n"
+        "[liba.so] 0x7523a15204!0x1c3204 ret ; \r\n"
+        "some weird banner line\r\n"
+        "[liba.so] 0x7523a1508c!0x1c308c mov w2, #0x400; w2=0x00 -> w2=0x400 \r\n"   // leading zero -> verbatim
+        "[liba.so] 0x7523a15090!0x1c3090 ldr x0, [x1]; x0=0x1 x1=0x2 x2=0x3 x3=0x4 x4=0x5 x5=0x6 x6=0x7 mem_r=0x8 -> x0=0x9 \r\n" // 9 tokens -> verbatim
+        "[liba.so] 0x7523a15098!0x1c3098 str x0, [x1]; x0=0x9 x1=0x8 mem_w=0x8 -> mem_w=0x8 \r\n"; // mem after "->" -> verbatim
+    ImportResult r;
+    RecOptions ro;
+    CHECK(import_mem(log, sizeof(log) - 1, "build/t30.gtb", ro, r),
+          "import_mem accepts the mini upstream log");
+    CHECK(r.cnt.lines == 16 && r.cnt.exec == 8 && r.cnt.call == 2 &&
+              r.cnt.ret == 1 && r.cnt.verbatim == 5,
+          "line classification counts (16/8/2/1/5)");
+
+    GtbFile f;
+    CHECK(f.load("build/t30.gtb"), "imported gtb loads (deferred META)");
+    CHECK(f.dialect == 3, "dialect byte = upstream|CRLF (3)");
+    std::string out = capture_stdout(
+        [&] { Expander(f).expand_upstream(stdout); });
+    CHECK(out == std::string(log, sizeof(log) - 1),
+          "export --format upstream replays the log byte-for-byte");
+
+    // group decode: REGW reconstruction from the write tail, mem_r decodes as
+    // a READ (tag-7 flags regression), call/ret ride the preceding group
+    bool saw_fp_write = false, saw_mem_read = false, saw_call_ret = false;
+    Expander(f).for_each([&](uint64_t, const Group& g) {
+        if (!g.has_exec) return true;
+        const Site& s = f.arena.get(g.site_id);
+        for (int k = 0; k < g.n_wr; k++)
+            if (s.addr == 0x7523a15068 && g.wr_id[k] == 29 &&
+                g.wr_val[k] == 0x765f0cb8e0)
+                saw_fp_write = true;
+        for (int k = 0; k < g.n_mem; k++)
+            if (!g.mem[k].is_write && g.mem[k].addr == 0x765f0cdae8)
+                saw_mem_read = true;
+        if (g.is_call && g.is_ret && g.call_name &&
+            strcmp(g.call_name, "getpid") == 0 && g.ret_val == 0x3341)
+            saw_call_ret = true;
+        return true;
+    });
+    CHECK(saw_fp_write, "write tail feeds register reconstruction (fp)");
+    CHECK(saw_mem_read, "mem_r token decodes as a read MemOp (tag-7 fix)");
+    CHECK(saw_call_ret, "call/ret lines ride the preceding group in order");
+
+    // LF dialect + unterminated final line
+    static const char log2[] =
+        "[m.so] 0x1000!0x0 nop; \n"
+        "tail without newline";
+    ImportResult r2;
+    CHECK(import_mem(log2, sizeof(log2) - 1, "build/t30b.gtb", ro, r2),
+          "LF log imports");
+    GtbFile f2;
+    CHECK(f2.load("build/t30b.gtb") && f2.dialect == 1, "dialect = upstream, LF");
+    std::string out2 = capture_stdout(
+        [&] { Expander(f2).expand_upstream(stdout); });
+    CHECK(out2 == std::string(log2, sizeof(log2) - 1),
+          "unterminated tail round-trips via VERBATIM");
+}
+
+// ---------------------------------------------------------------------------
+// T31: W3b streaming gtb queries — stat / mem-access / find-value / calltree
+// ---------------------------------------------------------------------------
+static void test_stat_queries() {
+    printf("[T31] stat / mem-access / find-value / calltree on gtb\n");
+    const uint64_t base = 0x80000, sp = 0x70000000;
+    // sites: prologue (mov/str), a call to outer, outer calls inner, returns,
+    // then an independent ldr
+    const uint32_t words[] = {
+        enc::movz(8, 0xbeef),      // 0x80000
+        enc::str_x(8, 31, 0x10),   // 0x80004
+        enc::bl(0x0c),             // 0x80008 -> 0x80014 (outer)
+        enc::ldr_x(9, 31, 0x20),   // 0x8000c
+        enc::ret(),                // 0x80010
+        enc::movz(9, 0x1234),      // 0x80014 (outer body)
+        enc::bl(0x08),             // 0x80018 -> 0x80020 (inner)
+        enc::ret(),                // 0x8001c (outer ret)
+        enc::nop(),                // 0x80020 (inner body)
+        enc::ret(),                // 0x80024 (inner ret)
+    };
+    SiteArena arena;
+    for (size_t i = 0; i < sizeof words / sizeof words[0]; i++)
+        arena.intern(base + i * 4, words[i], "mini.so", base, -1);
+    {
+        RecOptions ro;
+        ro.initial_sp = sp;
+        GtbRecorder g(arena);
+        g.open("build/t31.gtb", ro);
+        auto emit = [&](uint64_t pc, int wr, uint64_t wv, int mw, uint64_t ma,
+                        bool call, const char* cn, bool isret, uint64_t rv) {
+            ExecEvent ev{};
+            ev.pc = pc;
+            ev.sp = sp;
+            if (wr >= 0) { ev.n_wr = 1; ev.wr_id[0] = wr; ev.wr_val[0] = wv; }
+            if (mw >= 0) {
+                ev.n_mem = 1;
+                ev.mem[0].is_write = mw == 1;
+                ev.mem[0].addr = ma;
+                ev.mem[0].size = 8;
+                ev.mem[0].value = mw == 1 ? 0xdeadbeef : 0x5555;
+            }
+            ev.is_call = call;
+            ev.call_name = cn;
+            if (call) { ev.x[0] = 0xaa; ev.x[1] = 0xbb; }
+            ev.is_ret = isret;
+            ev.ret_val = rv;
+            g.record_event(ev);
+        };
+        emit(base + 0x00, 8, 0xdeadbeef, -1, 0, false, nullptr, false, 0);
+        emit(base + 0x04, -1, 0, 1, sp + 0x10, false, nullptr, false, 0);
+        emit(base + 0x08, -1, 0, -1, 0, true, "outer", false, 0);
+        emit(base + 0x14, 9, 0x1234, -1, 0, false, nullptr, false, 0);
+        emit(base + 0x18, -1, 0, -1, 0, true, "inner", false, 0);
+        emit(base + 0x20, -1, 0, -1, 0, false, nullptr, false, 0);
+        emit(base + 0x24, -1, 0, -1, 0, false, nullptr, true, 0xcc);
+        emit(base + 0x1c, -1, 0, -1, 0, false, nullptr, true, 0xdd);
+        emit(base + 0x0c, 9, 0x5555, 0, sp + 0x20, false, nullptr, false, 0);
+        g.finish();
+    }
+    GtbFile f;
+    CHECK(f.load("build/t31.gtb"), "t31.gtb parses");
+
+    std::string st = capture_stdout([] { q_stat("build/t31.gtb", false); });
+    CHECK(st.find("exec=9") != std::string::npos &&
+              st.find("mini.so") != std::string::npos,
+          "stat text shows exec count and module");
+    std::string sj = capture_stdout([] { q_stat("build/t31.gtb", true); });
+    CHECK(sj.find("\"exec\":9") != std::string::npos &&
+              sj.find("\"meta\":{") != std::string::npos,
+          "stat --json carries counts and the meta line");
+
+    std::string mw = capture_stdout([sp] {
+        q_mem_access("build/t31.gtb", sp + 0x10, false, 0, 0, 10, 0, false);
+    });
+    CHECK(mw.find(" w 0x") != std::string::npos &&
+              mw.find("0x70000010") != std::string::npos,
+          "mem-access --addr finds the store");
+    std::string mr = capture_stdout([sp] {
+        q_mem_access("build/t31.gtb", 0, true, sp, 0x100, 10, 0, false);
+    });
+    CHECK(mr.find("0x70000010") != std::string::npos &&
+              mr.find("0x70000020") != std::string::npos,
+          "mem-access --range covers store and load");
+
+    std::string fv = capture_stdout([] {
+        q_find_value("build/t31.gtb", 0xdeadbeef, 10, 0, false);
+    });
+    CHECK(fv.find("x8") != std::string::npos && fv.find("0xdeadbeef") != std::string::npos,
+          "find-value locates the x8 write");
+    std::string fv2 = capture_stdout([] {
+        q_find_value("build/t31.gtb", 0x5555, 10, 0, false);
+    });
+    CHECK(fv2.find("x9") != std::string::npos && fv2.find("mem_r") != std::string::npos,
+          "find-value sees both the reg write and the load value lanes");
+
+    std::string ct = capture_stdout([] {
+        q_calltree_gtb("build/t31.gtb", "outer", 3, 40, false);
+    });
+    CHECK(ct.find("outer(") != std::string::npos &&
+              ct.find("\n  inner(") != std::string::npos,
+          "calltree nests inner under outer");
+    std::string cn = capture_stdout([] {
+        q_calltree_gtb("build/t31.gtb", "nosuch", 3, 40, false);
+    });
+    CHECK(cn.find("no call to nosuch") != std::string::npos,
+          "calltree reports a missing function plainly");
+}
+
+// ---------------------------------------------------------------------------
+// T32: dynamic detail escalation — calls-only run flips to full on a symbol
+// ---------------------------------------------------------------------------
+static void test_escalate() {
+    printf("[T32] dynamic detail escalation (calls -> full on symbol)\n");
+    CorpusConfig cfg;
+    cfg.outer_iters = 50;
+    cfg.inner_iters = 20;
+    Program p = build_program(cfg);
+    SiteArena arena = compile_sites(p);
+    RecOptions ro;
+    ro.initial_sp = corpus_stack_top();
+    ro.detail = DETAIL_CALLS;
+    ro.escalate_sym = "transform_block_1"; // same trampoline-called func as T6
+    ro.escalate_detail = DETAIL_FULL;
+    ro.escalate_events = 500;
+    GtbRecorder g(arena);
+    g.open("build/t32.gtb", ro);
+    run_program(p, cfg, 0, [](const ExecEvent& ev, void* u) {
+        static_cast<GtbRecorder*>(u)->record_event(ev);
+    }, &g);
+    RecStats st = g.finish();
+    CHECK(g.escalated(), "escalation fired on the trigger symbol");
+    CHECK(g.current_detail() == DETAIL_CALLS,
+          "budget drained: detail fell back to calls-only");
+
+    GtbFile f;
+    CHECK(f.load("build/t32.gtb"), "t32.gtb parses");
+    CHECK(f.n_exec >= 100 && f.n_exec <= 600,
+          "full-detail window is bounded (~escalate_events)");
+    CHECK(f.n_exec < st.events_seen / 10,
+          "most of the run stayed calls-only (no EXEC events)");
+    CHECK(f.n_regw > 0 && f.n_mem > 0,
+          "the escalated window carries register writes and mem ops");
+    // the trigger call group precedes the first exec group
+    uint64_t first_call_gi = UINT64_MAX, first_exec_gi = UINT64_MAX;
+    Expander(f).for_each([&](uint64_t gi, const Group& g2) {
+        if (first_call_gi == UINT64_MAX && !g2.has_exec && g2.is_call)
+            first_call_gi = gi;
+        if (first_exec_gi == UINT64_MAX && g2.has_exec) first_exec_gi = gi;
+        return first_exec_gi == UINT64_MAX;
+    });
+    CHECK(first_call_gi != UINT64_MAX && first_exec_gi != UINT64_MAX &&
+              first_call_gi < first_exec_gi,
+          "calls-only prefix precedes the escalated full-detail window");
+}
+
 int cmd_selftest() {
     site_compiler_init();
     system("mkdir -p build");
@@ -388,6 +981,14 @@ int cmd_selftest() {
     test_crash();
     test_trigger_ring();
     test_diff();
+    test_diff_module_offset();
+    test_taint_nzcv();
+    test_taint_simd();
+    test_taint_coords();
+    test_agent_output();
+    test_import();
+    test_stat_queries();
+    test_escalate();
     printf("\n%s (%d failures)\n", g_fail ? "SELFTEST FAILED" : "ALL TESTS PASSED", g_fail);
     site_compiler_shutdown();
     return g_fail ? 1 : 0;

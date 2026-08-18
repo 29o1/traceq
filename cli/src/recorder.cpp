@@ -20,6 +20,11 @@ enum : uint8_t {
     // REGW small-delta inline encoding: 0x80 | reg<<3 | zigzag-code
     // (code 0-6 covers deltas -3..+3, 7 = escape to EV_REGW)
     EV_REGW_INLINE = 0x80,
+    // importer-only tags (never emitted by the Stalker hot path)
+    EV_RDVAL = 8,    // observed read value: uvar name_id + u8 kind + value
+    EV_SIMDV = 9,    // observed write value: uvar name_id + u8 kind + value
+    EV_VERBATIM = 10, // unstructured line: uvar len + raw bytes
+    EV_CALL2 = 11,   // call with observed arg count: uvar sym+1 + u8 n + n deltas
 };
 
 GtbRecorder* GtbRecorder::active_ = nullptr;
@@ -62,10 +67,14 @@ bool GtbRecorder::open(const std::string& path, const RecOptions& opts) {
         pool_free_.push_back(c);
     }
 
-    // META chunk
-    std::vector<uint8_t> meta;
-    arena_.serialize(meta);
-    write_chunk_to_fd(fd_, meta.data(), meta.size(), CH_META);
+    // META chunk (import mode defers it: the arena is still growing)
+    if (!opt_.defer_meta) {
+        std::vector<uint8_t> meta;
+        arena_.serialize(meta);
+        write_chunk_to_fd(fd_, meta.data(), meta.size(), CH_META);
+        open_sites_ = arena_.size();
+        open_strings_ = arena_.strings().size();
+    }
 
     // grab first chunk
     cur_ = pool_free_.back();
@@ -74,6 +83,9 @@ bool GtbRecorder::open(const std::string& path, const RecOptions& opts) {
 
     start_ns_ = now_ns();
     stats_ = RecStats{};
+    cur_detail_ = opt_.detail;
+    escalated_ = false;
+    escalate_budget_ = 0;
     open_ = true;
 
     if (opt_.ring_keep_chunks == 0) {
@@ -179,6 +191,16 @@ void GtbRecorder::record_event(const ExecEvent& ev) {
         return;
     }
 
+    // ---- dynamic detail escalation (checked before the detail reads below) --
+    if (opt_.escalate_sym && !escalated_ && ev.is_call && ev.call_name &&
+        strcmp(ev.call_name, opt_.escalate_sym) == 0) {
+        escalated_ = true;
+        cur_detail_ = opt_.escalate_detail;
+        escalate_budget_ = opt_.escalate_events;
+    }
+    if (escalated_ && escalate_budget_ > 0 && --escalate_budget_ == 0)
+        cur_detail_ = opt_.detail; // window drained: fall back to the cheap level
+
     // ---- trigger (flight-recorder dump) ----
     if (opt_.trigger_sym && ev.is_call && ev.call_name &&
         strcmp(ev.call_name, opt_.trigger_sym) == 0) {
@@ -198,9 +220,9 @@ void GtbRecorder::record_event(const ExecEvent& ev) {
     uint32_t site_id = last_site_cache_id_;
 
     uint8_t tmp[64];
-    const bool is_calls_only = opt_.detail == DETAIL_CALLS;
-    const bool log_mem = opt_.detail != DETAIL_CALLS;
-    const bool log_regs = opt_.detail == DETAIL_FULL;
+    const bool is_calls_only = cur_detail_ == DETAIL_CALLS;
+    const bool log_mem = cur_detail_ != DETAIL_CALLS;
+    const bool log_regs = cur_detail_ == DETAIL_FULL;
 
     bool interesting =
         (!is_calls_only) || ev.is_call || ev.is_svc || ev.is_ret;
@@ -360,6 +382,7 @@ void GtbRecorder::write_footer_locked(uint8_t reason) {
     n += put_uvar(f + n, stats_.events_recorded);
     n += put_uvar(f + n, stats_.bytes_written);
     n += put_uvar(f + n, opt_.initial_sp);
+    f[n++] = dialect_; // absent in older files -> 0 -> corpus
     write_chunk_to_fd(fd_, f, n, CH_FOOTER);
 }
 
@@ -403,6 +426,20 @@ RecStats GtbRecorder::finish() {
         }
     }
 
+    // import mode: the arena finished growing, emit META before the footer
+    if (opt_.defer_meta) {
+        std::vector<uint8_t> meta;
+        arena_.serialize(meta);
+        write_chunk_to_fd(fd_, meta.data(), meta.size(), CH_META);
+    } else if (arena_.size() != open_sites_ || arena_.strings().size() != open_strings_) {
+        // the arena grew after the upfront META (call-site symbols intern lazily
+        // during recording) — the loader takes the LAST meta chunk, so a fresh
+        // full one here makes those string ids resolvable
+        std::vector<uint8_t> meta;
+        arena_.serialize(meta);
+        write_chunk_to_fd(fd_, meta.data(), meta.size(), CH_META);
+    }
+
     write_footer_locked(reason);
     ::close(fd_);
     fd_ = -1;
@@ -415,6 +452,182 @@ RecStats GtbRecorder::finish() {
     sigaction(SIGABRT, &sa, nullptr);
     sigaction(SIGILL, &sa, nullptr);
     return stats_;
+}
+
+// ---------------------------------------------------------------------------
+// import cold path
+// ---------------------------------------------------------------------------
+bool GtbRecorder::imp_gate() {
+    if (!open_) return false;
+    stats_.events_seen++; // one input line per gate call
+    if (opt_.max_ms && now_ns() - start_ns_ > opt_.max_ms * 1000000ULL) {
+        stats_.reason = STOP_MAX_MS;
+        open_ = false;
+        return false;
+    }
+    if (opt_.max_bytes && stats_.bytes_written > opt_.max_bytes) {
+        stats_.reason = STOP_MAX_BYTES;
+        open_ = false;
+        return false;
+    }
+    if (opt_.max_events && stats_.events_seen > opt_.max_events) {
+        stats_.reason = STOP_MAX_EVENTS;
+        open_ = false;
+        return false;
+    }
+    return true;
+}
+
+void GtbRecorder::imp_exec(uint32_t site_id) {
+    if (!open_) return;
+    uint8_t tmp[16];
+    int64_t d = int64_t(site_id) - last_site_id_;
+    size_t n = put_var(tmp, d);
+    ensure_space(1 + n);
+    push_u8(EV_EXEC);
+    memcpy(cur_->buf.data() + cur_->n, tmp, n);
+    cur_->n += n;
+    last_site_id_ = int64_t(site_id);
+    stats_.events_recorded++;
+}
+
+void GtbRecorder::imp_regw(int reg, uint64_t v) {
+    if (!open_) return;
+    uint8_t tmp[16];
+    uint8_t reg8 = uint8_t(reg);
+    int64_t d = int64_t(v) - int64_t(last_reg_val_[reg8 & 31]);
+    size_t n = put_var(tmp, d);
+    ensure_space(2 + n);
+    push_u8(EV_REGW);
+    push_u8(reg8);
+    memcpy(cur_->buf.data() + cur_->n, tmp, n);
+    cur_->n += n;
+    last_reg_val_[reg8 & 31] = v;
+}
+
+void GtbRecorder::imp_mem(bool is_write, uint64_t addr, uint8_t size) {
+    if (!open_) return;
+    uint8_t tmp[16];
+    int64_t ad = int64_t(addr) - int64_t(last_mem_addr_);
+    size_t n = put_var(tmp, ad);
+    ensure_space(2 + n);
+    push_u8(EV_MEMW_NV); // no-value mem access; flags bit0 says read or write
+    push_u8(uint8_t(size << 1) | uint8_t(is_write ? 1 : 0));
+    memcpy(cur_->buf.data() + cur_->n, tmp, n);
+    cur_->n += n;
+    last_mem_addr_ = addr;
+    stats_.events_recorded++;
+}
+
+// shared body of RDVAL/SIMDV (kind 0: delta-coded <=64-bit observed value)
+void GtbRecorder::imp_rdval(uint32_t name_id, uint64_t v) {
+    if (!open_) return;
+    uint8_t tmp[24];
+    size_t nn = put_uvar(tmp, name_id);
+    uint64_t& last = last_obs_[name_id];
+    int64_t d = int64_t(v) - int64_t(last);
+    uint8_t tmp2[16];
+    size_t nd = put_var(tmp2, d);
+    ensure_space(1 + nn + 1 + nd);
+    push_u8(EV_RDVAL);
+    memcpy(cur_->buf.data() + cur_->n, tmp, nn);
+    cur_->n += nn;
+    push_u8(0);
+    memcpy(cur_->buf.data() + cur_->n, tmp2, nd);
+    cur_->n += nd;
+    last = v;
+}
+
+void GtbRecorder::imp_rdval128(uint32_t name_id, unsigned __int128 v) {
+    if (!open_) return;
+    uint8_t tmp[8];
+    size_t nn = put_uvar(tmp, name_id);
+    ensure_space(1 + nn + 1 + 16);
+    push_u8(EV_RDVAL);
+    memcpy(cur_->buf.data() + cur_->n, tmp, nn);
+    cur_->n += nn;
+    push_u8(1);
+    memcpy(cur_->buf.data() + cur_->n, &v, 16);
+    cur_->n += 16;
+}
+
+void GtbRecorder::imp_wval(uint32_t name_id, uint64_t v) {
+    if (!open_) return;
+    uint8_t tmp[24];
+    size_t nn = put_uvar(tmp, name_id);
+    uint64_t& last = last_obs_[name_id];
+    int64_t d = int64_t(v) - int64_t(last);
+    uint8_t tmp2[16];
+    size_t nd = put_var(tmp2, d);
+    ensure_space(1 + nn + 1 + nd);
+    push_u8(EV_SIMDV);
+    memcpy(cur_->buf.data() + cur_->n, tmp, nn);
+    cur_->n += nn;
+    push_u8(0);
+    memcpy(cur_->buf.data() + cur_->n, tmp2, nd);
+    cur_->n += nd;
+    last = v;
+}
+
+void GtbRecorder::imp_wval128(uint32_t name_id, unsigned __int128 v) {
+    if (!open_) return;
+    uint8_t tmp[8];
+    size_t nn = put_uvar(tmp, name_id);
+    ensure_space(1 + nn + 1 + 16);
+    push_u8(EV_SIMDV);
+    memcpy(cur_->buf.data() + cur_->n, tmp, nn);
+    cur_->n += nn;
+    push_u8(1);
+    memcpy(cur_->buf.data() + cur_->n, &v, 16);
+    cur_->n += 16;
+}
+
+void GtbRecorder::imp_call(uint32_t sym_id, const uint64_t* args, int nargs) {
+    if (!open_ || nargs < 0 || nargs > 8) return;
+    uint8_t tmp[16];
+    size_t n0 = put_uvar(tmp, uint64_t(sym_id) + 1);
+    ensure_space(1 + n0 + 1 + size_t(nargs) * 12);
+    push_u8(EV_CALL2);
+    memcpy(cur_->buf.data() + cur_->n, tmp, n0);
+    cur_->n += n0;
+    push_u8(uint8_t(nargs));
+    for (int i = 0; i < nargs; i++) {
+        uint64_t v = args[i];
+        int64_t d = int64_t(v) - int64_t(last_arg_val_[i]);
+        size_t n = put_var(tmp, d);
+        ensure_space(n + 1);
+        memcpy(cur_->buf.data() + cur_->n, tmp, n);
+        cur_->n += n;
+        last_arg_val_[i] = v;
+    }
+    stats_.events_recorded++;
+}
+
+void GtbRecorder::imp_ret(uint64_t v) {
+    if (!open_) return;
+    uint8_t tmp[16];
+    int64_t d = int64_t(v) - int64_t(last_ret_val_);
+    size_t n = put_var(tmp, d);
+    ensure_space(1 + n);
+    push_u8(EV_RET);
+    memcpy(cur_->buf.data() + cur_->n, tmp, n);
+    cur_->n += n;
+    last_ret_val_ = v;
+    stats_.events_recorded++;
+}
+
+void GtbRecorder::imp_verbatim(const void* p, size_t n) {
+    if (!open_) return;
+    if (n > 60000) return; // cannot fit a chunk; importer counts it as dropped
+    uint8_t tmp[8];
+    size_t nl = put_uvar(tmp, n);
+    ensure_space(1 + nl + n);
+    push_u8(EV_VERBATIM);
+    memcpy(cur_->buf.data() + cur_->n, tmp, nl);
+    cur_->n += nl;
+    memcpy(cur_->buf.data() + cur_->n, p, n);
+    cur_->n += n;
+    stats_.events_recorded++;
 }
 
 void GtbRecorder::crash_flush_current() {
