@@ -133,25 +133,15 @@ int cmd_find_value(int argc, char** argv) {
     uint64_t val = 0, offset = 0;
     int limit = 20;
     bool have_val = false, json = false;
-    std::string pos[2];
-    int npos = 0;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
-        else if (argv[i][0] != '-' && npos < 2) pos[npos++] = argv[i];
-    }
-    // value and file are accepted in either order: the positional that parses
-    // as a number in full is the value
-    for (int k = 0; k < npos; k++) {
-        char* end = nullptr;
-        uint64_t v = strtoull(pos[k].c_str(), &end, 0);
-        if (end && *end == 0 && end != pos[k].c_str() && !have_val) {
-            val = v;
-            have_val = true;
-        } else if (gtb.empty()) {
-            gtb = pos[k];
+        else if (argv[i][0] != '-') {
+            // fixed positional order: value first, then the gtb path
+            if (!have_val) { val = strtoull(argv[i], nullptr, 0); have_val = true; }
+            else if (gtb.empty()) gtb = argv[i];
         }
     }
     if (gtb.empty() || !have_val) {
@@ -182,8 +172,8 @@ static void usage() {
         "gt — GumTrace-ng: agent-facing trace CLI\n"
         "usage:\n"
         "  gt import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
-        "  gt export    [--format auto|legacy|compact|jsonl|upstream]\n"
-        "               [--from E --to E --idx --limit N] trace.gtb [-o FILE]\n"
+        "  gt export    [--format auto|compact|jsonl|upstream]\n"
+        "               [--from E --to E --limit N] trace.gtb [-o FILE]\n"
         "  gt taint     (--seed-addr A|--seed-reg R|--seed-q Q) [--back]\n"
         "               [--at-ev N] [--off O [--mod M]] [--window N] trace.gtb\n"
         "  gt diff      a.gtb b.gtb\n"
@@ -224,53 +214,51 @@ int main(int argc, char** argv) {
 int cmd_export(int argc, char** argv) {
     std::string in, out = "-", fmt = "auto";
     uint64_t from = 0, to = UINT64_MAX, limit = 0;
-    bool idx = false, json = false, have_to = false;
+    bool json = false, have_to = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--to")) { to = strtoull(next(), nullptr, 10); have_to = true; }
         else if (!strcmp(argv[i], "--limit")) limit = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--idx")) idx = true;
         else if (!strcmp(argv[i], "--format")) fmt = next();
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (!strcmp(argv[i], "-o")) out = next();
         else if (argv[i][0] != '-') in = argv[i];
     }
-    if (fmt != "auto" && fmt != "legacy" && fmt != "compact" && fmt != "jsonl" &&
-        fmt != "upstream") {
-        fprintf(stderr, "export: unknown --format %s (auto|legacy|compact|jsonl|upstream)\n",
+    if (fmt != "auto" && fmt != "compact" && fmt != "jsonl" && fmt != "upstream") {
+        fprintf(stderr, "export: unknown --format %s (auto|compact|jsonl|upstream)\n",
                 fmt.c_str());
         return 2;
     }
     gt::GtbFile f;
     if (!f.load(in)) { fprintf(stderr, "load failed\n"); return 1; }
     // auto resolves by the footer dialect byte: imported logs replay their
-    // original upstream text, recorded corpora replay legacy text
-    if (fmt == "auto") fmt = (f.dialect & 1) ? "upstream" : "legacy";
-    if (json && (fmt == "legacy" || fmt == "upstream"))
+    // original upstream text, native recordings render compact
+    if (fmt == "auto") fmt = (f.dialect & 1) ? "upstream" : "compact";
+    if (json && fmt == "upstream")
         fmt = "jsonl"; // --json selects the JSON Lines format
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     gt::Expander ex(f);
     uint64_t stop_gi = UINT64_MAX, n = 0;
-    if (fmt == "legacy") n = ex.expand_text(o, from, to, idx, limit, &stop_gi);
-    else if (fmt == "upstream") n = ex.expand_upstream(o, from, to, limit, &stop_gi);
+    if (fmt == "upstream") n = ex.expand_upstream(o, from, to, limit, &stop_gi);
     else if (fmt == "compact") n = ex.expand_compact(o, from, to, limit, &stop_gi);
     else n = ex.expand_jsonl(o, from, to, limit, &stop_gi);
     if (out != "-") fclose(o);
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {
-        // cursor: the full continuation command. legacy output is byte-guarded
-        // (T3), so its cursor rides stderr with the other diagnostics; the
-        // agent formats print it as the trailing line of the content stream.
+        // cursor: the full continuation command. upstream output is
+        // byte-guarded (roundtrip contract), so its cursor rides stderr with
+        // the other diagnostics; the agent formats print it as the trailing
+        // line of the content stream.
         next_cmd = "gt export --from " + std::to_string(stop_gi);
         if (limit) next_cmd += " --limit " + std::to_string(limit);
         if (have_to) next_cmd += " --to " + std::to_string(to);
-        if (fmt != "legacy") next_cmd += " --format " + fmt;
+        next_cmd += " --format " + fmt;
         next_cmd += " " + in;
         if (fmt == "compact") fprintf(stdout, "next: %s\n", next_cmd.c_str());
-        else if (fmt == "legacy" || fmt == "upstream")
+        else if (fmt == "upstream")
             fprintf(stderr, "next: %s\n", next_cmd.c_str());
     }
     if (fmt == "jsonl") {

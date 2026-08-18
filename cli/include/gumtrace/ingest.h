@@ -1,5 +1,5 @@
 #pragma once
-// .gtb parsing and the Expander (legacy/upstream/compact/jsonl expansion).
+// .gtb parsing and the Expander (upstream/compact/jsonl expansion).
 #include "event.h"
 #include "recorder.h"
 #include "site.h"
@@ -16,8 +16,11 @@ struct GtbFile {
     std::string path;
     // concatenated EVENTS payload (bounded by guards; loaded once)
     std::vector<uint8_t> events;
-    // verbatim line payload (EV_VERBATIM bodies), referenced by Group
-    std::string verbatim;
+    // verbatim line payload (EV_VERBATIM bodies), referenced by Group.
+    // mutable: the Expander appends bodies on the fly (a lazy cache of the
+    // events payload — append-only, idempotent per file) while the logical
+    // content of the file stays const.
+    mutable std::string verbatim;
     uint8_t stop_reason = 0;
     uint8_t dialect = 0;       // footer dialect byte: bit0=upstream, bit1=CRLF
     uint64_t events_seen = 0, events_recorded = 0, bytes_written = 0;
@@ -66,20 +69,12 @@ struct Group {
 
 // Streams groups from a GtbFile, reconstructing register values (reads are
 // rebuilt from write history; sp initialized from the footer, 0 = unknown).
-// VERBATIM bodies are appended to f.verbatim on the fly — const GtbFile& is
-// kept for API compatibility; the mutation is append-only and idempotent per
-// file as long as one GtbFile is served by at most one Expander at a time.
+// One GtbFile is served by at most one Expander at a time.
 class Expander {
 public:
     explicit Expander(const GtbFile& f) : f_(f) {}
     // cb(group_index 0-based, group); returns false to stop
     bool for_each(const std::function<bool(uint64_t, const Group&)>& cb);
-    // legacy-identical text expansion into out. stop_gi (optional) receives
-    // the group index where a max_lines stop happened, UINT64_MAX if the
-    // window drained (cursor support for `gt export`).
-    uint64_t expand_text(FILE* out, uint64_t from_idx = 0, uint64_t to_idx = UINT64_MAX,
-                         bool print_idx = false, uint64_t max_lines = 0,
-                         uint64_t* stop_gi = nullptr);
     // upstream dialect (footer dialect bit0): observed read values incl. old
     // values of written registers, mem_r/mem_w address-only, "-> " write
     // tails, call with bare hex args, ret with a bare hex value, verbatim
@@ -90,7 +85,7 @@ public:
     // agent-facing expansions over the same groups: compact text (module
     // header lines + !0xoffset addressing, no column padding) and JSON Lines
     // (one object per event, u64 values as hex strings). Same window/limit/
-    // stop semantics as expand_text; max_lines counts emitted lines.
+    // stop semantics as expand_upstream; max_lines counts emitted lines.
     uint64_t expand_compact(FILE* out, uint64_t from_idx = 0,
                             uint64_t to_idx = UINT64_MAX, uint64_t max_lines = 0,
                             uint64_t* stop_gi = nullptr);

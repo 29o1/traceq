@@ -204,7 +204,7 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     regs_[31] = f_.initial_sp;
     const uint8_t* p = f_.events.data();
     size_t len = f_.events.size(), o = 0;
-    std::string& verbatim = const_cast<std::string&>(f_.verbatim);
+    std::string& verbatim = f_.verbatim;
     Group g;
     uint64_t gi = 0;
     std::unordered_map<uint32_t, uint64_t> last_obs;
@@ -428,13 +428,8 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy-identical text expansion
+// register name table for the expansion engines
 // ---------------------------------------------------------------------------
-static void emit_hex64(std::string& s, uint64_t v) {
-    char tmp[16];
-    size_t n = legacy_hex64(tmp, v);
-    s.append(tmp, n);
-}
 static const char* idx_name(int ctx_idx) {
     static const char* names[32] = {
         "x0","x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15",
@@ -443,8 +438,8 @@ static const char* idx_name(int ctx_idx) {
 }
 
 // plan reads (pre-event values) and writes (matched against the group's
-// write records), in plan order — the same pairing expand_text uses for its
-// deferred write tail. SIMD reads have no value lane and are skipped.
+// write records), in plan order. SIMD reads have no value lane and are
+// skipped.
 //
 // Imported groups carry the upstream-observed token values: obs = read tokens
 // (incl. mem tokens) in plan order, wobs = "-> " write tokens. When the counts
@@ -469,212 +464,6 @@ static ObsMap obs_map(const Site& s, const Group& g) {
     m.use_obs = n_rd > 0 && g.n_obs == n_rd;
     m.use_wobs = n_wr > 0 && g.n_wobs == n_wr;
     return m;
-}
-
-uint64_t Expander::expand_text(FILE* out, uint64_t from_idx, uint64_t to_idx,
-                               bool print_idx, uint64_t max_lines, uint64_t* stop_gi) {
-    if (stop_gi) *stop_gi = UINT64_MAX;
-    const SiteArena& A = f_.arena;
-    const char* pool = A.pool_ptr();
-    const std::string& mod = f_.modules.empty() ? std::string("?") : f_.modules[0];
-
-    std::string line;
-    uint64_t lines = 0;
-
-    // pending state across groups (mirrors LegacyRecorder)
-    int pwr = 0;
-    int pwr_id[8];
-    uint64_t pwr_val[8];
-    bool pend_call = false, pend_svc = false, pend_ret = false;
-    std::string pend_name;
-    uint64_t pargs[4] = {0}, psvc_num = 0, psvc_args[3] = {0}, pret_val = 0;
-
-    auto emit_group_text = [&](uint64_t gi, const Group& g) -> bool {
-        if (gi < from_idx || gi > to_idx) {
-            // still must maintain pending state correctly
-            pwr = 0;
-            pend_call = pend_svc = pend_ret = false;
-            return true;
-        }
-        if (max_lines && lines >= max_lines) {
-            if (stop_gi) *stop_gi = gi;
-            return false;
-        }
-
-        // 2. deferred writes of the previous group
-        if (pwr > 0) {
-            line.append("-> ");
-            for (int i = 0; i < pwr; i++) {
-                line.append(idx_name(pwr_id[i]));
-                line.append("=0x");
-                emit_hex64(line, pwr_val[i]);
-                line.append(" ");
-            }
-            line.append("\n");
-        }
-        // 3. pending blocks
-        if (pend_call) {
-            line += "call func: " + pend_name + "(x0=0x";
-            emit_hex64(line, pargs[0]); line += ", x1=0x";
-            emit_hex64(line, pargs[1]); line += ", x2=0x";
-            emit_hex64(line, pargs[2]); line += ", x3=0x";
-            emit_hex64(line, pargs[3]); line += ")\n";
-        }
-        if (pend_svc) {
-            const char* nm = svc_name(psvc_num);
-            if (nm) {
-                line += std::string("svc ") + nm + "(x0=0x";
-                emit_hex64(line, psvc_args[0]); line += ", x1=0x";
-                emit_hex64(line, psvc_args[1]); line += ", x2=0x";
-                emit_hex64(line, psvc_args[2]); line += ")\n";
-            } else {
-                line += "svc #";
-                char b[32];
-                snprintf(b, sizeof(b), "%llu", (unsigned long long)psvc_num);
-                line += b;
-                line += "(x0=0x";
-                emit_hex64(line, psvc_args[0]);
-                line += ")\n";
-            }
-        }
-        if (pend_ret) {
-            line += "ret: x0=0x";
-            emit_hex64(line, pret_val);
-            line += "\n";
-        }
-        pwr = 0;
-        pend_call = pend_svc = pend_ret = false;
-
-        if (!g.has_exec) return true; // call-only detail: blocks already above
-
-        const Site& s = A.get(g.site_id);
-        if (print_idx) {
-            char b[32];
-            snprintf(b, sizeof(b), "%llu ", (unsigned long long)gi);
-            line += b;
-        }
-        line.append(pool + s.prefix_off, s.prefix_len);
-
-        bool is_write = false;
-        int mem_idx = 0;
-        // imported groups carry upstream-observed read values: prefer them over
-        // the write-history shadow, which goes stale across unrecorded calls
-        const ObsMap om = obs_map(s, g);
-        for (uint8_t i = 0; i < s.n_ops; i++) {
-            const OpPlan& op = s.ops[i];
-            if (op.kind == OP_REG_R) {
-                if (op.ctx_idx < 0) continue; // SIMD dep-only plan entry: no value lane
-                line.append(idx_name(op.ctx_idx));
-                line.append("=0x");
-                emit_hex64(line, om.use_obs ? uint64_t(g.obs[om.obs_at[i]].val)
-                                            : op.ctx_idx == 31
-                                   ? regs_[31]
-                                   : regs_[op.ctx_idx & 31]);
-                line.append(" ");
-            } else if (op.kind == OP_REG_W) {
-                is_write = true;
-            } else if (op.kind == OP_MEM_R || op.kind == OP_MEM_W) {
-                if (mem_idx < g.n_mem) {
-                    const MemOp& m = g.mem[mem_idx++];
-                    if (op.base_ctx_idx >= 0) {
-                        line.append(idx_name(op.base_ctx_idx));
-                        line.append("=0x");
-                        emit_hex64(line, om.use_obs
-                                             ? uint64_t(g.obs[om.obs_at[i]].val)
-                                             : op.base_ctx_idx == 31
-                                                   ? regs_[31]
-                                                   : regs_[op.base_ctx_idx & 31]);
-                        line.append(" ");
-                    }
-                    line.append(op.kind == OP_MEM_W ? "mem_w=0x" : "mem_r=0x");
-                    emit_hex64(line, m.addr);
-                    line.append(" ");
-                    if (op.kind == OP_MEM_W) is_write = true;
-                }
-            }
-        }
-
-        // deferred write tail: plan-driven (implicit x30 writes from calls are
-        // recorded for reconstruction but not printed, matching upstream)
-        for (uint8_t i = 0; i < s.n_ops && pwr < 8; i++) {
-            if (s.ops[i].kind != OP_REG_W) continue;
-            for (int k = 0; k < g.n_wr; k++) {
-                if (g.wr_id[k] == s.ops[i].ctx_idx) {
-                    pwr_id[pwr] = g.wr_id[k];
-                    pwr_val[pwr] = g.wr_val[k];
-                    pwr++;
-                    break;
-                }
-            }
-        }
-        if (!is_write) line.append("\n");
-
-        if (g.is_call) {
-            pend_call = true;
-            pend_name = g.call_name ? g.call_name : "<unknown>";
-            for (int i = 0; i < 4; i++) pargs[i] = g.args[i];
-        }
-        if (g.is_svc) {
-            pend_svc = true;
-            psvc_num = g.svc_num;
-            for (int i = 0; i < 3; i++) psvc_args[i] = g.svc_args[i];
-        }
-        if (g.is_ret) {
-            pend_ret = true;
-            pret_val = g.ret_val;
-        }
-
-        fwrite(line.data(), 1, line.size(), out);
-        lines++;
-        line.clear();
-        return true;
-    };
-
-    for_each(emit_group_text);
-
-    // tail (mirrors LegacyRecorder::finish)
-    if (pwr > 0) {
-        line.append("-> ");
-        for (int i = 0; i < pwr; i++) {
-            line.append(idx_name(pwr_id[i]));
-            line.append("=0x");
-            emit_hex64(line, pwr_val[i]);
-            line.append(" ");
-        }
-        line.append("\n");
-    }
-    if (pend_call) {
-        line += "call func: " + pend_name + "(x0=0x";
-        emit_hex64(line, pargs[0]); line += ", x1=0x";
-        emit_hex64(line, pargs[1]); line += ", x2=0x";
-        emit_hex64(line, pargs[2]); line += ", x3=0x";
-        emit_hex64(line, pargs[3]); line += ")\n";
-    }
-    if (pend_svc) {
-        const char* nm = svc_name(psvc_num);
-        if (nm) {
-            line += std::string("svc ") + nm + "(x0=0x";
-            emit_hex64(line, psvc_args[0]); line += ")\n";
-        } else {
-            line += "svc #";
-            char b[32];
-            snprintf(b, sizeof(b), "%llu", (unsigned long long)psvc_num);
-            line += b;
-            line += "(x0=0x";
-            emit_hex64(line, psvc_args[0]);
-            line += ")\n";
-        }
-    }
-    if (pend_ret) {
-        line += "ret: x0=0x";
-        emit_hex64(line, pret_val);
-        line += "\n";
-    }
-    if (!line.empty()) {
-        fwrite(line.data(), 1, line.size(), out);
-        lines++;
-    }
-    return lines;
 }
 
 // ---------------------------------------------------------------------------
@@ -774,7 +563,7 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
 // ---------------------------------------------------------------------------
 // Agent-facing expansions (compact text / JSON Lines)
 //
-// Same group reconstruction as expand_text, but token-lean: modules ride
+// Same group reconstruction as expand_upstream, but token-lean: modules ride
 // "== name ==" header lines instead of per-event prefixes, addresses are
 // module-relative (!0xoffset), there is no column padding, and JSON Lines
 // carry u64 values as hex strings.

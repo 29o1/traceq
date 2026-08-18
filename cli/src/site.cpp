@@ -136,35 +136,20 @@ uint32_t SiteArena::intern_disasm(uint64_t addr, const cs_insn* insn,
         a->operands[0].type == ARM64_OP_IMM)
         s.branch_imm = uint64_t(a->operands[0].imm);
 
-    // ---- prefix (legacy-identical) ----
+    // ---- disasm text ("mnem ops") for query display ----
+    // The text prefix ("[mod] 0xPC!0xOFF ...") only exists for text-built
+    // sites (intern_text), where it replays the source log verbatim.
     char tmp[160];
-    size_t n = 0;
-    tmp[n++] = '[';
-    memcpy(tmp + n, module_name, strlen(module_name)); n += strlen(module_name);
-    memcpy(tmp + n, "] 0x", 4); n += 4;
-    n += legacy_hex64(tmp + n, addr);
-    memcpy(tmp + n, "!0x", 3); n += 3;
-    n += legacy_hex64(tmp + n, addr - module_base);
-    tmp[n++] = ' ';
-    size_t dis_off = n;
     size_t mn = strlen(insn->mnemonic);
-    memcpy(tmp + n, insn->mnemonic, mn); n += mn;
-    tmp[n++] = ' ';
-    size_t op_off = n;
     size_t on = strlen(insn->op_str);
-    memcpy(tmp + n, insn->op_str, on); n += on;
-    memcpy(tmp + n, "; ", 2); n += 2;
-    assert(n < sizeof(tmp));
-    s.disasm_off = 0; s.disasm_len = 0; // patched after pool append
-    size_t dis_len = (op_off + on) - dis_off;
-
-    s.prefix_off = prefix_pool_.size();
-    prefix_pool_.append(tmp, n);
-    // also store disasm separately for query display
+    assert(mn + 1 + on < sizeof(tmp));
+    memcpy(tmp, insn->mnemonic, mn);
+    tmp[mn] = ' ';
+    memcpy(tmp + mn + 1, insn->op_str, on);
+    s.prefix_off = 0; s.prefix_len = 0;
     s.disasm_off = prefix_pool_.size();
-    prefix_pool_.append(tmp + dis_off, dis_len);
-    s.prefix_len = uint32_t(n);
-    s.disasm_len = uint32_t(dis_len);
+    prefix_pool_.append(tmp, mn + 1 + on);
+    s.disasm_len = uint32_t(mn + 1 + on);
 
     // ---- operand plan ----
     // NZCV dependence of the whole instruction, from capstone detail:

@@ -83,9 +83,6 @@ bool GtbRecorder::open(const std::string& path, const RecOptions& opts) {
 
     start_ns_ = now_ns();
     stats_ = RecStats{};
-    cur_detail_ = opt_.detail;
-    escalated_ = false;
-    escalate_budget_ = 0;
     open_ = true;
 
     if (opt_.ring_keep_chunks == 0) {
@@ -191,16 +188,6 @@ void GtbRecorder::record_event(const ExecEvent& ev) {
         return;
     }
 
-    // ---- dynamic detail escalation (checked before the detail reads below) --
-    if (opt_.escalate_sym && !escalated_ && ev.is_call && ev.call_name &&
-        strcmp(ev.call_name, opt_.escalate_sym) == 0) {
-        escalated_ = true;
-        cur_detail_ = opt_.escalate_detail;
-        escalate_budget_ = opt_.escalate_events;
-    }
-    if (escalated_ && escalate_budget_ > 0 && --escalate_budget_ == 0)
-        cur_detail_ = opt_.detail; // window drained: fall back to the cheap level
-
     // ---- trigger (flight-recorder dump) ----
     if (opt_.trigger_sym && ev.is_call && ev.call_name &&
         strcmp(ev.call_name, opt_.trigger_sym) == 0) {
@@ -220,9 +207,9 @@ void GtbRecorder::record_event(const ExecEvent& ev) {
     uint32_t site_id = last_site_cache_id_;
 
     uint8_t tmp[64];
-    const bool is_calls_only = cur_detail_ == DETAIL_CALLS;
-    const bool log_mem = cur_detail_ != DETAIL_CALLS;
-    const bool log_regs = cur_detail_ == DETAIL_FULL;
+    const bool is_calls_only = opt_.detail == DETAIL_CALLS;
+    const bool log_mem = opt_.detail != DETAIL_CALLS;
+    const bool log_regs = opt_.detail == DETAIL_FULL;
 
     bool interesting =
         (!is_calls_only) || ev.is_call || ev.is_svc || ev.is_ret;

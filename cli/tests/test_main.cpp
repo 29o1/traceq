@@ -17,7 +17,7 @@
 //                backward walk (demand -> sources), matched counts
 //   t_native     GtbRecorder via ExecEvent literals: group reconstruction,
 //                call/svc/ret, guards (max_events/max_bytes), crash flush,
-//                ring+trigger, dynamic detail escalation
+//                ring+trigger, detail levels
 //   t_queries    query surface + agent contract on an imported file:
 //                stat/find-value/mem-access/func-args/calltree, export windows
 //                and cursor, JSON Lines shape
@@ -488,31 +488,23 @@ static void t_native() {
               "ring retained only the tail window");
         CHECK(g.events_seen == 301, "events_seen counts the full stream");
     }
-    // dynamic detail escalation: calls-only until the trigger symbol calls
+    // detail levels: calls-only records calls, not exec events
     {
         GtbRecorder rec(arena);
         RecOptions ro;
         ro.detail = DETAIL_CALLS;
-        ro.escalate_sym = "bomb";
-        ro.escalate_detail = DETAIL_FULL;
-        ro.escalate_events = 20;
-        rec.open(tmp_path("esc.gtb"), ro);
+        rec.open(tmp_path("calls.gtb"), ro);
         for (int i = 0; i < 50; i++) rec.record_event(ev_mov(0x55));
         ExecEvent e{};
         e.pc = 0x1008;
         e.is_call = true;
-        e.call_name = "bomb";
+        e.call_name = "stop_fn";
         rec.record_event(e);
-        CHECK(rec.escalated(), "escalation fired on the trigger symbol");
-        for (int i = 0; i < 100; i++) rec.record_event(ev_mov(0x66));
         rec.finish();
-        CHECK(rec.current_detail() == DETAIL_CALLS,
-              "detail falls back after the event budget drains");
         GtbFile g;
-        CHECK(g.load(tmp_path("esc.gtb")), "escalation trace parses");
-        CHECK(g.n_exec == 19,
-              "full-detail window = budget minus the arming event (19)");
-        CHECK(g.n_call == 1, "the arming call recorded in calls-only mode");
+        CHECK(g.load(tmp_path("calls.gtb")), "calls-only trace parses");
+        CHECK(g.n_exec == 0 && g.n_call == 1,
+              "calls-only detail keeps calls, drops exec events");
     }
 }
 

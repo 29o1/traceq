@@ -1,6 +1,6 @@
 #pragma once
-// GtbRecorder: the new hot path. Consumes the same ExecEvents as the legacy
-// text recorder but emits a compact binary stream:
+// GtbRecorder: the recording hot path. Consumes ExecEvents and emits a
+// compact binary stream:
 //
 //   [META chunk]   site arena (static instruction table + precompiled plans)
 //   [EVENTS chunk]* varint event stream:
@@ -88,14 +88,6 @@ struct RecOptions {
     // META chunk is written at finish() (after all EVENTS chunks) instead of
     // at open().
     bool defer_meta = false;
-    // dynamic detail escalation: run cheap (e.g. DETAIL_CALLS) until a call to
-    // escalate_sym is observed, then switch to escalate_detail for the next
-    // escalate_events events (0 = until the end) and fall back. One-shot.
-    // Replaces the re-record loop when the interesting window is located by a
-    // symbol but not by an address range.
-    const char* escalate_sym = nullptr;
-    Detail escalate_detail = DETAIL_FULL;
-    uint64_t escalate_events = 0;
 };
 
 struct RecStats {
@@ -145,10 +137,6 @@ public:
     void set_initial_sp(uint64_t v) { if (opt_.initial_sp == 0) opt_.initial_sp = v; }
 
     const RecStats& stats() const { return stats_; }
-
-    // escalation runtime state (valid while/after recording)
-    bool escalated() const { return escalated_; }
-    Detail current_detail() const { return cur_detail_; }
 
     // crash-flush support (called from signal handler)
     static void crash_flush_current();
@@ -205,17 +193,13 @@ private:
     // if the arena grew meanwhile (call symbols intern during recording, and
     // the decode-side arena must know their string ids)
     size_t open_sites_ = 0, open_strings_ = 0;
-    // escalation runtime state
-    Detail cur_detail_ = DETAIL_FULL;
-    uint64_t escalate_budget_ = 0;
-    bool escalated_ = false;
 
     // static state for the signal handler (single active recorder)
     static GtbRecorder* active_;
     friend struct CrashGate;
 };
 
-// svc number -> name (Linux/aarch64 subset; matches the legacy text table)
+// svc number -> name (Linux/aarch64 subset; matches the upstream text table)
 const char* svc_name(uint64_t n);
 
 } // namespace gt

@@ -3,12 +3,12 @@
 //
 // At transform time (once per unique instruction, like a Stalker transformer)
 // the compiler disassembles each instruction and precomputes everything the
-// hot path needs: the text prefix ("[mod] 0xPC!0xOFF mnemonic ops; "), the
-// operand plan (which registers to read/format, memory operand shape, branch
-// kind). The arena dedupes sites by address and hands out stable ids — unlike
-// GumTrace's CallbackContext ring (102400 slots, wraps and overwrites contexts
-// still referenced by live callouts on large modules), a re-translated block
-// gets the same site id back.
+// hot path needs: the disasm text ("mnem ops"), the operand plan (which
+// registers to read/format, memory operand shape, branch kind). The arena
+// dedupes sites by address and hands out stable ids — unlike GumTrace's
+// CallbackContext ring (102400 slots, wraps and overwrites contexts still
+// referenced by live callouts on large modules), a re-translated block gets
+// the same site id back.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -70,7 +70,8 @@ struct Site {
     uint8_t kind = SK_NORMAL;
     uint64_t branch_imm = 0;         // absolute target for CALL_IMM / B_IMM
     uint32_t module_id = 0;          // into arena modules() (name + base at record time)
-    uint32_t prefix_off = 0, prefix_len = 0;   // "[mod] 0xPC!0xOFF mnem ops; " (legacy-identical)
+    uint32_t prefix_off = 0, prefix_len = 0;   // "[mod] 0xPC!0xOFF mnem ops; " (intern_text only:
+                                               // the verbatim source-log slice; 0 for capstone sites)
     uint32_t disasm_off = 0, disasm_len = 0;   // "mnem ops" without prefix
     uint8_t n_ops = 0;
     OpPlan ops[8];
