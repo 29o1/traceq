@@ -29,12 +29,11 @@ using namespace gt;
 // with upstream). The walk stops early when all taint is cleared or after 1M
 // consecutive uninvolved events (upstream's scan limit), and reports why.
 //
-// Two documented extensions over upstream: NZCV is a first-class source for
+// Current upstream also propagates SIMD registers and NZCV writes. traceq's
+// remaining documented extension is treating NZCV as a first-class source for
 // csel/ccmp-class instructions (upstream's operand parser never lists NZCV as
-// a source, so cmp -> csel chains break there), and q/d/s/v SIMD registers
-// propagate like integer registers. Both fire only on traces that contain
-// those instructions, so plain integer data-flow yields the same taint sets
-// as upstream.
+// a source, so cmp -> csel chains break there). Plain integer data-flow yields
+// the same taint sets as upstream.
 //
 // Register space: mask bits 0..31 = x0..x30/sp, bits 32..63 = q0..q31, plus a
 // separate NZCV flag. Per-site source/destination roles are re-derived from

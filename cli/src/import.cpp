@@ -267,11 +267,26 @@ struct Importer {
         return true;
     }
 
-    // call func: name(0x.., 0x..) — bare hex args, 0..8 of them
+    // call func: / call jni func: name(0x.., 0x..) — bare hex args, 0..8.
+    // JNI calls reuse CALL2. A private string-pool prefix preserves their
+    // original spelling without adding another event tag; the expander strips
+    // it before exposing call_name to queries.
     bool call_line(const char* b, const char* be) {
         static const char kPre[] = "call func: ";
-        size_t pl = sizeof(kPre) - 1;
-        if (size_t(be - b) < pl + 3 || memcmp(b, kPre, pl) != 0) return false;
+        static const char kJniPre[] = "call jni func: ";
+        static const char kJniSym[] = "\x1fJNI:";
+        size_t pl = 0;
+        bool is_jni = false;
+        if (size_t(be - b) >= sizeof(kPre) - 1 + 3 &&
+            memcmp(b, kPre, sizeof(kPre) - 1) == 0) {
+            pl = sizeof(kPre) - 1;
+        } else if (size_t(be - b) >= sizeof(kJniPre) - 1 + 3 &&
+                   memcmp(b, kJniPre, sizeof(kJniPre) - 1) == 0) {
+            pl = sizeof(kJniPre) - 1;
+            is_jni = true;
+        } else {
+            return false;
+        }
         const char* p = b + pl;
         const char* lp = (const char*)memchr(p, '(', size_t(be - p));
         if (!lp || lp == p) return false;
@@ -300,12 +315,11 @@ struct Importer {
             }
         }
         if (p != be) return false;
-        char nbuf[256];
-        if (name_len >= sizeof(nbuf)) return false;
-        memcpy(nbuf, name, name_len);
-        nbuf[name_len] = 0;
+        std::string sym_name;
+        if (is_jni) sym_name.assign(kJniSym, sizeof(kJniSym) - 1);
+        sym_name.append(name, name_len);
         cnt.call++;
-        rec.imp_call(uint32_t(arena.symbol_id(nbuf)), args, na);
+        rec.imp_call(uint32_t(arena.symbol_id(sym_name.c_str())), args, na);
         return true;
     }
 

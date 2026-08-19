@@ -17,6 +17,21 @@ enum : uint8_t {
     T_MEMW_NV = 7, T_RDVAL = 8, T_SIMDV = 9, T_VERBATIM = 10, T_CALL2 = 11,
 };
 
+// Import-only string-pool marker used to retain the upstream
+// "call jni func:" spelling while keeping the existing CALL2 event layout.
+static constexpr char JNI_CALL_SYM_PREFIX[] = "\x1fJNI:";
+static constexpr size_t JNI_CALL_SYM_PREFIX_LEN = sizeof(JNI_CALL_SYM_PREFIX) - 1;
+
+static const char* decoded_call_name(const std::string& sym, bool& is_jni) {
+    if (sym.size() >= JNI_CALL_SYM_PREFIX_LEN &&
+        memcmp(sym.data(), JNI_CALL_SYM_PREFIX, JNI_CALL_SYM_PREFIX_LEN) == 0) {
+        is_jni = true;
+        return sym.c_str() + JNI_CALL_SYM_PREFIX_LEN;
+    }
+    is_jni = false;
+    return sym.c_str();
+}
+
 bool GtbFile::load(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
@@ -304,7 +319,8 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
                 g.call_target = uint64_t(a);
                 g.call_name = nullptr;
             } else if (sym - 1 < f_.arena.strings().size()) {
-                g.call_name = f_.arena.str(uint32_t(sym - 1)).c_str();
+                const std::string& name = f_.arena.str(uint32_t(sym - 1));
+                g.call_name = decoded_call_name(name, g.is_jni_call);
                 g.call_target = 0;
             } else {
                 // crash-truncated file: symbol interned after the surviving
@@ -404,7 +420,8 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
                 g.call_target = uint64_t(a);
                 g.call_name = nullptr;
             } else if (sym - 1 < f_.arena.strings().size()) {
-                g.call_name = f_.arena.str(uint32_t(sym - 1)).c_str();
+                const std::string& name = f_.arena.str(uint32_t(sym - 1));
+                g.call_name = decoded_call_name(name, g.is_jni_call);
                 g.call_target = 0;
             } else {
                 g.call_name = nullptr; // see T_CALL
@@ -529,7 +546,7 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
         }
         if (g.is_call) {
             line.clear();
-            line += "call func: ";
+            line += g.is_jni_call ? "call jni func: " : "call func: ";
             line += g.call_name ? g.call_name : "<unknown>";
             line += '(';
             int na = g.n_call_args >= 0 ? g.n_call_args : 4;

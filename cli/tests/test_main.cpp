@@ -4,12 +4,14 @@
 //   - upstream-dialect text logs (hand-written, byte-exact canonical), which
 //     exercise the import -> gtb -> query/export path that real GumTrace logs
 //     take, and
-//   - ExecEvent literals, which exercise the native recorder path a Stalker
-//     callout would drive.
+//   - ExecEvent literals, which exercise the native recorder path a future
+//     Stalker callout provider would drive (no production provider today).
 //
 // Coverage map (what each group pins down):
 //   t_roundtrip  import/export byte-exactness: LF/CRLF, VERBATIM passthrough,
 //                128-bit SIMD values, non-canonical hex rejection, determinism
+//   t_gumtrace   current upstream JNI call spelling + auxiliary metadata,
+//                structured func queries, CRLF byte-exact replay
 //   t_dump       hexdump row -> mem_r content lanes; find-value dump scan;
 //                verbatim-memcpy taint bridging (dst <- src cells)
 //   t_taint      NZCV as source (subs -> csel), q/SIMD propagation, kill on
@@ -126,6 +128,17 @@ static const char* kLogDump[] = {
     "[t.so] 0x4008!0x8 add x10, x10, #1; x10=0x9 -> x10=0xa ",
 };
 
+// Current GumTrace Android JNI shape. The call and arguments are structured;
+// rich auxiliary rows stay VERBATIM so upstream replay remains byte-exact.
+static const char* kLogGumTrace[] = {
+    "[libart.so] 0x7000!0x100 blr x8; x8=0x7100 ",
+    "call jni func: GetMethodID(0x1234, 0x5678, 0x9abc, 0xdef0)",
+    "args2: nativeMethod",
+    "jclass: com/example/Target",
+    "jmethod: nativeMethod",
+    "ret: 0x42",
+};
+
 // taint semantics: NZCV chain, SIMD q chain, kill-on-overwrite, mem round trip
 static const char* kLogTaint[] = {
     "[t.so] 0x6000!0x0 mov x8, x9; x9=0x5 -> x8=0x5 ",
@@ -205,6 +218,44 @@ static void t_roundtrip() {
 
     // the non-canonical line survived only as verbatim (not parsed as exec)
     CHECK(r1.cnt.exec == 7, "leading-zero hex line excluded from exec count");
+}
+
+// ---------------------------------------------------------------------------
+// t_gumtrace
+// ---------------------------------------------------------------------------
+static void t_gumtrace() {
+    printf("t_gumtrace (current JNI dialect compatibility)\n");
+    std::string log = join_log(kLogGumTrace,
+                               sizeof(kLogGumTrace) / sizeof(kLogGumTrace[0]),
+                               "\r\n");
+    std::string gtb = tmp_path("gumtrace.gtb");
+    ImportResult r;
+    CHECK(import_str(log, gtb, r), "import current GumTrace JNI dialect");
+    CHECK(r.cnt.lines == 6 && r.cnt.exec == 1 && r.cnt.call == 1 &&
+              r.cnt.ret == 1 && r.cnt.verbatim == 3,
+          "JNI call structured; args/jclass/jmethod remain verbatim");
+
+    GtbFile f;
+    CHECK(f.load(gtb) && f.dialect == 3 && f.n_call == 1 && f.n_call2 == 1 &&
+              f.n_verbatim == 3,
+          "JNI gtb loads with CRLF dialect and CALL2 stats");
+
+    std::string out = tmp_path("gumtrace.out");
+    FILE* o = fopen(out.c_str(), "wb");
+    Expander(f).expand_upstream(o);
+    fclose(o);
+    CHECK(read_file(out) == log, "JNI dialect replays byte-for-byte");
+
+    std::string fa = cap_out(
+        [&] { q_func_args(gtb, "GetMethodID", 1, 5, true); });
+    CHECK(fa.find("\"args\":[\"0x1234\",\"0x5678\",\"0x9abc\",\"0xdef0\"]") !=
+              std::string::npos,
+          "func-args exposes JNI call arguments");
+    std::string ct = cap_out(
+        [&] { q_calltree_gtb(gtb, "GetMethodID", 2, 20, false); });
+    CHECK(ct.find("GetMethodID(x0=0x1234, x1=0x5678, x2=0x9abc, x3=0xdef0)") !=
+              std::string::npos,
+          "calltree exposes JNI call");
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +682,7 @@ int main() {
     g_dir = tmpl;
 
     t_roundtrip();
+    t_gumtrace();
     t_dump();
     t_taint();
     t_native();

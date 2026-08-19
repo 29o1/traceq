@@ -57,6 +57,7 @@ struct Group {
     // CALL2 (upstream dialect): observed argument count
     int n_call_args = -1;     // -1 = legacy CALL (always 4)
     bool is_call = false;
+    bool is_jni_call = false; // imported "call jni func:" spelling
     const char* call_name = nullptr;
     uint64_t call_target = 0;
     uint64_t args[8] = {0};
