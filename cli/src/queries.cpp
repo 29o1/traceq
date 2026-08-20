@@ -19,10 +19,11 @@ using namespace gt;
 // taint (gtb-based stream walk)
 //
 // Semantics follow the upstream GumTrace taint_tracker (src/taint/
-// TaintEngine.cpp) so result sets are directly comparable: data-flow only
-// (a store taints memory through its DATA register, a load only through the
-// memory cell — base/index registers never carry taint into the loaded
-// value), overwriting with untainted data KILLS taint, movk preserves it,
+// TaintEngine.cpp) so default result sets are directly comparable: data-flow
+// only (a store taints memory through its DATA register, a load only through
+// the memory cell). --index-deps optionally treats a load's index register as
+// a source, which is useful for table lookups such as S-box/Base64 mappings.
+// Overwriting with untainted data KILLS taint, movk preserves it,
 // movz/movn/adr/adrp kill unconditionally, cmp/tst-class instructions set or
 // clear NZCV, and stp/ldp pairs track the two memory slots independently
 // (slot2 = addr + 4 or 8 by the first operand's w/x spelling, bug-compatible
@@ -49,10 +50,11 @@ using namespace gt;
 // contract degrades to an explicit "raise --limit" next command that reruns
 // from the seed.
 // ---------------------------------------------------------------------------
-struct TaintEdge { uint64_t ev; std::string what; };
+struct TaintEdge { uint64_t ev, line; std::string what; };
 
 struct TaintRec {  // compact per-group record for backward walks
     uint32_t site_id;  // 0xFFFFFFFF for non-exec groups (call/svc/ret-only)
+    uint64_t source_line;
     uint8_t n_mem;
     struct { uint64_t addr; bool is_write; } mem[2];
 };
@@ -83,6 +85,7 @@ enum TaintCat : uint8_t {
 struct TaintSite {
     uint8_t cat = TC_OTHER;
     uint64_t src_mask = 0;       // all true sources (store data + base/index)
+    uint64_t index_mask = 0;     // non-base address registers in [...] operands
     uint64_t dst_mask = 0;       // destination regs
     uint8_t dsts[2] = {0, 0};    // dst_mask in operand order (pair loads)
     uint8_t n_dsts = 0;
@@ -199,6 +202,8 @@ static void taint_parse_ops(const char* ops, size_t ops_len, TaintSite& ts) {
     };
     // registers inside a [base, index, ...] operand
     auto bracket_srcs = [&](const Op& op) {
+        bool have_base = false;
+        uint64_t seen = 0;
         for (size_t j = 0; j < op.n; j++) {
             char c = op.p[j];
             if (c != '[' && c != ',' && c != ' ') continue;
@@ -208,7 +213,12 @@ static void taint_parse_ops(const char* ops, size_t ops_len, TaintSite& ts) {
                 continue;
             size_t t = k;
             while (t < op.n && alnum(op.p[t])) t++;
-            add_src(taint_reg_slot(op.p + k, t - k));
+            int slot = taint_reg_slot(op.p + k, t - k);
+            if (slot < 0 || (seen & (1ULL << slot))) continue;
+            seen |= 1ULL << slot;
+            add_src(slot);
+            if (have_base) ts.index_mask |= 1ULL << slot;
+            else have_base = true;
         }
     };
 
@@ -273,7 +283,7 @@ static TaintSite build_taint_site(const Site& s, const char* pool) {
 static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      int seed_q, bool seed_nzcv, bool backward, int limit,
                      uint64_t window, uint64_t at_ev, uint64_t off,
-                     const std::string& mod, bool json) {
+                     const std::string& mod, bool json, bool index_deps) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
 
@@ -304,9 +314,9 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         return std::string(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
     };
     uint64_t edges_total = 0;
-    auto add_edge = [&](uint64_t ev, std::string what) {
+    auto add_edge = [&](uint64_t ev, uint64_t line, std::string what) {
         edges_total++;
-        if ((int)edges.size() < limit) edges.push_back({ev, std::move(what)});
+        if ((int)edges.size() < limit) edges.push_back({ev, line, std::move(what)});
     };
     // per-site taint roles, memoized (a handful of unique sites per hot loop)
     std::vector<TaintSite> ts_cache(f.arena.sites().size());
@@ -338,15 +348,15 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             else if (!has_mr) { has_mr = true; mr = g.mem[k].addr; }
         }
     };
-    auto taint_reg_edge = [&](uint64_t ev, uint32_t site_id, int slot,
+    auto taint_reg_edge = [&](uint64_t ev, uint64_t line, uint32_t site_id, int slot,
                               const char* via) {
         char rb[16], msg[288];
         snprintf(msg, sizeof msg, "%s : %s <- %s", site_txt(site_id).c_str(),
                  taint_reg_name(slot, rb), via);
-        add_edge(ev, msg);
+        add_edge(ev, line, msg);
     };
-    auto taint_mem_edge = [&](uint64_t ev, uint32_t site_id) {
-        add_edge(ev, site_txt(site_id) + " : mem_w -> tainted");
+    auto taint_mem_edge = [&](uint64_t ev, uint64_t line, uint32_t site_id) {
+        add_edge(ev, line, site_txt(site_id) + " : mem_w -> tainted");
     };
     auto apply_seed = [&]() {
         if (seed_reg >= 0) reg_t |= 1ULL << (seed_reg & 31);
@@ -357,7 +367,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
 
     bool partial = false;
     uint64_t total = 0, walked = 0;
-    uint64_t seed_ev = 0;
+    uint64_t seed_ev = 0, seed_line = 0;
     uint64_t matched = 0;          // involved events (upstream "Total matched")
     const char* stop = "end of trace";
 
@@ -379,6 +389,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 if (!hit) return true;
                 apply_seed();
                 seed_ev = gi;
+                seed_line = g.source_line;
                 seeded = true;
                 matched = 1; // upstream records the seed line itself
                 return true; // propagation starts after the seed event
@@ -412,7 +423,8 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                         }
                         for (uint64_t d : deltas) addr_t.insert(pend_dst + d);
                         if (!deltas.empty()) {
-                            add_edge(gi, "memcpy : dst <- tainted src cells");
+                            add_edge(gi, g.source_line,
+                                     "memcpy : dst <- tainted src cells");
                             matched++;
                             since_involved = 0;
                         }
@@ -432,6 +444,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             uint64_t mr2 = mr + ts.elem, mw2 = mw + ts.elem;
             bool mr_t = has_mr && addr_t.count(mr);
             bool mr2_t = ts.pair && has_mr && addr_t.count(mr2);
+            bool index_t = index_deps && (ts.index_mask & reg_t) != 0;
             bool mw_t = has_mw && addr_t.count(mw);
             bool mw2_t = ts.pair && has_mw && addr_t.count(mw2);
             bool src_t = (ts.src_mask & reg_t) != 0 || (ts.nzcv_r && nzcv_t) ||
@@ -449,18 +462,21 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             case TC_LOAD:
                 if (ts.pair && ts.n_dsts >= 2) {
                     bool t0 = tainted(ts.dsts[0]), t1 = tainted(ts.dsts[1]);
-                    setclr_reg(ts.dsts[0], mr_t);
-                    setclr_reg(ts.dsts[1], mr2_t);
-                    if (mr_t && !t0)
-                        taint_reg_edge(gi, g.site_id, ts.dsts[0], "mem");
-                    if (mr2_t && !t1)
-                        taint_reg_edge(gi, g.site_id, ts.dsts[1], "mem");
+                    setclr_reg(ts.dsts[0], mr_t || index_t);
+                    setclr_reg(ts.dsts[1], mr2_t || index_t);
+                    if ((mr_t || index_t) && !t0)
+                        taint_reg_edge(gi, g.source_line, g.site_id, ts.dsts[0],
+                                       mr_t ? "mem" : "index");
+                    if ((mr2_t || index_t) && !t1)
+                        taint_reg_edge(gi, g.source_line, g.site_id, ts.dsts[1],
+                                       mr2_t ? "mem" : "index");
                 } else {
                     for (int i = 0; i < ts.n_dsts; i++) {
                         bool was = tainted(ts.dsts[i]);
-                        setclr_reg(ts.dsts[i], mr_t);
-                        if (mr_t && !was)
-                            taint_reg_edge(gi, g.site_id, ts.dsts[i], "mem");
+                        setclr_reg(ts.dsts[i], mr_t || index_t);
+                        if ((mr_t || index_t) && !was)
+                            taint_reg_edge(gi, g.source_line, g.site_id, ts.dsts[i],
+                                           mr_t ? "mem" : "index");
                     }
                 }
                 break;
@@ -468,20 +484,20 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 if (has_mw) {
                     if (ts.pair && ts.n_st >= 2) {
                         bool d0 = tainted(ts.st[0]), d1 = tainted(ts.st[1]);
-                        if (d0 && !mw_t) taint_mem_edge(gi, g.site_id);
-                        if (d1 && !mw2_t) taint_mem_edge(gi, g.site_id);
+                        if (d0 && !mw_t) taint_mem_edge(gi, g.source_line, g.site_id);
+                        if (d1 && !mw2_t) taint_mem_edge(gi, g.source_line, g.site_id);
                         setclr_addr(mw, d0);
                         setclr_addr(mw2, d1);
                     } else {
                         bool d0 = ts.n_st > 0 && tainted(ts.st[0]);
-                        if (d0 && !mw_t) taint_mem_edge(gi, g.site_id);
+                        if (d0 && !mw_t) taint_mem_edge(gi, g.source_line, g.site_id);
                         setclr_addr(mw, d0);
                     }
                 }
                 break;
             case TC_COMPARE:
                 if (src_t && !nzcv_t)
-                    add_edge(gi, site_txt(g.site_id) + " : nzcv <- reg");
+                    add_edge(gi, g.source_line, site_txt(g.site_id) + " : nzcv <- reg");
                 nzcv_t = src_t;
                 break;
             case TC_BRANCH:
@@ -491,16 +507,17 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                     bool was = tainted(ts.dsts[i]);
                     setclr_reg(ts.dsts[i], src_t);
                     if (src_t && !was)
-                        taint_reg_edge(gi, g.site_id, ts.dsts[i],
+                        taint_reg_edge(gi, g.source_line, g.site_id, ts.dsts[i],
                                        src_reg_t ? "reg" : "mem");
                 }
                 if (ts.nzcv_w) {
                     if (src_t && !nzcv_t)
-                        add_edge(gi, site_txt(g.site_id) + " : nzcv <- reg");
+                        add_edge(gi, g.source_line,
+                                 site_txt(g.site_id) + " : nzcv <- reg");
                     nzcv_t = src_t;
                 }
                 if (has_mw) { // OTHER-category mem write (casp-class)
-                    if (src_t && !mw_t) taint_mem_edge(gi, g.site_id);
+                    if (src_t && !mw_t) taint_mem_edge(gi, g.source_line, g.site_id);
                     setclr_addr(mw, src_t);
                 }
                 break;
@@ -561,6 +578,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 last_match = gi;
             TaintRec r{};
             r.site_id = g.has_exec ? g.site_id : 0xFFFFFFFFu;
+            r.source_line = g.source_line;
             r.n_mem = uint8_t(g.n_mem);
             for (int k = 0; k < g.n_mem && k < 2; k++)
                 r.mem[k] = {g.mem[k].addr, g.mem[k].is_write};
@@ -583,36 +601,39 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             return 1;
         }
         partial = ring_base > 0;
+        seed_line = ring[size_t((seed_ev - ring_base + head) % ring.size())].source_line;
         apply_seed();
         // upstream backward: the seed line itself propagates, then only
         // INVOLVED lines do; kills happen inside propagation (a propagated-
         // through destination is untainted, its sources tainted)
         uint64_t since_involved = 0;
-        auto src_edge = [&](uint64_t ev, uint32_t sid, int slot) {
+        auto src_edge = [&](uint64_t ev, uint64_t line, uint32_t sid, int slot,
+                            const char* role = "source reg") {
             char rb[16], msg[288];
-            snprintf(msg, sizeof msg, "%s : source reg %s", site_txt(sid).c_str(),
+            snprintf(msg, sizeof msg, "%s : %s %s", site_txt(sid).c_str(), role,
                      taint_reg_name(slot, rb));
-            add_edge(ev, msg);
+            add_edge(ev, line, msg);
         };
-        auto mem_edge = [&](uint64_t ev, uint32_t sid, uint64_t a) {
+        auto mem_edge = [&](uint64_t ev, uint64_t line, uint32_t sid, uint64_t a) {
             char msg[288];
             snprintf(msg, sizeof msg, "%s : source mem 0x%llx", site_txt(sid).c_str(),
                      (unsigned long long)a);
-            add_edge(ev, msg);
+            add_edge(ev, line, msg);
         };
-        auto taint_srcs = [&](uint64_t ev, uint32_t sid, uint64_t mask) {
+        auto taint_srcs = [&](uint64_t ev, uint64_t line, uint32_t sid,
+                              uint64_t mask, const char* role = "source reg") {
             uint64_t newly = mask & ~reg_t;
             while (newly) {
                 int slot = __builtin_ctzll(newly);
                 newly &= newly - 1;
                 reg_t |= 1ULL << slot;
-                src_edge(ev, sid, slot);
+                src_edge(ev, line, sid, slot, role);
             }
         };
-        auto taint_cell = [&](uint64_t ev, uint32_t sid, uint64_t a) {
+        auto taint_cell = [&](uint64_t ev, uint64_t line, uint32_t sid, uint64_t a) {
             if (!addr_t.count(a)) {
                 addr_t.insert(a);
-                mem_edge(ev, sid, a);
+                mem_edge(ev, line, sid, a);
             }
         };
         for (uint64_t i = seed_ev + 1; i-- > ring_base;) {
@@ -633,7 +654,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                         addr_t.insert(c.src + d);
                     }
                     if (!deltas.empty()) {
-                        add_edge(i, "memcpy : demand -> src cells");
+                        add_edge(i, r.source_line, "memcpy : demand -> src cells");
                         matched++;
                         since_involved = 0;
                     }
@@ -671,16 +692,26 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                     if (ts.pair && ts.n_dsts >= 2) {
                         if (tainted(ts.dsts[0])) {
                             reg_t &= ~(1ULL << ts.dsts[0]);
-                            if (has_mr) taint_cell(i, r.site_id, mr);
+                            if (has_mr) taint_cell(i, r.source_line, r.site_id, mr);
+                            if (index_deps)
+                                taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
+                                           "source index");
                         }
                         if (tainted(ts.dsts[1])) {
                             reg_t &= ~(1ULL << ts.dsts[1]);
-                            if (has_mr) taint_cell(i, r.site_id, mr2);
+                            if (has_mr) taint_cell(i, r.source_line, r.site_id, mr2);
+                            if (index_deps)
+                                taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
+                                           "source index");
                         }
                     } else {
                         bool any = (ts.dst_mask & reg_t) != 0;
                         reg_t &= ~ts.dst_mask;
-                        if (any && has_mr) taint_cell(i, r.site_id, mr);
+                        if (any && has_mr)
+                            taint_cell(i, r.source_line, r.site_id, mr);
+                        if (any && index_deps)
+                            taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
+                                       "source index");
                     }
                     break;
                 case TC_STORE:
@@ -688,21 +719,21 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                         addr_t.erase(mw);
                         if (ts.n_st > 0 && !tainted(ts.st[0])) {
                             reg_t |= 1ULL << ts.st[0];
-                            src_edge(i, r.site_id, ts.st[0]);
+                            src_edge(i, r.source_line, r.site_id, ts.st[0]);
                         }
                     }
                     if (ts.pair && ts.n_st >= 2 && mw2_t) {
                         addr_t.erase(mw2);
                         if (!tainted(ts.st[1])) {
                             reg_t |= 1ULL << ts.st[1];
-                            src_edge(i, r.site_id, ts.st[1]);
+                            src_edge(i, r.source_line, r.site_id, ts.st[1]);
                         }
                     }
                     break;
                 case TC_COMPARE:
                     if (nzcv_t) {
                         nzcv_t = false;
-                        taint_srcs(i, r.site_id, ts.src_mask);
+                        taint_srcs(i, r.source_line, r.site_id, ts.src_mask);
                     }
                     break;
                 case TC_BRANCH:
@@ -711,12 +742,14 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                     if (dst_t || nz_t) {
                         reg_t &= ~ts.dst_mask;
                         if (nz_t) nzcv_t = false;
-                        taint_srcs(i, r.site_id, ts.src_mask);
+                        taint_srcs(i, r.source_line, r.site_id, ts.src_mask);
                         if (ts.nzcv_r && !nzcv_t) { // csel-class extension
                             nzcv_t = true;
-                            add_edge(i, site_txt(r.site_id) + " : source reg nzcv");
+                            add_edge(i, r.source_line,
+                                     site_txt(r.site_id) + " : source reg nzcv");
                         }
-                        if (dst_t && has_mr) taint_cell(i, r.site_id, mr);
+                        if (dst_t && has_mr)
+                            taint_cell(i, r.source_line, r.site_id, mr);
                     }
                     break;
                 }
@@ -755,6 +788,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         if (seed_q >= 0) s += " --seed-q " + std::to_string(seed_q);
         if (seed_nzcv) s += " --seed-nzcv";
         if (backward) s += " --back";
+        if (index_deps) s += " --index-deps";
         s += " --limit " + std::to_string(new_limit);
         if (window) s += " --window " + std::to_string(window);
         if (at_ev) s += " --at-ev " + std::to_string(at_ev);
@@ -778,6 +812,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         emit::kv_bool(o, "nzcv", seed_nzcv);
         o += ',';
         emit::kv_u64(o, "ev", seed_ev);
+        if (seed_line) {
+            o += ',';
+            emit::kv_u64(o, "line", seed_line);
+        }
         o += "},\"direction\":\"";
         o += backward ? "backward" : "forward";
         o += "\",\"resume\":false,\"walked\":";
@@ -800,6 +838,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             size_t sp = w.find(" : ");
             o += '{';
             emit::kv_u64(o, "ev", edges[i].ev);
+            if (edges[i].line) {
+                o += ',';
+                emit::kv_u64(o, "line", edges[i].line);
+            }
             o += ',';
             emit::kv_str(o, "txt", sp == std::string::npos ? "" : w.substr(0, sp));
             o += ',';
@@ -835,13 +877,19 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             printf("PARTIAL: window limited — walked %llu of %llu events; widen with "
                    "--window 0 (forward) or a larger --window (backward)\n",
                    (unsigned long long)walked, (unsigned long long)total);
-        printf("taint seed:%s (event %llu)\n", seed_desc().c_str(), (unsigned long long)seed_ev);
+        printf("taint seed:%s (event %llu", seed_desc().c_str(),
+               (unsigned long long)seed_ev);
+        if (seed_line) printf(", line %llu", (unsigned long long)seed_line);
+        printf(")\n");
         printf("direction: %s | events walked: %llu of %llu | matched: %llu | stop: %s | edges (limit %d): %llu\n",
                backward ? "backward" : "forward", (unsigned long long)walked,
                (unsigned long long)total, (unsigned long long)matched, stop, limit,
                (unsigned long long)edges_total);
-        for (auto& e : edges)
-            printf("  ev=%-8llu %s\n", (unsigned long long)e.ev, e.what.c_str());
+        for (auto& e : edges) {
+            printf("  ev=%-8llu", (unsigned long long)e.ev);
+            if (e.line) printf(" line=%-8llu", (unsigned long long)e.line);
+            printf(" %s\n", e.what.c_str());
+        }
         printf("final tainted regs:");
         for (int slot = 0; slot < 64; slot++)
             if (reg_t & (1ULL << slot)) {
@@ -882,9 +930,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
 
 int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, int seed_q,
             bool seed_nzcv, bool backward, int limit, uint64_t window,
-            uint64_t at_ev, uint64_t off, const std::string& mod, bool json) {
+            uint64_t at_ev, uint64_t off, const std::string& mod, bool json,
+            bool index_deps) {
     return run_taint(gtb, seed_addr, seed_reg, seed_q, seed_nzcv, backward, limit, window,
-                     at_ev, off, mod, json);
+                     at_ev, off, mod, json, index_deps);
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,6 +1328,10 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
             if (json) {
                 std::string o = "{";
                 emit::kv_u64(o, "ev", gi);
+                if (g.source_line) {
+                    o += ',';
+                    emit::kv_u64(o, "line", g.source_line);
+                }
                 o += ',';
                 emit::kv_str(o, "rw", is_write ? "w" : "r");
                 o += ',';
@@ -1292,13 +1345,16 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                 o += '}';
                 printf("%s\n", o.c_str());
             } else {
+                printf("%llu", (unsigned long long)gi);
+                if (g.source_line)
+                    printf(" line=%llu", (unsigned long long)g.source_line);
                 if (value_known)
-                    printf("%llu %c 0x%llx =0x%llx %s\n", (unsigned long long)gi,
+                    printf(" %c 0x%llx =0x%llx %s\n",
                            is_write ? 'w' : 'r', (unsigned long long)mem_addr,
                            (unsigned long long)value,
                            gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
                 else
-                    printf("%llu %c 0x%llx %s\n", (unsigned long long)gi,
+                    printf(" %c 0x%llx %s\n",
                            is_write ? 'w' : 'r', (unsigned long long)mem_addr,
                            gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
             }
@@ -1342,32 +1398,139 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
     return 0;
 }
 
-int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
-              bool use_off, uint64_t off, const std::string& mod, int limit,
-              uint64_t offset, bool json) {
+int q_mem_state(const std::string& gtb, uint64_t range_base,
+                uint64_t range_len, uint64_t at_ev, bool json) {
+    if (range_len == 0 || range_len > (1u << 20)) {
+        fprintf(stderr, "mem-state: range length must be 1..0x100000 bytes\n");
+        return 2;
+    }
+    if (range_base > UINT64_MAX - range_len) {
+        fprintf(stderr, "mem-state: range overflows address space\n");
+        return 2;
+    }
+    GtbFile f;
+    if (!f.load(gtb)) { fprintf(stderr, "load failed: %s\n", gtb.c_str()); return 1; }
+
+    std::vector<uint8_t> bytes(size_t(range_len), 0);
+    std::vector<uint8_t> known(size_t(range_len), 0);
+    uint64_t last_ev = 0;
+    bool saw_event = false;
+    Expander ex(f);
+    ex.for_each([&](uint64_t gi, const Group& g) {
+        if (gi > at_ev) return false;
+        saw_event = true;
+        last_ev = gi;
+        if (!g.has_exec) return true;
+        std::vector<AgentRegVal> rd, wr;
+        std::vector<AgentMemVal> mems;
+        reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
+                                 ex.regfile(), rd, wr, mems);
+        for (const auto& m : mems) {
+            uint64_t width = m.size ? m.size : 8;
+            if (m.addr >= range_base + range_len ||
+                m.addr > UINT64_MAX - width || m.addr + width <= range_base)
+                continue;
+            uint64_t lo = std::max(m.addr, range_base);
+            uint64_t hi = std::min(m.addr + width, range_base + range_len);
+            for (uint64_t a = lo; a < hi; a++) {
+                size_t out_i = size_t(a - range_base);
+                uint64_t lane_i = a - m.addr;
+                if (m.known && lane_i < 8) {
+                    bytes[out_i] = uint8_t(m.val >> (lane_i * 8));
+                    known[out_i] = 1;
+                } else if (m.is_w) {
+                    // An unknown write invalidates an older observation.
+                    known[out_i] = 0;
+                }
+            }
+        }
+        return true;
+    });
+    if (!saw_event || last_ev < at_ev) {
+        fprintf(stderr, "mem-state: --at-ev %llu is outside the trace\n",
+                (unsigned long long)at_ev);
+        return 2;
+    }
+
+    static const char kHex[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(size_t(range_len) * 2);
+    uint64_t known_count = 0;
+    for (size_t i = 0; i < bytes.size(); i++) {
+        if (!known[i]) { hex += "??"; continue; }
+        known_count++;
+        hex.push_back(kHex[bytes[i] >> 4]);
+        hex.push_back(kHex[bytes[i] & 15]);
+    }
+
+    if (json) {
+        std::string o = "{\"mem_state\":{";
+        emit::kv_hex(o, "base", range_base);
+        o += ',';
+        emit::kv_u64(o, "len", range_len);
+        o += ',';
+        emit::kv_u64(o, "at_ev", at_ev);
+        o += ',';
+        emit::kv_u64(o, "known", known_count);
+        o += ',';
+        emit::kv_str(o, "hex", hex);
+        o += ",\"unknown\":[";
+        bool first = true;
+        for (size_t i = 0; i < known.size();) {
+            if (known[i]) { i++; continue; }
+            size_t j = i + 1;
+            while (j < known.size() && !known[j]) j++;
+            if (!first) o += ',';
+            first = false;
+            o += '{';
+            emit::kv_hex(o, "addr", range_base + i);
+            o += ',';
+            emit::kv_u64(o, "len", j - i);
+            o += '}';
+            i = j;
+        }
+        o += "]}}";
+        printf("%s\n", o.c_str());
+    } else {
+        printf("mem-state base=0x%llx len=0x%llx at-ev=%llu known=%llu/%llu\n",
+               (unsigned long long)range_base, (unsigned long long)range_len,
+               (unsigned long long)at_ev, (unsigned long long)known_count,
+               (unsigned long long)range_len);
+        for (size_t i = 0; i < known.size(); i += 16) {
+            printf("  0x%llx:", (unsigned long long)(range_base + i));
+            size_t end = std::min(i + 16, known.size());
+            for (size_t j = i; j < end; j++) {
+                if (known[j]) printf(" %02x", bytes[j]);
+                else printf(" ??");
+            }
+            putchar('\n');
+        }
+    }
+    emit::Meta meta;
+    char b[320];
+    snprintf(b, sizeof b, "gt mem-access --range 0x%llx,0x%llx --limit 20 %s",
+             (unsigned long long)range_base, (unsigned long long)range_len,
+             gtb.c_str());
+    meta.suggest.push_back(b);
+    emit::finish(meta, json);
+    return 0;
+}
+
+int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
+               const std::vector<uint64_t>& offs, const std::string& mod,
+               int limit, uint64_t offset, uint64_t from_ev, uint64_t to_ev,
+               bool json) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
+    std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
     uint64_t total = 0, shown = 0, first_ev = 0;
-    uint64_t next_source_line = 1;
     bool have_first = false;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     Expander ex(f);
     ex.for_each([&](uint64_t gi, const Group& g) {
-        uint64_t source_line = 0;
-        if (f.dialect & 1) {
-            if (g.has_verbatim) {
-                uint64_t lines = 0;
-                const char* p = f.verbatim.data() + g.verbatim_off;
-                for (uint32_t i = 0; i < g.verbatim_len; i++)
-                    if (p[i] == '\n') lines++;
-                if (g.verbatim_len && p[g.verbatim_len - 1] != '\n') lines++;
-                next_source_line += lines;
-            } else {
-                if (g.has_exec) source_line = next_source_line++;
-                if (g.is_call) next_source_line++;
-                if (g.is_ret) next_source_line++;
-            }
-        }
+        if (gi < from_ev) return true;
+        if (gi > to_ev) return false;
         if (!g.has_exec) return true;
         const Site& s = f.arena.get(g.site_id);
         std::string module = s.module_id < f.arena.modules().size()
@@ -1376,9 +1539,9 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
         uint64_t site_off = s.module_id < f.arena.modules().size()
                                 ? s.addr - f.arena.module_base(s.module_id)
                                 : s.addr;
-        bool hit = use_addr ? s.addr == addr
-                            : use_off && site_off == off &&
-                                  (mod.empty() || module == mod);
+        bool hit = !addr_set.empty() ? addr_set.count(s.addr) != 0
+                                     : off_set.count(site_off) != 0 &&
+                                           (mod.empty() || module == mod);
         if (!hit) return true;
         if (total++ < offset || shown >= lim) return true;
         shown++;
@@ -1391,9 +1554,9 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", gi);
-            if (source_line) {
+            if (g.source_line) {
                 o += ',';
-                emit::kv_u64(o, "line", source_line);
+                emit::kv_u64(o, "line", g.source_line);
             }
             o += ',';
             emit::kv_str(o, "mod", module);
@@ -1432,8 +1595,8 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
             printf("%s\n", o.c_str());
         } else {
             printf("%llu", (unsigned long long)gi);
-            if (source_line)
-                printf(" line=%llu", (unsigned long long)source_line);
+            if (g.source_line)
+                printf(" line=%llu", (unsigned long long)g.source_line);
             printf(" %s %s", gtb_at(f, g.site_id).c_str(), txt.c_str());
             if (!rd.empty() || !wr.empty()) {
                 printf(";");
@@ -1462,21 +1625,17 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
     meta.shown = shown;
     meta.truncated = offset + shown < total;
     if (meta.truncated) {
-        char b[512];
-        if (use_addr)
-            snprintf(b, sizeof b,
-                     "gt find-pc --addr 0x%llx --limit %llu --offset %llu %s%s",
-                     (unsigned long long)addr, (unsigned long long)lim,
-                     (unsigned long long)(offset + shown), gtb.c_str(),
-                     json ? " --json" : "");
-        else
-            snprintf(b, sizeof b,
-                     "gt find-pc --off 0x%llx%s%s --limit %llu --offset %llu %s%s",
-                     (unsigned long long)off, mod.empty() ? "" : " --mod ",
-                     mod.empty() ? "" : mod.c_str(), (unsigned long long)lim,
-                     (unsigned long long)(offset + shown), gtb.c_str(),
-                     json ? " --json" : "");
-        meta.next = b;
+        std::string next = "gt find-pc";
+        for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
+        for (uint64_t off : offs) next += " --off " + emit::hex64(off);
+        if (!mod.empty()) next += " --mod " + mod;
+        if (from_ev) next += " --from " + std::to_string(from_ev);
+        if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
+        next += " --limit " + std::to_string(lim);
+        next += " --offset " + std::to_string(offset + shown);
+        next += " " + gtb;
+        if (json) next += " --json";
+        meta.next = std::move(next);
     }
     if (have_first) {
         char b[384];
@@ -1491,6 +1650,15 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
     return 0;
 }
 
+int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
+              bool use_off, uint64_t off, const std::string& mod, int limit,
+              uint64_t offset, bool json) {
+    std::vector<uint64_t> addrs, offs;
+    if (use_addr) addrs.push_back(addr);
+    if (use_off) offs.push_back(off);
+    return q_find_pcs(gtb, addrs, offs, mod, limit, offset, 0, UINT64_MAX, json);
+}
+
 // function call sites directly on a gtb: streams the CALL events whose symbol
 // matches --func and prints the arguments (x0..x3, delta-reconstructed) of the
 // --nth (1-based) call onward. Named calls carry an exec context (module
@@ -1500,7 +1668,13 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
                 bool json) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
-    struct Row { uint64_t ev; std::string at; uint64_t target; uint64_t x[4]; int nargs; };
+    struct Row {
+        uint64_t ev, line;
+        std::string at;
+        uint64_t target;
+        uint64_t x[4];
+        int nargs;
+    };
     std::vector<Row> rows;
     uint64_t total = 0;
     size_t base = nth > 1 ? size_t(nth - 1) : 0; // --nth 1-based; --nth 0/negative = from the top
@@ -1514,6 +1688,7 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
         if (rows.size() >= lim) return true;
         Row r{};
         r.ev = gi;
+        r.line = g.call_source_line ? g.call_source_line : g.source_line;
         r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
         r.target = g.call_target;
         r.nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
@@ -1530,6 +1705,10 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
             emit::kv_u64(o, "n", base + i + 1);
             o += ',';
             emit::kv_u64(o, "ev", r.ev);
+            if (r.line) {
+                o += ',';
+                emit::kv_u64(o, "line", r.line);
+            }
             o += ',';
             emit::kv_str(o, "at", r.at);
             o += ",\"args\":[";
@@ -1551,6 +1730,7 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
             const Row& r = rows[i];
             printf("  #%-8llu ev=%-8llu", (unsigned long long)(base + i + 1),
                    (unsigned long long)r.ev);
+            if (r.line) printf(" line=%-8llu", (unsigned long long)r.line);
             for (int k = 0; k < r.nargs; k++)
                 printf(" x%d=0x%-14llx", k, (unsigned long long)r.x[k]);
             printf("  %s\n", r.at.c_str());
@@ -1606,6 +1786,10 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", gi);
+            if (g.source_line) {
+                o += ',';
+                emit::kv_u64(o, "line", g.source_line);
+            }
             o += ',';
             emit::kv_str(o, "lane", lane);
             o += ',';
@@ -1615,8 +1799,10 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
             o += '}';
             printf("%s\n", o.c_str());
         } else {
-            printf("%llu %s 0x%llx %s\n", (unsigned long long)gi, lane,
-                   (unsigned long long)val,
+            printf("%llu", (unsigned long long)gi);
+            if (g.source_line)
+                printf(" line=%llu", (unsigned long long)g.source_line);
+            printf(" %s 0x%llx %s\n", lane, (unsigned long long)val,
                    gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
         }
     };
@@ -1715,6 +1901,12 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
             if (json) {
                 std::string o = "{";
                 emit::kv_u64(o, "ev", gi);
+                uint64_t line_no = g.call_source_line ? g.call_source_line
+                                                       : g.source_line;
+                if (line_no) {
+                    o += ',';
+                    emit::kv_u64(o, "line", line_no);
+                }
                 o += ',';
                 emit::kv_u64(o, "depth", uint64_t(lvl));
                 o += ',';
@@ -1728,6 +1920,10 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                 printf("%s\n", o.c_str());
             } else {
                 std::string line(size_t(lvl) * 2, ' ');
+                uint64_t line_no = g.call_source_line ? g.call_source_line
+                                                       : g.source_line;
+                if (line_no)
+                    line += "line=" + std::to_string(line_no) + " ";
                 line += name;
                 line += '(';
                 for (int i = 0; i < na; i++) {

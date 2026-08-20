@@ -34,6 +34,12 @@ struct GtbFile {
 // One reconstructed execution group: everything that happened at one EXEC
 // (or at a CALL/SVC/RET when detail strips EXECs).
 struct Group {
+    // Physical source-log lines reconstructed for imported upstream traces.
+    // Native recordings leave these as zero. A group can print an exec line
+    // followed by call/ret lines, so retain each identity separately.
+    uint64_t source_line = 0;
+    uint64_t call_source_line = 0;
+    uint64_t ret_source_line = 0;
     bool has_exec = false;
     uint32_t site_id = 0;
     int n_wr = 0;
@@ -71,7 +77,13 @@ struct Group {
 // Agent-facing values reconstructed for one execution group. The supplied
 // register file is the pre-execution state exposed by Expander::for_each.
 struct AgentRegVal { int ctx; uint64_t val; };
-struct AgentMemVal { bool is_w; uint64_t addr; uint64_t val; bool known; };
+struct AgentMemVal {
+    bool is_w;
+    uint64_t addr;
+    uint64_t val;
+    bool known;
+    uint8_t size;
+};
 
 const char* agent_reg_name(int ctx_idx);
 void reconstruct_agent_values(const SiteArena& arena, const Site& site,

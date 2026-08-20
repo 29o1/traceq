@@ -222,6 +222,7 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     std::string& verbatim = f_.verbatim;
     Group g;
     uint64_t gi = 0;
+    uint64_t next_source_line = 1;
     std::unordered_map<uint32_t, uint64_t> last_obs;
     auto add_obs = [&](Group::Obs* arr, int& cnt, uint32_t name_id,
                        unsigned __int128 val) {
@@ -233,6 +234,21 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     auto flush_group = [&]() -> bool {
         if (!g.has_exec && !g.is_call && !g.is_svc && !g.is_ret && !g.has_verbatim)
             return true;
+        if (f_.dialect & 1) {
+            if (g.has_verbatim) {
+                g.source_line = next_source_line;
+                uint64_t lines = 0;
+                const char* vp = verbatim.data() + g.verbatim_off;
+                for (uint32_t i = 0; i < g.verbatim_len; i++)
+                    if (vp[i] == '\n') lines++;
+                if (g.verbatim_len && vp[g.verbatim_len - 1] != '\n') lines++;
+                next_source_line += lines;
+            } else {
+                if (g.has_exec) g.source_line = next_source_line++;
+                if (g.is_call) g.call_source_line = next_source_line++;
+                if (g.is_ret) g.ret_source_line = next_source_line++;
+            }
+        }
         // callback sees PRE-execution register state (reads print before the
         // writes of this event are applied)
         bool go = cb(gi++, g);
@@ -630,18 +646,57 @@ static uint64_t pair_mem_stride(const SiteArena& arena, const Site& s) {
     return 8;
 }
 
+// Imported GumTrace text carries addresses but not access widths. Recover the
+// width from the instruction spelling so mem-state does not turn `strb w7`
+// into an eight-byte observation. Native events keep their recorded m.size.
+static uint8_t disasm_mem_width(const SiteArena& arena, const Site& s) {
+    const char* dis = arena.pool_ptr() + s.disasm_off;
+    size_t n = s.disasm_len, mn = 0;
+    while (mn < n && dis[mn] != ' ') mn++;
+    auto starts = [&](const char* pfx) {
+        size_t l = strlen(pfx);
+        return mn >= l && memcmp(dis, pfx, l) == 0;
+    };
+    if (starts("ldrb") || starts("ldrsb") || starts("ldurb") ||
+        starts("ldursb") || starts("ldtrb") || starts("ldtrsb") ||
+        starts("ldarb") || starts("ldxrb") || starts("ldaxrb") ||
+        starts("strb") || starts("sturb") || starts("sttrb") ||
+        starts("stlrb") || starts("stxrb") || starts("stlxrb")) return 1;
+    if (starts("ldrh") || starts("ldrsh") || starts("ldurh") ||
+        starts("ldursh") || starts("ldtrh") || starts("ldtrsh") ||
+        starts("ldarh") || starts("ldxrh") || starts("ldaxrh") ||
+        starts("strh") || starts("sturh") || starts("sttrh") ||
+        starts("stlrh") || starts("stxrh") || starts("stlxrh")) return 2;
+    if (starts("ldrsw") || starts("ldursw") || starts("ldtrsw")) return 4;
+    uint64_t pair = pair_mem_stride(arena, s);
+    if (pair) return uint8_t(pair);
+    size_t op = mn;
+    while (op < n && dis[op] == ' ') op++;
+    if (op >= n) return 0;
+    switch (dis[op]) {
+    case 'b': case 'B': return 1;
+    case 'h': case 'H': return 2;
+    case 'w': case 'W': case 's': case 'S': return 4;
+    case 'x': case 'X': case 'd': case 'D': return 8;
+    case 'q': case 'Q': return 16;
+    default: return 0;
+    }
+}
+
 static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
                        const uint64_t* regs,
                        const std::vector<AgentRegVal>& rd,
                        const std::vector<AgentRegVal>& wr,
                        std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
+    uint8_t inferred_size = disasm_mem_width(arena, s);
     int mem_idx = 0;
     for (uint8_t i = 0; i < s.n_ops && mem_idx < g.n_mem; i++) {
         const OpPlan& op = s.ops[i];
         if (op.kind != OP_MEM_R && op.kind != OP_MEM_W) continue;
         const MemOp& m = g.mem[mem_idx++];
-        AgentMemVal mv{op.kind == OP_MEM_W, m.addr, 0, false};
+        AgentMemVal mv{op.kind == OP_MEM_W, m.addr, 0, false,
+                       m.size ? m.size : (inferred_size ? inferred_size : op.size)};
         if (m.value_known) {
             mv.val = m.value;
             mv.known = true;
@@ -680,6 +735,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
     if (stride && out.size() == 1) {
         AgentMemVal second = out[0];
         second.addr += stride;
+        second.size = uint8_t(stride);
         second.known = false;
         const auto& values = second.is_w ? rd : wr;
         if (values.size() >= 2) {
@@ -780,6 +836,10 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                 char b[64];
                 snprintf(b, sizeof b, "{\"ev\":%llu", (unsigned long long)gi);
                 line += b;
+                if (g.source_line) {
+                    line += ',';
+                    emit::kv_u64(line, "line", g.source_line);
+                }
                 line += ',';
                 emit::kv_str(line, "mod",
                              A.modules().empty() ? "?" : A.modules()[mod_id]);
@@ -823,8 +883,14 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                 }
             } else {
                 char b[64];
-                snprintf(b, sizeof b, "%llu !0x%llx ", (unsigned long long)gi,
-                         (unsigned long long)off);
+                if (g.source_line)
+                    snprintf(b, sizeof b, "%llu line=%llu !0x%llx ",
+                             (unsigned long long)gi,
+                             (unsigned long long)g.source_line,
+                             (unsigned long long)off);
+                else
+                    snprintf(b, sizeof b, "%llu !0x%llx ",
+                             (unsigned long long)gi, (unsigned long long)off);
                 line += b;
                 line += txt;
                 if (!rd.empty() || !wr.empty()) {

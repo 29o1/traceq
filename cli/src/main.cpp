@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 int cmd_import(int argc, char** argv);
 int cmd_export(int argc, char** argv);
@@ -15,18 +16,48 @@ int cmd_diff(int argc, char** argv);
 int cmd_fold(int argc, char** argv);
 int cmd_calltree(int argc, char** argv);
 
+static bool is_help(const char* s) {
+    return !strcmp(s, "--help") || !strcmp(s, "-h");
+}
+
+static int unknown_option(const char* cmd, const char* arg) {
+    fprintf(stderr, "%s: unknown option %s\n", cmd, arg);
+    fprintf(stderr, "try: gt %s --help\n", cmd);
+    return 2;
+}
+
+static bool parse_range(const char* s, uint64_t& base, uint64_t& len) {
+    const char* comma = strchr(s, ',');
+    if (!comma || comma == s || !comma[1]) return false;
+    char* end = nullptr;
+    base = strtoull(s, &end, 0);
+    if (end != comma) return false;
+    len = strtoull(comma + 1, &end, 0);
+    return *end == '\0';
+}
+
+static void usage_taint(FILE* o) {
+    fprintf(o,
+            "usage: gt taint (--seed-addr A | --seed-reg R | --seed-q Q | "
+            "--seed-nzcv) [--back] [--index-deps] [--at-ev N] "
+            "[--off O [--mod M]] [--window N] [--limit N] trace.gtb [--json]\n"
+            "  --index-deps  include load index registers (table/S-box lookups)\n");
+}
+
 int cmd_taint(int argc, char** argv) {
     uint64_t seed_addr = 0, window = 0, at_ev = 0, off = 0;
     int seed_reg = -1, seed_q = -1, limit = 20;
-    bool back = false, seed_nzcv = false, json = false;
+    bool back = false, seed_nzcv = false, json = false, index_deps = false;
     std::string gtb, mod;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--seed-addr")) seed_addr = strtoull(next(), nullptr, 0);
+        if (is_help(argv[i])) { usage_taint(stdout); return 0; }
+        else if (!strcmp(argv[i], "--seed-addr")) seed_addr = strtoull(next(), nullptr, 0);
         else if (!strcmp(argv[i], "--seed-reg")) seed_reg = atoi(next());
         else if (!strcmp(argv[i], "--seed-q")) seed_q = atoi(next());
         else if (!strcmp(argv[i], "--seed-nzcv")) seed_nzcv = true;
         else if (!strcmp(argv[i], "--back")) back = true;
+        else if (!strcmp(argv[i], "--index-deps")) index_deps = true;
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--window")) window = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--at-ev")) at_ev = strtoull(next(), nullptr, 10);
@@ -34,6 +65,7 @@ int cmd_taint(int argc, char** argv) {
         else if (!strcmp(argv[i], "--mod")) mod = next();
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("taint", argv[i]);
     }
     if (seed_reg > 31) {
         fprintf(stderr, "taint: --seed-reg %d out of range (0..31)\n", seed_reg);
@@ -43,8 +75,12 @@ int cmd_taint(int argc, char** argv) {
         fprintf(stderr, "taint: --seed-q %d out of range (0..31)\n", seed_q);
         return 2;
     }
+    if (gtb.empty() || (!seed_addr && seed_reg < 0 && seed_q < 0 && !seed_nzcv)) {
+        usage_taint(stderr);
+        return 2;
+    }
     return q_taint(gtb, seed_addr, seed_reg, seed_q, seed_nzcv, back, limit, window,
-                   at_ev, off, mod, json);
+                   at_ev, off, mod, json, index_deps);
 }
 
 int cmd_diff(int argc, char** argv) {
@@ -52,10 +88,19 @@ int cmd_diff(int argc, char** argv) {
     int ctx = 3;
     bool json = false;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--context") && i + 1 < argc) ctx = atoi(argv[++i]);
+        if (is_help(argv[i])) {
+            printf("usage: gt diff a.gtb b.gtb [--context N] [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--context") && i + 1 < argc) ctx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-' && a.empty()) a = argv[i];
         else if (argv[i][0] != '-') b = argv[i];
+        else return unknown_option("diff", argv[i]);
+    }
+    if (a.empty() || b.empty()) {
+        fprintf(stderr, "usage: gt diff a.gtb b.gtb [--context N] [--json]\n");
+        return 2;
     }
     return q_diff(a, b, ctx, json);
 }
@@ -65,9 +110,18 @@ int cmd_fold(int argc, char** argv) {
     int top = 5;
     bool json = false;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--top") && i + 1 < argc) top = atoi(argv[++i]);
+        if (is_help(argv[i])) {
+            printf("usage: gt fold trace.gtb [--top N] [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--top") && i + 1 < argc) top = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("fold", argv[i]);
+    }
+    if (gtb.empty()) {
+        fprintf(stderr, "usage: gt fold trace.gtb [--top N] [--json]\n");
+        return 2;
     }
     return q_fold(gtb, top, json);
 }
@@ -76,8 +130,13 @@ int cmd_stat(int argc, char** argv) {
     std::string gtb;
     bool json = false;
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--json")) json = true;
+        if (is_help(argv[i])) {
+            printf("usage: gt stat trace.gtb [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("stat", argv[i]);
     }
     if (gtb.empty()) { fprintf(stderr, "usage: gt stat trace.gtb [--json]\n"); return 2; }
     return q_stat(gtb, json);
@@ -90,12 +149,14 @@ int cmd_mem_access(int argc, char** argv) {
     bool use_range = false, json = false, writes_only = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--addr")) addr = strtoull(next(), nullptr, 0);
+        if (is_help(argv[i])) {
+            printf("usage: gt mem-access trace.gtb (--addr A | --range B,L) "
+                   "[--write] [--limit N] [--offset M] [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--addr")) addr = strtoull(next(), nullptr, 0);
         else if (!strcmp(argv[i], "--range")) {
-            if (sscanf(next(), "0x%llx,0x%llx", (unsigned long long*)&range_base,
-                       (unsigned long long*)&range_len) != 2 &&
-                sscanf(argv[i], "%llu,%llu", (unsigned long long*)&range_base,
-                       (unsigned long long*)&range_len) != 2) {
+            if (!parse_range(next(), range_base, range_len)) {
                 fprintf(stderr, "mem-access: --range B,L (hex or dec)\n");
                 return 2;
             }
@@ -106,6 +167,7 @@ int cmd_mem_access(int argc, char** argv) {
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("mem-access", argv[i]);
     }
     if (gtb.empty() || (!use_range && addr == 0)) {
         fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A | --range B,L) "
@@ -116,33 +178,74 @@ int cmd_mem_access(int argc, char** argv) {
                         json, writes_only);
 }
 
-int cmd_find_pc(int argc, char** argv) {
-    std::string gtb, mod;
-    uint64_t addr = 0, off = 0, offset = 0;
-    int limit = 20;
-    bool use_addr = false, use_off = false, json = false;
+int cmd_mem_state(int argc, char** argv) {
+    std::string gtb;
+    uint64_t range_base = 0, range_len = 0, at_ev = 0;
+    bool have_range = false, have_ev = false, json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--addr")) {
-            addr = strtoull(next(), nullptr, 0);
-            use_addr = true;
+        if (is_help(argv[i])) {
+            printf("usage: gt mem-state trace.gtb --range B,L --at-ev N [--json]\n"
+                   "  reconstruct known bytes from observed reads/writes up to event N; "
+                   "unknown bytes print as ??\n");
+            return 0;
         }
+        else if (!strcmp(argv[i], "--range")) {
+            if (!parse_range(next(), range_base, range_len)) {
+                fprintf(stderr, "mem-state: --range B,L (hex or dec)\n");
+                return 2;
+            }
+            have_range = true;
+        }
+        else if (!strcmp(argv[i], "--at-ev")) {
+            at_ev = strtoull(next(), nullptr, 10);
+            have_ev = true;
+        }
+        else if (!strcmp(argv[i], "--json")) json = true;
+        else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("mem-state", argv[i]);
+    }
+    if (gtb.empty() || !have_range || !have_ev) {
+        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L --at-ev N [--json]\n");
+        return 2;
+    }
+    return q_mem_state(gtb, range_base, range_len, at_ev, json);
+}
+
+int cmd_find_pc(int argc, char** argv) {
+    std::string gtb, mod;
+    std::vector<uint64_t> addrs, offs;
+    uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
+    int limit = 20;
+    bool json = false;
+    for (int i = 1; i < argc; i++) {
+        auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
+        if (is_help(argv[i])) {
+            printf("usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
+                   "[--from E] [--to E] [--limit N] [--offset M] [--json]\n"
+                   "  repeat --addr or --off to find several PCs in one trace pass\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--addr")) addrs.push_back(strtoull(next(), nullptr, 0));
         else if (!strcmp(argv[i], "--off")) {
-            off = strtoull(next(), nullptr, 0);
-            use_off = true;
+            offs.push_back(strtoull(next(), nullptr, 0));
         }
         else if (!strcmp(argv[i], "--mod")) mod = next();
+        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 10);
+        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("find-pc", argv[i]);
     }
-    if (gtb.empty() || use_addr == use_off || (use_addr && !mod.empty())) {
-        fprintf(stderr, "usage: gt find-pc trace.gtb (--addr A | --off O [--mod M]) "
-                        "[--limit N] [--offset M] [--json]\n");
+    if (gtb.empty() || addrs.empty() == offs.empty() ||
+        (!addrs.empty() && !mod.empty()) || from_ev > to_ev) {
+        fprintf(stderr, "usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
+                        "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
         return 2;
     }
-    return q_find_pc(gtb, use_addr, addr, use_off, off, mod, limit, offset, json);
+    return q_find_pcs(gtb, addrs, offs, mod, limit, offset, from_ev, to_ev, json);
 }
 
 int cmd_func_args(int argc, char** argv) {
@@ -151,11 +254,17 @@ int cmd_func_args(int argc, char** argv) {
     bool json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--func")) func = next();
+        if (is_help(argv[i])) {
+            printf("usage: gt func-args --func NAME [--nth N] [--limit L] "
+                   "trace.gtb [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--func")) func = next();
         else if (!strcmp(argv[i], "--nth")) nth = atoi(next());
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("func-args", argv[i]);
     }
     if (gtb.empty() || func.empty()) {
         fprintf(stderr, "usage: gt func-args --func NAME [--nth N] [--limit L] "
@@ -172,7 +281,11 @@ int cmd_find_value(int argc, char** argv) {
     bool have_val = false, json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--limit")) limit = atoi(next());
+        if (is_help(argv[i])) {
+            printf("usage: gt find-value V trace.gtb [--limit N] [--offset M] [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') {
@@ -180,6 +293,7 @@ int cmd_find_value(int argc, char** argv) {
             if (!have_val) { val = strtoull(argv[i], nullptr, 0); have_val = true; }
             else if (gtb.empty()) gtb = argv[i];
         }
+        else return unknown_option("find-value", argv[i]);
     }
     if (gtb.empty() || !have_val) {
         fprintf(stderr, "usage: gt find-value V trace.gtb [--limit N] [--offset M] [--json]\n");
@@ -194,13 +308,23 @@ int cmd_calltree(int argc, char** argv) {
     bool json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--func")) func = next();
+        if (is_help(argv[i])) {
+            printf("usage: gt calltree --func NAME [--depth D] [--limit N] "
+                   "trace.gtb [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--func")) func = next();
         else if (!strcmp(argv[i], "--depth")) depth = atoi(next());
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
+        else return unknown_option("calltree", argv[i]);
     }
-    if (func.empty()) { fprintf(stderr, "calltree: --func NAME is required\n"); return 2; }
+    if (gtb.empty() || func.empty()) {
+        fprintf(stderr, "usage: gt calltree --func NAME [--depth D] [--limit N] "
+                        "trace.gtb [--json]\n");
+        return 2;
+    }
     return q_calltree_gtb(gtb, func, depth, limit, json);
 }
 
@@ -218,8 +342,9 @@ static void usage() {
         "  gt stat      trace.gtb [--json]\n"
         "  gt mem-access trace.gtb (--addr A | --range B,L) [--write]\n"
         "               [--limit N] [--json]\n"
-        "  gt find-pc  trace.gtb (--addr A | --off O [--mod M])\n"
-        "               [--limit N] [--offset M] [--json]\n"
+        "  gt mem-state trace.gtb --range B,L --at-ev N [--json]\n"
+        "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
+        "               [--from E] [--to E] [--limit N] [--offset M] [--json]\n"
         "  gt find-value V trace.gtb [--limit N] [--json]\n"
         "  gt func-args --func NAME [--nth N] [--limit L] trace.gtb [--json]\n"
         "  gt calltree  --func NAME [--depth D] trace.gtb\n"
@@ -236,6 +361,10 @@ static void usage() {
 int main(int argc, char** argv) {
     if (argc < 2) { usage(); return 2; }
     std::string cmd = argv[1];
+    if (cmd == "--help" || cmd == "-h" || cmd == "help") {
+        usage();
+        return 0;
+    }
     if (cmd == "import") return cmd_import(argc - 1, argv + 1);
     if (cmd == "export") return cmd_export(argc - 1, argv + 1);
     if (cmd == "taint") return cmd_taint(argc - 1, argv + 1);
@@ -243,10 +372,12 @@ int main(int argc, char** argv) {
     if (cmd == "fold") return cmd_fold(argc - 1, argv + 1);
     if (cmd == "stat") return cmd_stat(argc - 1, argv + 1);
     if (cmd == "mem-access") return cmd_mem_access(argc - 1, argv + 1);
+    if (cmd == "mem-state") return cmd_mem_state(argc - 1, argv + 1);
     if (cmd == "find-pc") return cmd_find_pc(argc - 1, argv + 1);
     if (cmd == "find-value") return cmd_find_value(argc - 1, argv + 1);
     if (cmd == "func-args") return cmd_func_args(argc - 1, argv + 1);
     if (cmd == "calltree") return cmd_calltree(argc - 1, argv + 1);
+    fprintf(stderr, "gt: unknown command %s\n", cmd.c_str());
     usage();
     return 2;
 }
@@ -257,13 +388,24 @@ int cmd_export(int argc, char** argv) {
     bool json = false, have_to = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
+        if (is_help(argv[i])) {
+            printf("usage: gt export [--format auto|compact|jsonl|upstream] "
+                   "[--from E] [--to E] [--limit N] trace.gtb [-o FILE] [--json]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--to")) { to = strtoull(next(), nullptr, 10); have_to = true; }
         else if (!strcmp(argv[i], "--limit")) limit = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--format")) fmt = next();
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (!strcmp(argv[i], "-o")) out = next();
         else if (argv[i][0] != '-') in = argv[i];
+        else return unknown_option("export", argv[i]);
+    }
+    if (in.empty() || from > to) {
+        fprintf(stderr, "usage: gt export [--format auto|compact|jsonl|upstream] "
+                        "[--from E] [--to E] [--limit N] trace.gtb [-o FILE] [--json]\n");
+        return 2;
     }
     if (fmt != "auto" && fmt != "compact" && fmt != "jsonl" && fmt != "upstream") {
         fprintf(stderr, "export: unknown --format %s (auto|compact|jsonl|upstream)\n",

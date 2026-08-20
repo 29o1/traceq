@@ -507,11 +507,21 @@ int cmd_import(int argc, char** argv) {
     gt::RecOptions opts;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
-        if (!strcmp(argv[i], "-o")) out = next();
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            printf("usage: gt import trace.log -o trace.gtb [--max-events N] "
+                   "[--max-bytes N] [--max-ms N]\n");
+            return 0;
+        }
+        else if (!strcmp(argv[i], "-o")) out = next();
         else if (!strcmp(argv[i], "--max-events")) opts.max_events = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--max-bytes")) opts.max_bytes = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--max-ms")) opts.max_ms = strtoull(next(), nullptr, 10);
         else if (argv[i][0] != '-') in = argv[i];
+        else {
+            fprintf(stderr, "import: unknown option %s\n", argv[i]);
+            fprintf(stderr, "try: gt import --help\n");
+            return 2;
+        }
     }
     if (in.empty() || out.empty()) {
         fprintf(stderr, "usage: gt import trace.log -o trace.gtb [--max-events N]\n");

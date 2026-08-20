@@ -158,6 +158,15 @@ static const char* kLogTaint[] = {
     "[t.so] 0x601c!0x1c ldr x13, [x12]; x12=0xa000 mem_r=0xa000 -> x13=0x0 ",
 };
 
+// Indexed table lookup: default taint remains GumTrace-compatible; the
+// optional index dependency follows x9 -> loaded byte -> arithmetic.
+static const char* kLogIndex[] = {
+    "[i.so] 0x9000!0x0 mov x9, x10; x10=0x3 -> x9=0x3 ",
+    "[i.so] 0x9004!0x4 ldrb w8, [x20, x9]; x20=0xa000 x9=0x3 "
+        "mem_r=0xa003 -> x8=0x42 ",
+    "[i.so] 0x9008!0x8 add x11, x8, #1; x8=0x42 -> x11=0x43 ",
+};
+
 // diff: A vs B (extra instruction at a new offset) vs A rebased (+0x400000)
 static const char* kLogA[] = {
     "[d.so] 0x101000!0x0 mov x8, x9; x9=0x1 -> x8=0x1 ",
@@ -367,6 +376,31 @@ static void t_taint() {
           "backward walk reaches q0 then the source cell 0x9000");
     CHECK(bwd.find("\"matched\":4") != std::string::npos,
           "backward matched = seed + str/eor/ldr (4)");
+
+    ImportResult ir;
+    CHECK(import_str(join_log(kLogIndex, 3, "\n"), tmp_path("index.gtb"), ir),
+          "import indexed-load fixture");
+    std::string idx_default = cap_out([&] {
+        q_taint(tmp_path("index.gtb"), 0, 9, -1, false, false, 20, 0, 0,
+                0, "", true);
+    });
+    CHECK(idx_default.find("\"x8\"") == std::string::npos,
+          "default taint does not treat a load index as data");
+    std::string idx = cap_out([&] {
+        q_taint(tmp_path("index.gtb"), 0, 9, -1, false, false, 20, 0, 0,
+                0, "", true, true);
+    });
+    CHECK(idx.find("x8 <- index") != std::string::npos &&
+              idx.find("\"x11\"") != std::string::npos,
+          "--index-deps follows indexed lookup into its consumer");
+    CHECK(idx.find("\"line\":2") != std::string::npos,
+          "taint edge carries the original source-log line");
+    std::string idx_back = cap_out([&] {
+        q_taint(tmp_path("index.gtb"), 0, 8, -1, false, true, 20, 0, 1,
+                0, "", true, true);
+    });
+    CHECK(idx_back.find("source index x9") != std::string::npos,
+          "backward --index-deps exposes the address index register");
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +620,9 @@ static void t_queries() {
     CHECK(fv.find("wr:x7") != std::string::npos &&
               fv.find("rd:x7") != std::string::npos,
           "find-value reports write and read lanes");
+    CHECK(fv.find("line=2") != std::string::npos &&
+              fv.find("line=3") != std::string::npos,
+          "find-value reports original source-log lines");
     CHECK(fv.find("# suggest:") != std::string::npos,
           "text mode emits the agent footer");
 
@@ -594,6 +631,8 @@ static void t_queries() {
     });
     CHECK(ma.find(" w 0x3000 =0xca ") != std::string::npos,
           "mem-access --write reconstructs the stored value");
+    CHECK(ma.find("2 line=3") != std::string::npos,
+          "mem-access reports the original source-log line");
     CHECK(ma.find("gt taint --seed-addr 0x3000 --back --at-ev 2") !=
               std::string::npos,
           "mem-access suggests a filled-in backward taint");
@@ -606,6 +645,13 @@ static void t_queries() {
         [&] { q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, false); });
     CHECK(ma.find(" r 0x3000 ") == std::string::npos,
           "no read of 0x3000 exists (honest negative)");
+
+    std::string ms = cap_out([&] {
+        q_mem_state(gtb, 0x3000, 4, 2, true);
+    });
+    CHECK(ms.find("\"known\":1") != std::string::npos &&
+              ms.find("\"hex\":\"ca??????\"") != std::string::npos,
+          "mem-state reconstructs known bytes and marks gaps honestly");
 
     std::string pc = cap_out([&] {
         q_find_pc(gtb, false, 0, true, 0x8, "libc.so", 20, 0, true);
@@ -625,6 +671,12 @@ static void t_queries() {
     });
     CHECK(pc.find("\"line\":6") != std::string::npos,
           "find-pc line accounts for attached call records");
+    pc = cap_out([&] {
+        q_find_pcs(gtb, {}, {0, 8}, "libc.so", 20, 0, 1, 2, true);
+    });
+    CHECK(pc.find("\"ev\":2") != std::string::npos &&
+              pc.find("\"ev\":0") == std::string::npos,
+          "find-pc batches PCs and applies an event range in one pass");
 
     ImportResult pair_result;
     std::string pair_gtb = tmp_path("pair.gtb");
@@ -656,6 +708,8 @@ static void t_queries() {
         [&] { q_func_args(gtb, "memcpy", 1, 5, true); });
     CHECK(fa.find("\"args\":[\"0x3000\",\"0x2000\"]") != std::string::npos,
           "func-args reconstructs observed call args");
+    CHECK(fa.find("\"line\":5") != std::string::npos,
+          "func-args reports the call's original source-log line");
     fa = cap_out([&] { q_func_args(gtb, "nosuch", 1, 5, false); });
     CHECK(fa.find("no call to nosuch") != std::string::npos,
           "func-args says plainly when the function is absent");
