@@ -80,7 +80,7 @@ struct AgentRegVal { int ctx; uint64_t val; };
 struct AgentMemVal {
     bool is_w;
     uint64_t addr;
-    uint64_t val;
+    unsigned __int128 val;
     bool known;
     uint8_t size;
 };

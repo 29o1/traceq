@@ -180,7 +180,7 @@ private:
     uint64_t last_reg_val_[32] = {0};
     uint64_t last_mem_addr_ = 0;
     uint64_t last_mem_val_[2] = {0};   // [0]=read [1]=write
-    uint64_t last_arg_val_[7] = {0};   // x0..x3 call args, x0..x2 svc args
+    uint64_t last_arg_val_[8] = {0};   // x0..x7 call args; slots 4..6 also svc args
     uint64_t last_ret_val_ = 0;
     uint64_t last_site_cache_addr_ = 0;
     uint32_t last_site_cache_id_ = 0;

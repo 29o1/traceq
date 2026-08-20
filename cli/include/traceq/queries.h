@@ -3,7 +3,7 @@
 // explicit truncation marker — the consumer is an agent with a limited
 // context window, so queries must return small structured answers, never raw
 // dumps. W2 contract: every command runs in text or --json mode (JSON Lines,
-// u64 values as hex strings) and ends with a meta footer carrying the cursor
+// integer values as hex strings) and ends with a meta footer carrying the cursor
 // (truncated/total/shown/next) and suggested next commands.
 //
 // Every query streams the .gtb directly (one Expander pass); there is no
@@ -27,6 +27,11 @@ int q_stat(const std::string& gtb, bool json = false);
 int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                  uint64_t range_base, uint64_t range_len, int limit,
                  uint64_t offset = 0, bool json = false, bool writes_only = false);
+int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
+                   bool use_range, uint64_t range_base, uint64_t range_len,
+                   int limit, uint64_t offset, uint64_t from_ev,
+                   uint64_t to_ev, int last, bool json = false,
+                   bool writes_only = false);
 int q_mem_state(const std::string& gtb, uint64_t range_base,
                 uint64_t range_len, uint64_t at_ev, bool json = false);
 int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,

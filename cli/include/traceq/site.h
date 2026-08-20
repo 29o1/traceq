@@ -49,10 +49,9 @@ struct OpPlan {
     // SIMD/FP register index 0..31 (q/d/s/h/b/vN share one index space by N),
     // set when ctx_idx == -1 and the operand is a SIMD/FP register.
     //
-    // Design tradeoff: SIMD/NZCV *values* are deliberately never recorded —
-    // ExecEvent has no lanes for them and the recorder stays unchanged. The
-    // dependence info here is purely static (capstone detail at compile time),
-    // which is all taint needs to propagate through q registers and flags.
+    // Native ExecEvent has no SIMD/NZCV value lanes; imported GumTrace logs do
+    // preserve their observed values separately. The static register identity
+    // here is enough for taint to propagate through q registers and flags.
     int8_t simd_idx = -1;
     uint8_t op_flags = 0;       // OPF_* — NZCV dependence of the whole
                                 // instruction, repeated on every op

@@ -115,6 +115,22 @@ static const char* kLogPair[] = {
         "x8=0x11 x9=0x22 x0=0x3000 mem_w=0x3000 ",
 };
 
+static const char* kLogSimdMem[] = {
+    "[s.so] 0xa000!0x0 str d0, [x1]; "
+        "d0=0x1122334455667788 x1=0xb000 mem_w=0xb000 ",
+    "[s.so] 0xa004!0x4 str q1, [x2]; "
+        "q1=0x112233445566778899aabbccddeeff x2=0xc000 mem_w=0xc000 ",
+    "[s.so] 0xa008!0x8 ldr q2, [x3]; "
+        "x3=0xd000 mem_r=0xd000 -> q2=0xffeeddccbbaa99887766554433221100 ",
+};
+
+static const char* kLogCall8[] = {
+    "[c.so] 0xd000!0x0 bl #0xd100; ",
+    "call func: many(0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8)",
+    "[c.so] 0xd100!0x100 ret; ",
+    "ret: 0x99",
+};
+
 static std::string join_log(const char* const* lines, int n, const char* nl) {
     std::string s;
     for (int i = 0; i < n; i++) {
@@ -267,6 +283,8 @@ static void t_gumtrace() {
     CHECK(fa.find("\"args\":[\"0x1234\",\"0x5678\",\"0x9abc\",\"0xdef0\"]") !=
               std::string::npos,
           "func-args exposes JNI call arguments");
+    CHECK(fa.find("\"ret\":\"0x42\"") != std::string::npos,
+          "func-args pairs the JNI return value");
     std::string ct = cap_out(
         [&] { q_calltree_gtb(gtb, "GetMethodID", 2, 20, false); });
     CHECK(ct.find("GetMethodID(x0=0x1234, x1=0x5678, x2=0x9abc, x3=0xdef0)") !=
@@ -646,6 +664,30 @@ static void t_queries() {
     CHECK(ma.find(" r 0x3000 ") == std::string::npos,
           "no read of 0x3000 exists (honest negative)");
 
+    std::string mab = cap_out([&] {
+        q_mem_accesses(gtb, {0x2000, 0x3000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, false);
+    });
+    CHECK(mab.find("\"ev\":1") != std::string::npos &&
+              mab.find("\"ev\":2") != std::string::npos &&
+              mab.find("\"total\":2") != std::string::npos,
+          "mem-access batches exact addresses in one scan");
+    mab = cap_out([&] {
+        q_mem_accesses(gtb, {0x2000, 0x3000}, false, 0, 0, 1, 0, 1, 2, 0,
+                       true, false);
+    });
+    CHECK(mab.find("gt mem-access --addr 0x2000 --addr 0x3000 --from 1 --to 2 "
+                   "--limit 1 --offset 1") != std::string::npos,
+          "mem-access continuation preserves batched selectors and event bounds");
+    mab = cap_out([&] {
+        q_mem_accesses(gtb, {0x2000, 0x3000}, false, 0, 0, 20, 0, 0, 2, 1,
+                       true, false);
+    });
+    CHECK(mab.find("\"ev\":2") != std::string::npos &&
+              mab.find("\"ev\":1") == std::string::npos &&
+              mab.find("\"total\":2,\"shown\":1") != std::string::npos,
+          "mem-access --last applies event bounds and returns the final hit");
+
     std::string ms = cap_out([&] {
         q_mem_state(gtb, 0x3000, 4, 2, true);
     });
@@ -704,12 +746,58 @@ static void t_queries() {
     CHECK(ma.find(" r 0x200c =0x22 ") != std::string::npos,
           "mem-access can query the synthesized second pair lane");
 
+    ImportResult simd_result;
+    std::string simd_gtb = tmp_path("simd_mem.gtb");
+    CHECK(import_str(join_log(kLogSimdMem, 3, "\n"), simd_gtb, simd_result),
+          "import SIMD memory-value fixture");
+    ma = cap_out([&] {
+        q_mem_access(simd_gtb, 0xb000, false, 0, 0, 20, 0, true, true);
+    });
+    CHECK(ma.find("\"val\":\"0x1122334455667788\"") != std::string::npos,
+          "mem-access reconstructs str d register data, not the address");
+    ma = cap_out([&] {
+        q_mem_access(simd_gtb, 0xc000, false, 0, 0, 20, 0, true, true);
+    });
+    CHECK(ma.find("\"val\":\"0x112233445566778899aabbccddeeff\"") !=
+              std::string::npos,
+          "mem-access preserves a full 128-bit str q value");
+    ma = cap_out([&] {
+        q_mem_access(simd_gtb, 0xd000, false, 0, 0, 20, 0, true, false);
+    });
+    CHECK(ma.find("\"val\":\"0xffeeddccbbaa99887766554433221100\"") !=
+              std::string::npos,
+          "mem-access preserves a full 128-bit ldr q value");
+    ms = cap_out([&] { q_mem_state(simd_gtb, 0xc000, 16, 1, true); });
+    CHECK(ms.find("\"known\":16") != std::string::npos &&
+              ms.find("\"hex\":\"ffeeddccbbaa99887766554433221100\"") !=
+                  std::string::npos,
+          "mem-state materializes all 16 bytes of a q store");
+    pc = cap_out([&] {
+        q_find_pc(simd_gtb, false, 0, true, 4, "s.so", 20, 0, true);
+    });
+    CHECK(pc.find("\"val\":\"0x112233445566778899aabbccddeeff\"") !=
+              std::string::npos,
+          "find-pc reports the full SIMD memory value");
+
     std::string fa = cap_out(
         [&] { q_func_args(gtb, "memcpy", 1, 5, true); });
     CHECK(fa.find("\"args\":[\"0x3000\",\"0x2000\"]") != std::string::npos,
           "func-args reconstructs observed call args");
     CHECK(fa.find("\"line\":5") != std::string::npos,
           "func-args reports the call's original source-log line");
+    CHECK(fa.find("\"ret\":\"0x0\"") != std::string::npos &&
+              fa.find("\"ret_ev\":6") != std::string::npos,
+          "func-args pairs the matching return event and value");
+
+    ImportResult call8_result;
+    std::string call8_gtb = tmp_path("call8.gtb");
+    CHECK(import_str(join_log(kLogCall8, 4, "\n"), call8_gtb, call8_result),
+          "import eight-argument call fixture");
+    fa = cap_out([&] { q_func_args(call8_gtb, "many", 1, 1, true); });
+    CHECK(fa.find("\"args\":[\"0x1\",\"0x2\",\"0x3\",\"0x4\",\"0x5\",\"0x6\",\"0x7\",\"0x8\"]") !=
+              std::string::npos &&
+              fa.find("\"ret\":\"0x99\"") != std::string::npos,
+          "func-args exposes x0..x7 and the paired return");
     fa = cap_out([&] { q_func_args(gtb, "nosuch", 1, 5, false); });
     CHECK(fa.find("no call to nosuch") != std::string::npos,
           "func-args says plainly when the function is absent");

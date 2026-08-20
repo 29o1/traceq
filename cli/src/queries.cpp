@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <set>
@@ -1288,17 +1289,72 @@ int q_stat(const std::string& gtb, bool json) {
     return 0;
 }
 
-int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
-                 uint64_t range_base, uint64_t range_len, int limit,
-                 uint64_t offset, bool json, bool writes_only) {
+int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
+                   bool use_range, uint64_t range_base, uint64_t range_len,
+                   int limit, uint64_t offset, uint64_t from_ev,
+                   uint64_t to_ev, int last, bool json, bool writes_only) {
+    if ((!use_range && addrs.empty()) || (use_range && range_len == 0) ||
+        from_ev > to_ev) {
+        fprintf(stderr, "mem-access: invalid selector or event range\n");
+        return 2;
+    }
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    struct Row {
+        uint64_t ev, line, addr;
+        unsigned __int128 value;
+        uint32_t site_id;
+        bool is_write, value_known, has_exec;
+    };
+    std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
+    std::deque<Row> tail;
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     bool have_suggest = false, suggest_is_read = false;
     uint64_t suggest_ev = 0, suggest_addr = 0;
+    auto emit_row = [&](const Row& r) {
+        if (!have_suggest || (!r.is_write && !suggest_is_read)) {
+            have_suggest = true;
+            suggest_is_read = !r.is_write;
+            suggest_ev = r.ev;
+            suggest_addr = r.addr;
+        }
+        if (json) {
+            std::string o = "{";
+            emit::kv_u64(o, "ev", r.ev);
+            if (r.line) {
+                o += ',';
+                emit::kv_u64(o, "line", r.line);
+            }
+            o += ',';
+            emit::kv_str(o, "rw", r.is_write ? "w" : "r");
+            o += ',';
+            emit::kv_hex(o, "addr", r.addr);
+            if (r.value_known) {
+                o += ',';
+                emit::kv_hex128(o, "val", r.value);
+            }
+            o += ',';
+            emit::kv_str(o, "at", gtb_at(f, r.has_exec ? r.site_id : 0xFFFFFFFFu));
+            o += '}';
+            printf("%s\n", o.c_str());
+        } else {
+            printf("%llu", (unsigned long long)r.ev);
+            if (r.line) printf(" line=%llu", (unsigned long long)r.line);
+            printf(" %c 0x%llx", r.is_write ? 'w' : 'r',
+                   (unsigned long long)r.addr);
+            if (r.value_known) {
+                std::string value = emit::hex128(r.value);
+                printf(" =%s", value.c_str());
+            }
+            printf(" %s\n", gtb_at(f, r.has_exec ? r.site_id : 0xFFFFFFFFu).c_str());
+        }
+    };
     Expander ex(f);
     ex.for_each([&](uint64_t gi, const Group& g) {
+        if (gi < from_ev) return true;
+        if (gi > to_ev) return false;
+        if (g.n_mem == 0) return true;
         std::vector<AgentRegVal> rd, wr;
         std::vector<AgentMemVal> mems;
         if (g.has_exec)
@@ -1310,75 +1366,52 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
             uint64_t mem_addr = mems.empty() ? g.mem[k].addr : mems[size_t(k)].addr;
             bool value_known = mems.empty() ? g.mem[k].value_known
                                             : mems[size_t(k)].known;
-            uint64_t value = mems.empty() ? g.mem[k].value : mems[size_t(k)].val;
+            unsigned __int128 value = mems.empty() ? g.mem[k].value
+                                                    : mems[size_t(k)].val;
             if (writes_only && !is_write) continue;
             bool hit = use_range ? (mem_addr >= range_base &&
-                                    mem_addr < range_base + range_len)
-                                 : (mem_addr == addr);
+                                    mem_addr - range_base < range_len)
+                                 : addr_set.count(mem_addr) != 0;
             if (!hit) continue;
-            if (total++ < offset) continue;
-            if (shown >= lim) continue;
-            shown++;
-            if (!have_suggest || (!is_write && !suggest_is_read)) {
-                have_suggest = true;
-                suggest_is_read = !is_write;
-                suggest_ev = gi;
-                suggest_addr = mem_addr;
-            }
-            if (json) {
-                std::string o = "{";
-                emit::kv_u64(o, "ev", gi);
-                if (g.source_line) {
-                    o += ',';
-                    emit::kv_u64(o, "line", g.source_line);
-                }
-                o += ',';
-                emit::kv_str(o, "rw", is_write ? "w" : "r");
-                o += ',';
-                emit::kv_hex(o, "addr", mem_addr);
-                if (value_known) {
-                    o += ',';
-                    emit::kv_hex(o, "val", value);
-                }
-                o += ',';
-                emit::kv_str(o, "at", gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu));
-                o += '}';
-                printf("%s\n", o.c_str());
-            } else {
-                printf("%llu", (unsigned long long)gi);
-                if (g.source_line)
-                    printf(" line=%llu", (unsigned long long)g.source_line);
-                if (value_known)
-                    printf(" %c 0x%llx =0x%llx %s\n",
-                           is_write ? 'w' : 'r', (unsigned long long)mem_addr,
-                           (unsigned long long)value,
-                           gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
-                else
-                    printf(" %c 0x%llx %s\n",
-                           is_write ? 'w' : 'r', (unsigned long long)mem_addr,
-                           gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
+            Row row{gi, g.source_line, mem_addr, value, g.site_id,
+                    is_write, value_known, g.has_exec};
+            uint64_t row_index = total++;
+            if (last > 0) {
+                if (tail.size() == size_t(last)) tail.pop_front();
+                tail.push_back(row);
+            } else if (row_index >= offset && shown < lim) {
+                emit_row(row);
+                shown++;
             }
         }
         return true;
     });
+    if (last > 0) {
+        for (const Row& row : tail) {
+            emit_row(row);
+            shown++;
+        }
+    }
     emit::Meta meta;
     meta.total = total;
     meta.shown = shown;
-    meta.truncated = offset + shown < total;
-    if (meta.truncated) {
-        char b[320];
+    meta.truncated = last > 0 ? shown < total
+                              : offset < total && shown < total - offset;
+    if (meta.truncated && last <= 0) {
+        std::string next = "gt mem-access";
         if (use_range)
-            snprintf(b, sizeof b, "gt mem-access --range 0x%llx,0x%llx%s --offset %llu %s%s",
-                     (unsigned long long)range_base, (unsigned long long)range_len,
-                     writes_only ? " --write" : "",
-                     (unsigned long long)(offset + shown), gtb.c_str(),
-                     json ? " --json" : "");
+            next += " --range " + emit::hex64(range_base) + ',' +
+                    emit::hex64(range_len);
         else
-            snprintf(b, sizeof b, "gt mem-access --addr 0x%llx%s --offset %llu %s%s",
-                     (unsigned long long)addr, writes_only ? " --write" : "",
-                     (unsigned long long)(offset + shown), gtb.c_str(),
-                     json ? " --json" : "");
-        meta.next = b;
+            for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
+        if (writes_only) next += " --write";
+        if (from_ev) next += " --from " + std::to_string(from_ev);
+        if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
+        if (limit > 0) next += " --limit " + std::to_string(limit);
+        next += " --offset " + std::to_string(offset + shown);
+        next += ' ' + gtb;
+        if (json) next += " --json";
+        meta.next = std::move(next);
     }
     if (have_suggest) {
         char b[384];
@@ -1396,6 +1429,15 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
     }
     emit::finish(meta, json);
     return 0;
+}
+
+int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
+                 uint64_t range_base, uint64_t range_len, int limit,
+                 uint64_t offset, bool json, bool writes_only) {
+    std::vector<uint64_t> addrs;
+    if (!use_range) addrs.push_back(addr);
+    return q_mem_accesses(gtb, addrs, use_range, range_base, range_len, limit,
+                          offset, 0, UINT64_MAX, 0, json, writes_only);
 }
 
 int q_mem_state(const std::string& gtb, uint64_t range_base,
@@ -1420,7 +1462,7 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
         if (gi > at_ev) return false;
         saw_event = true;
         last_ev = gi;
-        if (!g.has_exec) return true;
+        if (!g.has_exec || g.n_mem == 0) return true;
         std::vector<AgentRegVal> rd, wr;
         std::vector<AgentMemVal> mems;
         reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
@@ -1435,7 +1477,7 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
             for (uint64_t a = lo; a < hi; a++) {
                 size_t out_i = size_t(a - range_base);
                 uint64_t lane_i = a - m.addr;
-                if (m.known && lane_i < 8) {
+                if (m.known && lane_i < sizeof(m.val)) {
                     bytes[out_i] = uint8_t(m.val >> (lane_i * 8));
                     known[out_i] = 1;
                 } else if (m.is_w) {
@@ -1586,7 +1628,7 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
                     o += "{\"w\":" + std::string(mems[i].is_w ? "1" : "0") +
                          ",\"addr\":\"" + emit::hex64(mems[i].addr) + "\"";
                     if (mems[i].known)
-                        o += ",\"val\":\"" + emit::hex64(mems[i].val) + "\"";
+                        o += ",\"val\":\"" + emit::hex128(mems[i].val) + "\"";
                     o += '}';
                 }
                 o += ']';
@@ -1613,7 +1655,10 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
             for (const auto& m : mems) {
                 printf("; %s=0x%llx", m.is_w ? "mem_w" : "mem_r",
                        (unsigned long long)m.addr);
-                if (m.known) printf(":0x%llx", (unsigned long long)m.val);
+                if (m.known) {
+                    std::string value = emit::hex128(m.val);
+                    printf(":%s", value.c_str());
+                }
             }
             putchar('\n');
         }
@@ -1660,10 +1705,8 @@ int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
 }
 
 // function call sites directly on a gtb: streams the CALL events whose symbol
-// matches --func and prints the arguments (x0..x3, delta-reconstructed) of the
-// --nth (1-based) call onward. Named calls carry an exec context (module
-// offset); target-only calls (crash-truncated or numeric) fall back to the
-// raw branch target.
+// matches --func and prints the arguments (x0..x7) of the --nth (1-based)
+// call onward. A call-stack walk pairs each shown call with its return value.
 int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
                 bool json) {
     GtbFile f;
@@ -1672,29 +1715,48 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
         uint64_t ev, line;
         std::string at;
         uint64_t target;
-        uint64_t x[4];
+        uint64_t x[8];
         int nargs;
+        bool has_ret;
+        uint64_t ret_ev, ret_line, ret_val;
     };
     std::vector<Row> rows;
+    std::vector<int64_t> stack;
     uint64_t total = 0;
     size_t base = nth > 1 ? size_t(nth - 1) : 0; // --nth 1-based; --nth 0/negative = from the top
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     Expander(f).for_each([&](uint64_t gi, const Group& g) {
-        if (!g.is_call) return true;
-        const char* name = g.call_name;
-        if (!name || strcmp(name, func.c_str()) != 0) return true;
-        total++;
-        if (total - 1 < base) return true; // skip before the --nth window
-        if (rows.size() >= lim) return true;
-        Row r{};
-        r.ev = gi;
-        r.line = g.call_source_line ? g.call_source_line : g.source_line;
-        r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
-        r.target = g.call_target;
-        r.nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
-        if (r.nargs > 4) r.nargs = 4;
-        for (int i = 0; i < 4; i++) r.x[i] = g.args[i];
-        rows.push_back(r);
+        if (g.is_call) {
+            int64_t selected = -1;
+            const char* name = g.call_name;
+            if (name && strcmp(name, func.c_str()) == 0) {
+                uint64_t call_index = total++;
+                if (call_index >= base && rows.size() < lim) {
+                    Row r{};
+                    r.ev = gi;
+                    r.line = g.call_source_line ? g.call_source_line : g.source_line;
+                    r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
+                    r.target = g.call_target;
+                    r.nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
+                    if (r.nargs > 8) r.nargs = 8;
+                    for (int i = 0; i < 8; i++) r.x[i] = g.args[i];
+                    rows.push_back(r);
+                    selected = int64_t(rows.size() - 1);
+                }
+            }
+            stack.push_back(selected);
+        }
+        if (g.is_ret && !stack.empty()) {
+            int64_t selected = stack.back();
+            stack.pop_back();
+            if (selected >= 0) {
+                Row& r = rows[size_t(selected)];
+                r.has_ret = true;
+                r.ret_ev = gi;
+                r.ret_line = g.ret_source_line ? g.ret_source_line : g.source_line;
+                r.ret_val = g.ret_val;
+            }
+        }
         return true;
     });
     uint64_t shown = 0;
@@ -1721,6 +1783,16 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
                 o += ',';
                 emit::kv_hex(o, "target", r.target);
             }
+            if (r.has_ret) {
+                o += ',';
+                emit::kv_u64(o, "ret_ev", r.ret_ev);
+                if (r.ret_line) {
+                    o += ',';
+                    emit::kv_u64(o, "ret_line", r.ret_line);
+                }
+                o += ',';
+                emit::kv_hex(o, "ret", r.ret_val);
+            }
             o += '}';
             printf("%s\n", o.c_str());
         }
@@ -1733,6 +1805,12 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
             if (r.line) printf(" line=%-8llu", (unsigned long long)r.line);
             for (int k = 0; k < r.nargs; k++)
                 printf(" x%d=0x%-14llx", k, (unsigned long long)r.x[k]);
+            if (r.has_ret) {
+                printf(" ret=0x%llx ret_ev=%llu", (unsigned long long)r.ret_val,
+                       (unsigned long long)r.ret_ev);
+                if (r.ret_line)
+                    printf(" ret_line=%llu", (unsigned long long)r.ret_line);
+            }
             printf("  %s\n", r.at.c_str());
         }
         if (total == 0) printf("  (no call to %s in %s)\n", func.c_str(), gtb.c_str());
@@ -1749,7 +1827,7 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
         meta.next = b;
     }
     if (!rows.empty()) {
-        uint64_t ev0 = rows[std::min(base, rows.size() - 1)].ev;
+        uint64_t ev0 = rows[0].ev;
         char b[320];
         uint64_t lo = ev0 > 5 ? ev0 - 5 : 0;
         snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",

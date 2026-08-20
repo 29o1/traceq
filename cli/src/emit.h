@@ -7,8 +7,9 @@
 // "... [N more rows truncated]" marker plus "next:" (copy-executable
 // continuation) and "# suggest:" lines.
 //
-// Value convention for JSON Lines: u64 values ride in hex strings
-// ("val":"0x1ff") so they survive double precision loss; indices and counts
+// Value convention for JSON Lines: integer values (including u128 SIMD memory
+// values) ride in hex strings ("val":"0x1ff") so they survive precision loss;
+// indices and counts
 // (ev, total, shown, ...) stay decimal numbers.
 //
 // This header deliberately lives in src/, not include/: it is CLI glue, not
@@ -57,12 +58,32 @@ inline std::string hex64(uint64_t v) {
     return b;
 }
 
+inline std::string hex128(unsigned __int128 v) {
+    static const char digits[] = "0123456789abcdef";
+    char b[34];
+    char* p = b + sizeof b;
+    do {
+        *--p = digits[uint8_t(v & 0xf)];
+        v >>= 4;
+    } while (v);
+    *--p = 'x';
+    *--p = '0';
+    return std::string(p, b + sizeof b);
+}
+
 // key/value joiners: append "\"key\":value" (no leading comma) to a JSON
 // object body being assembled in `out`.
 inline void kv_hex(std::string& out, const char* key, uint64_t v) {
     char b[64];
     snprintf(b, sizeof b, "\"%s\":\"0x%llx\"", key, (unsigned long long)v);
     out += b;
+}
+inline void kv_hex128(std::string& out, const char* key, unsigned __int128 v) {
+    out.push_back('"');
+    out += key;
+    out += "\":\"";
+    out += hex128(v);
+    out.push_back('"');
 }
 inline void kv_u64(std::string& out, const char* key, uint64_t v) {
     char b[64];
