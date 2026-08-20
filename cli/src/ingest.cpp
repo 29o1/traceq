@@ -447,7 +447,7 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
 // ---------------------------------------------------------------------------
 // register name table for the expansion engines
 // ---------------------------------------------------------------------------
-static const char* idx_name(int ctx_idx) {
+const char* agent_reg_name(int ctx_idx) {
     static const char* names[32] = {
         "x0","x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15",
         "x16","x17","x18","x19","x20","x21","x22","x23","x24","x25","x26","x27","x28","x29","x30","sp"};
@@ -585,9 +585,6 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
 // module-relative (!0xoffset), there is no column padding, and JSON Lines
 // carry u64 values as hex strings.
 // ---------------------------------------------------------------------------
-struct AgentRegVal { int ctx; uint64_t val; };
-struct AgentMemVal { bool is_w; uint64_t addr; uint64_t val; bool known; };
-
 static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
                        std::vector<AgentRegVal>& rd, std::vector<AgentRegVal>& wr) {
     ObsMap m = obs_map(s, g);
@@ -615,7 +612,28 @@ static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
 // value a memory access moved: a recorded value when the trace has one,
 // otherwise the loaded register's write (loads) / the stored register's
 // pre-event value (stores, first plan read that is not the base/index).
-static void agent_mems(const Site& s, const Group& g, const uint64_t* regs,
+static uint64_t pair_mem_stride(const SiteArena& arena, const Site& s) {
+    const char* dis = arena.pool_ptr() + s.disasm_off;
+    size_t n = s.disasm_len;
+    size_t mnemonic = 0;
+    while (mnemonic < n && dis[mnemonic] != ' ') mnemonic++;
+    bool ldp = mnemonic == 3 && !memcmp(dis, "ldp", 3);
+    bool stp = mnemonic == 3 && !memcmp(dis, "stp", 3);
+    bool ldpsw = mnemonic == 5 && !memcmp(dis, "ldpsw", 5);
+    if (!ldp && !stp && !ldpsw) return 0;
+    if (ldpsw) return 4;
+    size_t operand = mnemonic;
+    while (operand < n && dis[operand] == ' ') operand++;
+    if (operand >= n) return 0;
+    if (dis[operand] == 'w' || dis[operand] == 's') return 4;
+    if (dis[operand] == 'q') return 16;
+    return 8;
+}
+
+static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
+                       const uint64_t* regs,
+                       const std::vector<AgentRegVal>& rd,
+                       const std::vector<AgentRegVal>& wr,
                        std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
     int mem_idx = 0;
@@ -655,6 +673,31 @@ static void agent_mems(const Site& s, const Group& g, const uint64_t* regs,
         }
         out.push_back(mv);
     }
+
+    // Upstream GumTrace prints one mem token for ldp/stp. The two register
+    // values still carry both lanes, so expose the second adjacent cell too.
+    uint64_t stride = pair_mem_stride(arena, s);
+    if (stride && out.size() == 1) {
+        AgentMemVal second = out[0];
+        second.addr += stride;
+        second.known = false;
+        const auto& values = second.is_w ? rd : wr;
+        if (values.size() >= 2) {
+            second.val = values[1].val;
+            second.known = true;
+        }
+        out.push_back(second);
+    }
+}
+
+void reconstruct_agent_values(const SiteArena& arena, const Site& site,
+                              const Group& group,
+                              const uint64_t* regs,
+                              std::vector<AgentRegVal>& reads,
+                              std::vector<AgentRegVal>& writes,
+    std::vector<AgentMemVal>& mems) {
+    agent_regs(site, group, regs, reads, writes);
+    agent_mems(arena, site, group, regs, reads, writes, mems);
 }
 
 static void agent_call_text(std::string& line, const Group& g) {
@@ -732,8 +775,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
             std::string txt(A.pool_ptr() + s.disasm_off, s.disasm_len);
             std::vector<AgentRegVal> rd, wr;
             std::vector<AgentMemVal> mems;
-            agent_regs(s, g, regs, rd, wr);
-            agent_mems(s, g, regs, mems);
+            reconstruct_agent_values(A, s, g, regs, rd, wr, mems);
             if (json) {
                 char b[64];
                 snprintf(b, sizeof b, "{\"ev\":%llu", (unsigned long long)gi);
@@ -751,7 +793,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                     if (i) line += ',';
                     char rb[96];
                     snprintf(rb, sizeof rb, "[\"%s\",\"0x%llx\"]",
-                             idx_name(rd[i].ctx), (unsigned long long)rd[i].val);
+                             agent_reg_name(rd[i].ctx), (unsigned long long)rd[i].val);
                     line += rb;
                 }
                 line += "],\"wr\":[";
@@ -759,7 +801,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                     if (i) line += ',';
                     char rb[96];
                     snprintf(rb, sizeof rb, "[\"%s\",\"0x%llx\"]",
-                             idx_name(wr[i].ctx), (unsigned long long)wr[i].val);
+                             agent_reg_name(wr[i].ctx), (unsigned long long)wr[i].val);
                     line += rb;
                 }
                 line += "]";
@@ -789,7 +831,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                     line += "; ";
                     for (size_t i = 0; i < rd.size(); i++) {
                         if (i) line += ' ';
-                        snprintf(b, sizeof b, "%s=0x%llx", idx_name(rd[i].ctx),
+                        snprintf(b, sizeof b, "%s=0x%llx", agent_reg_name(rd[i].ctx),
                                  (unsigned long long)rd[i].val);
                         line += b;
                     }
@@ -797,7 +839,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                     else if (!wr.empty()) line += "-> ";
                     for (size_t i = 0; i < wr.size(); i++) {
                         if (i) line += ' ';
-                        snprintf(b, sizeof b, "%s=0x%llx", idx_name(wr[i].ctx),
+                        snprintf(b, sizeof b, "%s=0x%llx", agent_reg_name(wr[i].ctx),
                                  (unsigned long long)wr[i].val);
                         line += b;
                     }

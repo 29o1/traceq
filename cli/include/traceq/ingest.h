@@ -68,6 +68,19 @@ struct Group {
     uint64_t ret_val = 0;
 };
 
+// Agent-facing values reconstructed for one execution group. The supplied
+// register file is the pre-execution state exposed by Expander::for_each.
+struct AgentRegVal { int ctx; uint64_t val; };
+struct AgentMemVal { bool is_w; uint64_t addr; uint64_t val; bool known; };
+
+const char* agent_reg_name(int ctx_idx);
+void reconstruct_agent_values(const SiteArena& arena, const Site& site,
+                              const Group& group,
+                              const uint64_t* regs,
+                              std::vector<AgentRegVal>& reads,
+                              std::vector<AgentRegVal>& writes,
+                              std::vector<AgentMemVal>& mems);
+
 // Streams groups from a GtbFile, reconstructing register values (reads are
 // rebuilt from write history; sp initialized from the footer, 0 = unknown).
 // One GtbFile is served by at most one Expander at a time.

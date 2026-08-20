@@ -1246,40 +1246,60 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
-    Expander(f).for_each([&](uint64_t gi, const Group& g) {
-        for (int k = 0; k < g.n_mem; k++) {
-            const MemOp& m = g.mem[k];
-            if (writes_only && !m.is_write) continue;
-            bool hit = use_range ? (m.addr >= range_base && m.addr < range_base + range_len)
-                                 : (m.addr == addr);
+    bool have_suggest = false, suggest_is_read = false;
+    uint64_t suggest_ev = 0, suggest_addr = 0;
+    Expander ex(f);
+    ex.for_each([&](uint64_t gi, const Group& g) {
+        std::vector<AgentRegVal> rd, wr;
+        std::vector<AgentMemVal> mems;
+        if (g.has_exec)
+            reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
+                                     ex.regfile(), rd, wr, mems);
+        int lanes = mems.empty() ? g.n_mem : int(mems.size());
+        for (int k = 0; k < lanes; k++) {
+            bool is_write = mems.empty() ? g.mem[k].is_write : mems[size_t(k)].is_w;
+            uint64_t mem_addr = mems.empty() ? g.mem[k].addr : mems[size_t(k)].addr;
+            bool value_known = mems.empty() ? g.mem[k].value_known
+                                            : mems[size_t(k)].known;
+            uint64_t value = mems.empty() ? g.mem[k].value : mems[size_t(k)].val;
+            if (writes_only && !is_write) continue;
+            bool hit = use_range ? (mem_addr >= range_base &&
+                                    mem_addr < range_base + range_len)
+                                 : (mem_addr == addr);
             if (!hit) continue;
             if (total++ < offset) continue;
             if (shown >= lim) continue;
             shown++;
+            if (!have_suggest || (!is_write && !suggest_is_read)) {
+                have_suggest = true;
+                suggest_is_read = !is_write;
+                suggest_ev = gi;
+                suggest_addr = mem_addr;
+            }
             if (json) {
                 std::string o = "{";
                 emit::kv_u64(o, "ev", gi);
                 o += ',';
-                emit::kv_str(o, "rw", m.is_write ? "w" : "r");
+                emit::kv_str(o, "rw", is_write ? "w" : "r");
                 o += ',';
-                emit::kv_hex(o, "addr", m.addr);
-                if (m.value_known) {
+                emit::kv_hex(o, "addr", mem_addr);
+                if (value_known) {
                     o += ',';
-                    emit::kv_hex(o, "val", m.value);
+                    emit::kv_hex(o, "val", value);
                 }
                 o += ',';
                 emit::kv_str(o, "at", gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu));
                 o += '}';
                 printf("%s\n", o.c_str());
             } else {
-                if (m.value_known)
+                if (value_known)
                     printf("%llu %c 0x%llx =0x%llx %s\n", (unsigned long long)gi,
-                           m.is_write ? 'w' : 'r', (unsigned long long)m.addr,
-                           (unsigned long long)m.value,
+                           is_write ? 'w' : 'r', (unsigned long long)mem_addr,
+                           (unsigned long long)value,
                            gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
                 else
                     printf("%llu %c 0x%llx %s\n", (unsigned long long)gi,
-                           m.is_write ? 'w' : 'r', (unsigned long long)m.addr,
+                           is_write ? 'w' : 'r', (unsigned long long)mem_addr,
                            gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
             }
         }
@@ -1292,8 +1312,9 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
     if (meta.truncated) {
         char b[320];
         if (use_range)
-            snprintf(b, sizeof b, "gt mem-access --range 0x%llx,0x%llx --offset %llu %s%s",
+            snprintf(b, sizeof b, "gt mem-access --range 0x%llx,0x%llx%s --offset %llu %s%s",
                      (unsigned long long)range_base, (unsigned long long)range_len,
+                     writes_only ? " --write" : "",
                      (unsigned long long)(offset + shown), gtb.c_str(),
                      json ? " --json" : "");
         else
@@ -1303,7 +1324,169 @@ int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                      json ? " --json" : "");
         meta.next = b;
     }
-    meta.suggest.push_back("gt export --format compact --from EV --to EV+200 " + gtb);
+    if (have_suggest) {
+        char b[384];
+        snprintf(b, sizeof b,
+                 "gt taint --seed-addr 0x%llx --back --at-ev %llu --window 50000 --limit 20 %s",
+                 (unsigned long long)suggest_addr,
+                 (unsigned long long)suggest_ev, gtb.c_str());
+        meta.suggest.push_back(b);
+        uint64_t from = suggest_ev > 5 ? suggest_ev - 5 : 0;
+        snprintf(b, sizeof b,
+                 "gt export --format compact --from %llu --to %llu %s",
+                 (unsigned long long)from,
+                 (unsigned long long)(suggest_ev + 5), gtb.c_str());
+        meta.suggest.push_back(b);
+    }
+    emit::finish(meta, json);
+    return 0;
+}
+
+int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
+              bool use_off, uint64_t off, const std::string& mod, int limit,
+              uint64_t offset, bool json) {
+    GtbFile f;
+    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    uint64_t total = 0, shown = 0, first_ev = 0;
+    uint64_t next_source_line = 1;
+    bool have_first = false;
+    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    Expander ex(f);
+    ex.for_each([&](uint64_t gi, const Group& g) {
+        uint64_t source_line = 0;
+        if (f.dialect & 1) {
+            if (g.has_verbatim) {
+                uint64_t lines = 0;
+                const char* p = f.verbatim.data() + g.verbatim_off;
+                for (uint32_t i = 0; i < g.verbatim_len; i++)
+                    if (p[i] == '\n') lines++;
+                if (g.verbatim_len && p[g.verbatim_len - 1] != '\n') lines++;
+                next_source_line += lines;
+            } else {
+                if (g.has_exec) source_line = next_source_line++;
+                if (g.is_call) next_source_line++;
+                if (g.is_ret) next_source_line++;
+            }
+        }
+        if (!g.has_exec) return true;
+        const Site& s = f.arena.get(g.site_id);
+        std::string module = s.module_id < f.arena.modules().size()
+                                 ? f.arena.modules()[s.module_id]
+                                 : "?";
+        uint64_t site_off = s.module_id < f.arena.modules().size()
+                                ? s.addr - f.arena.module_base(s.module_id)
+                                : s.addr;
+        bool hit = use_addr ? s.addr == addr
+                            : use_off && site_off == off &&
+                                  (mod.empty() || module == mod);
+        if (!hit) return true;
+        if (total++ < offset || shown >= lim) return true;
+        shown++;
+        if (!have_first) { have_first = true; first_ev = gi; }
+
+        std::vector<AgentRegVal> rd, wr;
+        std::vector<AgentMemVal> mems;
+        reconstruct_agent_values(f.arena, s, g, ex.regfile(), rd, wr, mems);
+        std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
+        if (json) {
+            std::string o = "{";
+            emit::kv_u64(o, "ev", gi);
+            if (source_line) {
+                o += ',';
+                emit::kv_u64(o, "line", source_line);
+            }
+            o += ',';
+            emit::kv_str(o, "mod", module);
+            o += ',';
+            emit::kv_hex(o, "off", site_off);
+            o += ',';
+            emit::kv_hex(o, "addr", s.addr);
+            o += ',';
+            emit::kv_str(o, "txt", txt);
+            o += ",\"rd\":[";
+            for (size_t i = 0; i < rd.size(); i++) {
+                if (i) o += ',';
+                o += "[\"" + std::string(agent_reg_name(rd[i].ctx)) + "\",\"" +
+                     emit::hex64(rd[i].val) + "\"]";
+            }
+            o += "],\"wr\":[";
+            for (size_t i = 0; i < wr.size(); i++) {
+                if (i) o += ',';
+                o += "[\"" + std::string(agent_reg_name(wr[i].ctx)) + "\",\"" +
+                     emit::hex64(wr[i].val) + "\"]";
+            }
+            o += ']';
+            if (!mems.empty()) {
+                o += ",\"mem\":[";
+                for (size_t i = 0; i < mems.size(); i++) {
+                    if (i) o += ',';
+                    o += "{\"w\":" + std::string(mems[i].is_w ? "1" : "0") +
+                         ",\"addr\":\"" + emit::hex64(mems[i].addr) + "\"";
+                    if (mems[i].known)
+                        o += ",\"val\":\"" + emit::hex64(mems[i].val) + "\"";
+                    o += '}';
+                }
+                o += ']';
+            }
+            o += '}';
+            printf("%s\n", o.c_str());
+        } else {
+            printf("%llu", (unsigned long long)gi);
+            if (source_line)
+                printf(" line=%llu", (unsigned long long)source_line);
+            printf(" %s %s", gtb_at(f, g.site_id).c_str(), txt.c_str());
+            if (!rd.empty() || !wr.empty()) {
+                printf(";");
+                for (const auto& r : rd)
+                    printf(" %s=0x%llx", agent_reg_name(r.ctx),
+                           (unsigned long long)r.val);
+                if (!wr.empty()) {
+                    printf(" ->");
+                    for (const auto& w : wr)
+                        printf(" %s=0x%llx", agent_reg_name(w.ctx),
+                               (unsigned long long)w.val);
+                }
+            }
+            for (const auto& m : mems) {
+                printf("; %s=0x%llx", m.is_w ? "mem_w" : "mem_r",
+                       (unsigned long long)m.addr);
+                if (m.known) printf(":0x%llx", (unsigned long long)m.val);
+            }
+            putchar('\n');
+        }
+        return true;
+    });
+
+    emit::Meta meta;
+    meta.total = total;
+    meta.shown = shown;
+    meta.truncated = offset + shown < total;
+    if (meta.truncated) {
+        char b[512];
+        if (use_addr)
+            snprintf(b, sizeof b,
+                     "gt find-pc --addr 0x%llx --limit %llu --offset %llu %s%s",
+                     (unsigned long long)addr, (unsigned long long)lim,
+                     (unsigned long long)(offset + shown), gtb.c_str(),
+                     json ? " --json" : "");
+        else
+            snprintf(b, sizeof b,
+                     "gt find-pc --off 0x%llx%s%s --limit %llu --offset %llu %s%s",
+                     (unsigned long long)off, mod.empty() ? "" : " --mod ",
+                     mod.empty() ? "" : mod.c_str(), (unsigned long long)lim,
+                     (unsigned long long)(offset + shown), gtb.c_str(),
+                     json ? " --json" : "");
+        meta.next = b;
+    }
+    if (have_first) {
+        char b[384];
+        uint64_t from = first_ev > 5 ? first_ev - 5 : 0;
+        snprintf(b, sizeof b,
+                 "gt export --format compact --from %llu --to %llu %s",
+                 (unsigned long long)from,
+                 (unsigned long long)(first_ev + 5), gtb.c_str());
+        meta.suggest.push_back(b);
+    }
     emit::finish(meta, json);
     return 0;
 }

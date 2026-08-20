@@ -116,6 +116,35 @@ int cmd_mem_access(int argc, char** argv) {
                         json, writes_only);
 }
 
+int cmd_find_pc(int argc, char** argv) {
+    std::string gtb, mod;
+    uint64_t addr = 0, off = 0, offset = 0;
+    int limit = 20;
+    bool use_addr = false, use_off = false, json = false;
+    for (int i = 1; i < argc; i++) {
+        auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
+        if (!strcmp(argv[i], "--addr")) {
+            addr = strtoull(next(), nullptr, 0);
+            use_addr = true;
+        }
+        else if (!strcmp(argv[i], "--off")) {
+            off = strtoull(next(), nullptr, 0);
+            use_off = true;
+        }
+        else if (!strcmp(argv[i], "--mod")) mod = next();
+        else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
+        else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
+        else if (!strcmp(argv[i], "--json")) json = true;
+        else if (argv[i][0] != '-') gtb = argv[i];
+    }
+    if (gtb.empty() || use_addr == use_off || (use_addr && !mod.empty())) {
+        fprintf(stderr, "usage: gt find-pc trace.gtb (--addr A | --off O [--mod M]) "
+                        "[--limit N] [--offset M] [--json]\n");
+        return 2;
+    }
+    return q_find_pc(gtb, use_addr, addr, use_off, off, mod, limit, offset, json);
+}
+
 int cmd_func_args(int argc, char** argv) {
     std::string gtb, func;
     int nth = 1, limit = 1;
@@ -189,6 +218,8 @@ static void usage() {
         "  gt stat      trace.gtb [--json]\n"
         "  gt mem-access trace.gtb (--addr A | --range B,L) [--write]\n"
         "               [--limit N] [--json]\n"
+        "  gt find-pc  trace.gtb (--addr A | --off O [--mod M])\n"
+        "               [--limit N] [--offset M] [--json]\n"
         "  gt find-value V trace.gtb [--limit N] [--json]\n"
         "  gt func-args --func NAME [--nth N] [--limit L] trace.gtb [--json]\n"
         "  gt calltree  --func NAME [--depth D] trace.gtb\n"
@@ -212,6 +243,7 @@ int main(int argc, char** argv) {
     if (cmd == "fold") return cmd_fold(argc - 1, argv + 1);
     if (cmd == "stat") return cmd_stat(argc - 1, argv + 1);
     if (cmd == "mem-access") return cmd_mem_access(argc - 1, argv + 1);
+    if (cmd == "find-pc") return cmd_find_pc(argc - 1, argv + 1);
     if (cmd == "find-value") return cmd_find_value(argc - 1, argv + 1);
     if (cmd == "func-args") return cmd_func_args(argc - 1, argv + 1);
     if (cmd == "calltree") return cmd_calltree(argc - 1, argv + 1);

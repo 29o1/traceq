@@ -21,7 +21,7 @@
 //                call/svc/ret, guards (max_events/max_bytes), crash flush,
 //                ring+trigger, detail levels
 //   t_queries    query surface + agent contract on an imported file:
-//                stat/find-value/mem-access/func-args/calltree, export windows
+//                stat/find-pc/find-value/mem-access/func-args/calltree, export windows
 //                and cursor, JSON Lines shape
 //   t_diff       (module, offset) identity: inserted instruction diverges,
 //                rebased copy compares identical
@@ -106,6 +106,13 @@ static const char* kLogRT[] = {
     "ret: 0x0",
     "GumTrace started on tid=11484",
     "[libc.so] 0x1014!0x14 mov x8, x9; x9=0x05 -> x8=0x05 ", // non-canonical hex
+};
+
+static const char* kLogPair[] = {
+    "[p.so] 0x8000!0x0 ldp w8, w9, [x0, #8]; "
+        "w8=0xaaaa w9=0xbbbb x0=0x2000 mem_r=0x2008 -> w8=0x11 w9=0x22 ",
+    "[p.so] 0x8004!0x4 stp x8, x9, [x0]; "
+        "x8=0x11 x9=0x22 x0=0x3000 mem_w=0x3000 ",
 };
 
 static std::string join_log(const char* const* lines, int n, const char* nl) {
@@ -585,12 +592,65 @@ static void t_queries() {
     std::string ma = cap_out([&] {
         q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, true);
     });
-    CHECK(ma.find(" w 0x3000 ") != std::string::npos,
-          "mem-access --write finds the store");
+    CHECK(ma.find(" w 0x3000 =0xca ") != std::string::npos,
+          "mem-access --write reconstructs the stored value");
+    CHECK(ma.find("gt taint --seed-addr 0x3000 --back --at-ev 2") !=
+              std::string::npos,
+          "mem-access suggests a filled-in backward taint");
+    std::string maj = cap_out([&] {
+        q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, true, true);
+    });
+    CHECK(maj.find("\"val\":\"0xca\"") != std::string::npos,
+          "mem-access --json includes the reconstructed value");
     ma = cap_out(
         [&] { q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, false); });
     CHECK(ma.find(" r 0x3000 ") == std::string::npos,
           "no read of 0x3000 exists (honest negative)");
+
+    std::string pc = cap_out([&] {
+        q_find_pc(gtb, false, 0, true, 0x8, "libc.so", 20, 0, true);
+    });
+    CHECK(pc.find("\"ev\":2") != std::string::npos &&
+              pc.find("\"line\":3") != std::string::npos &&
+              pc.find("[\"x7\",\"0xca\"]") != std::string::npos &&
+              pc.find("\"val\":\"0xca\"") != std::string::npos,
+          "find-pc returns executions with register and memory values");
+    pc = cap_out([&] {
+        q_find_pc(gtb, true, 0x1008, false, 0, "", 20, 0, false);
+    });
+    CHECK(pc.find("2 line=3 libc.so!0x8 strb") != std::string::npos,
+          "find-pc accepts an absolute address");
+    pc = cap_out([&] {
+        q_find_pc(gtb, false, 0, true, 0x10, "libc.so", 20, 0, true);
+    });
+    CHECK(pc.find("\"line\":6") != std::string::npos,
+          "find-pc line accounts for attached call records");
+
+    ImportResult pair_result;
+    std::string pair_gtb = tmp_path("pair.gtb");
+    CHECK(import_str(join_log(kLogPair, 2, "\n"), pair_gtb, pair_result),
+          "import pair load/store fixture");
+    pc = cap_out([&] {
+        q_find_pc(pair_gtb, false, 0, true, 0, "p.so", 20, 0, true);
+    });
+    CHECK(pc.find("\"addr\":\"0x2008\",\"val\":\"0x11\"") !=
+              std::string::npos &&
+              pc.find("\"addr\":\"0x200c\",\"val\":\"0x22\"") !=
+              std::string::npos,
+          "find-pc exposes both ldp memory lanes");
+    pc = cap_out([&] {
+        q_find_pc(pair_gtb, false, 0, true, 4, "p.so", 20, 0, true);
+    });
+    CHECK(pc.find("\"addr\":\"0x3000\",\"val\":\"0x11\"") !=
+              std::string::npos &&
+              pc.find("\"addr\":\"0x3008\",\"val\":\"0x22\"") !=
+              std::string::npos,
+          "find-pc exposes both stp memory lanes");
+    ma = cap_out([&] {
+        q_mem_access(pair_gtb, 0x200c, false, 0, 0, 20, 0, false, false);
+    });
+    CHECK(ma.find(" r 0x200c =0x22 ") != std::string::npos,
+          "mem-access can query the synthesized second pair lane");
 
     std::string fa = cap_out(
         [&] { q_func_args(gtb, "memcpy", 1, 5, true); });

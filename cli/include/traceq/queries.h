@@ -25,6 +25,9 @@ int q_stat(const std::string& gtb, bool json = false);
 int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
                  uint64_t range_base, uint64_t range_len, int limit,
                  uint64_t offset = 0, bool json = false, bool writes_only = false);
+int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
+              bool use_off, uint64_t off, const std::string& mod, int limit,
+              uint64_t offset = 0, bool json = false);
 // nth (1-based) selects the first call to show, limit the row count
 int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
                 bool json = false);
