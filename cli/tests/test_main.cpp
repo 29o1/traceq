@@ -518,6 +518,27 @@ static void t_queries() {
     CHECK(fv.find("line=2") != std::string::npos &&
               fv.find("line=3") != std::string::npos,
           "find-value reports original source-log lines");
+    std::string fvj = cap_out([&] {
+        q_find_value(gtb, 0xca, 20, 0, true);
+    });
+    CHECK(fvj.find("\"kind\":\"reg\",\"rw\":\"w\",\"reg\":\"x7\"") !=
+              std::string::npos &&
+              fvj.find("\"kind\":\"mem\",\"rw\":\"w\",\"addr\":\"0x3000\",\"size\":1") !=
+                  std::string::npos,
+          "find-value JSON identifies register and memory locations");
+    fvj = cap_out([&] {
+        q_find_value(gtb, 0xca, 20, 0, true, 1, 1, true, false);
+    });
+    CHECK(fvj.find("\"kind\":\"mem\",\"rw\":\"r\",\"addr\":\"0x2000\",\"size\":1") !=
+              std::string::npos &&
+              fvj.find("\"rw\":\"w\"") == std::string::npos,
+          "find-value --read and event bounds select only matching reads");
+    fvj = cap_out([&] {
+        q_find_value(gtb, 0xca, 1, 0, true, 1, 2, false, true);
+    });
+    CHECK(fvj.find("gt find-value 0xca --write --from 1 --to 2 --limit 1 "
+                   "--offset 1") != std::string::npos,
+          "find-value continuation preserves filters and event bounds");
 
     std::string ma = cap_out([&] {
         q_mem_accesses(gtb, {0x3000}, false, 0, 0, 20, 0, 0,
@@ -576,23 +597,31 @@ static void t_queries() {
     CHECK(history.find("\"off\":\"0x10\"") != std::string::npos &&
               history.find("\"size\":1") != std::string::npos,
           "range mem-access reports relative offset and access size");
-    CHECK(history.find("\"reads\":1,\"writes\":1") != std::string::npos &&
-              history.find("\"prior_write_ev\":0") != std::string::npos,
-          "mem-access summarizes reads/writes and links a read to its writer");
+    CHECK(history.find("\"prior_write_ev\":0") != std::string::npos &&
+              history.find("mem_access_summary") == std::string::npos,
+          "mem-access links a read to its writer without summary records");
     CHECK(history.find("\"focus_ev\"") == std::string::npos,
           "mem-access rows carry facts without a selected focus");
     history = cap_out([&] {
         q_mem_accesses(history_gtb, {0x4000}, false, 0, 0, 20, 0, 1,
                        UINT64_MAX, 0, true, false);
     });
-    CHECK(history.find("\"reads\":1,\"writes\":0") != std::string::npos &&
+    CHECK(history.find("\"ev\":1") != std::string::npos &&
               history.find("\"prior_write_ev\":0") != std::string::npos,
           "prior-write lookup includes writes before --from");
+    history = cap_out([&] {
+        q_mem_accesses(history_gtb, {}, true, 0x3ff0, 0x20, 20, 0, 0,
+                       UINT64_MAX, 0, true, false, true);
+    });
+    CHECK(history.find("\"ev\":0") == std::string::npos &&
+              history.find("\"ev\":1") != std::string::npos &&
+              history.find("\"prior_write_ev\":0") != std::string::npos,
+          "mem-access --read hides writes but retains prior-write history");
     history = cap_out([&] {
         q_mem_accesses(history_gtb, {0x5000}, false, 0, 0, 20, 0, 0,
                        UINT64_MAX, 0, false, false);
     });
-    CHECK(history.find("summary: reads=1 writes=0") != std::string::npos &&
+    CHECK(history.find("summary:") == std::string::npos &&
               history.find("prior_write_ev=none") != std::string::npos,
           "read-only address reports that no producer was observed");
 

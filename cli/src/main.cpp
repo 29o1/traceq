@@ -146,13 +146,13 @@ int cmd_mem_access(int argc, char** argv) {
     uint64_t range_base = 0, range_len = 0, offset = 0;
     uint64_t from_ev = 0, to_ev = UINT64_MAX;
     int limit = 20, last = 0;
-    bool use_range = false, json = false, writes_only = false;
+    bool use_range = false, json = false, writes_only = false, reads_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
             printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
-                   "[--write] [--from E] [--to E] "
+                   "[--read | --write] [--from E] [--to E] "
                    "([--limit N] [--offset M] | --last N) [--json]\n");
             return 0;
         }
@@ -165,6 +165,7 @@ int cmd_mem_access(int argc, char** argv) {
             }
             use_range = true;
         }
+        else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
         else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 0);
         else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 0);
@@ -185,14 +186,16 @@ int cmd_mem_access(int argc, char** argv) {
         else return unknown_option("mem-access", argv[i]);
     }
     if (gtb.empty() || addrs.empty() == !use_range || from_ev > to_ev ||
+        (reads_only && writes_only) ||
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
         fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
-                        "[--write] [--from E] [--to E] "
+                        "[--read | --write] [--from E] [--to E] "
                         "([--limit N] [--offset M] | --last N) [--json]\n");
         return 2;
     }
     return q_mem_accesses(gtb, addrs, use_range, range_base, range_len, limit,
-                          offset, from_ev, to_ev, last, json, writes_only);
+                          offset, from_ev, to_ev, last, json, writes_only,
+                          reads_only);
 }
 
 int cmd_mem_state(int argc, char** argv) {
@@ -293,15 +296,20 @@ int cmd_func_args(int argc, char** argv) {
 
 int cmd_find_value(int argc, char** argv) {
     std::string gtb;
-    uint64_t val = 0, offset = 0;
+    uint64_t val = 0, offset = 0, from_ev = 0, to_ev = UINT64_MAX;
     int limit = 20;
-    bool have_val = false, json = false;
+    bool have_val = false, json = false, reads_only = false, writes_only = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt find-value V trace.gtb [--limit N] [--offset M] [--json]\n");
+            printf("usage: gt find-value V trace.gtb [--read | --write] "
+                   "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
             return 0;
         }
+        else if (!strcmp(argv[i], "--read")) reads_only = true;
+        else if (!strcmp(argv[i], "--write")) writes_only = true;
+        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 0);
+        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 0);
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
@@ -312,11 +320,14 @@ int cmd_find_value(int argc, char** argv) {
         }
         else return unknown_option("find-value", argv[i]);
     }
-    if (gtb.empty() || !have_val) {
-        fprintf(stderr, "usage: gt find-value V trace.gtb [--limit N] [--offset M] [--json]\n");
+    if (gtb.empty() || !have_val || from_ev > to_ev ||
+        (reads_only && writes_only)) {
+        fprintf(stderr, "usage: gt find-value V trace.gtb [--read | --write] "
+                        "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
         return 2;
     }
-    return q_find_value(gtb, val, limit, offset, json);
+    return q_find_value(gtb, val, limit, offset, json, from_ev, to_ev,
+                        reads_only, writes_only);
 }
 
 int cmd_calltree(int argc, char** argv) {
@@ -357,12 +368,13 @@ static void usage() {
         "  gt diff      a.gtb b.gtb\n"
         "  gt fold      --top N trace.gtb\n"
         "  gt stat      trace.gtb [--json]\n"
-        "  gt mem-access trace.gtb (--addr A... | --range B,L) [--write]\n"
+        "  gt mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--json]\n"
         "  gt mem-state trace.gtb --range B,L --at-ev N [--json]\n"
         "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
         "               [--from E] [--to E] [--limit N] [--offset M] [--json]\n"
-        "  gt find-value V trace.gtb [--limit N] [--json]\n"
+        "  gt find-value V trace.gtb [--read | --write] [--from E] [--to E]\n"
+        "               [--limit N] [--json]\n"
         "  gt func-args --func NAME [--nth N] [--limit L] trace.gtb [--json]\n"
         "  gt calltree  --func NAME [--depth D] trace.gtb\n"
         "\n"

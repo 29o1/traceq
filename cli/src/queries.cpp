@@ -1260,9 +1260,10 @@ int q_stat(const std::string& gtb, bool json) {
 int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                    bool use_range, uint64_t range_base, uint64_t range_len,
                    int limit, uint64_t offset, uint64_t from_ev,
-                   uint64_t to_ev, int last, bool json, bool writes_only) {
+                   uint64_t to_ev, int last, bool json, bool writes_only,
+                   bool reads_only) {
     if ((!use_range && addrs.empty()) || (use_range && range_len == 0) ||
-        from_ev > to_ev) {
+        from_ev > to_ev || (writes_only && reads_only)) {
         fprintf(stderr, "mem-access: invalid selector or event range\n");
         return 2;
     }
@@ -1279,7 +1280,7 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_map<uint64_t, uint64_t> last_write;
     std::deque<Row> tail;
-    uint64_t total = 0, shown = 0, read_total = 0, write_total = 0;
+    uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     auto emit_row = [&](const Row& r) {
         if (json) {
@@ -1363,18 +1364,13 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                 if (is_write) last_write[mem_addr] = gi;
                 continue;
             }
-            if (writes_only && !is_write) continue;
             auto prior = last_write.find(mem_addr);
+            if (is_write) last_write[mem_addr] = gi;
+            if ((writes_only && !is_write) || (reads_only && is_write)) continue;
             Row row{gi, g.source_line, mem_addr, value, g.site_id, mem_size,
                     is_write, value_known, g.has_exec,
                     prior != last_write.end(),
                     prior != last_write.end() ? prior->second : 0};
-            if (is_write) {
-                write_total++;
-                last_write[mem_addr] = gi;
-            } else {
-                read_total++;
-            }
             uint64_t row_index = total++;
             if (last > 0) {
                 if (tail.size() == size_t(last)) tail.pop_front();
@@ -1392,18 +1388,6 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
             shown++;
         }
     }
-    if (json) {
-        std::string o = "{\"mem_access_summary\":{";
-        emit::kv_u64(o, "reads", read_total);
-        o += ',';
-        emit::kv_u64(o, "writes", write_total);
-        o += "}}";
-        printf("%s\n", o.c_str());
-    } else {
-        printf("summary: reads=%llu writes=%llu\n",
-               (unsigned long long)read_total,
-               (unsigned long long)write_total);
-    }
     emit::Meta meta;
     meta.total = total;
     meta.shown = shown;
@@ -1416,6 +1400,7 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                     emit::hex64(range_len);
         else
             for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
+        if (reads_only) next += " --read";
         if (writes_only) next += " --write";
         if (from_ev) next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
@@ -1795,7 +1780,12 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
 }
 
 int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offset,
-                 bool json) {
+                 bool json, uint64_t from_ev, uint64_t to_ev,
+                 bool reads_only, bool writes_only) {
+    if (from_ev > to_ev || (reads_only && writes_only)) {
+        fprintf(stderr, "find-value: invalid event range or access filter\n");
+        return 2;
+    }
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     uint64_t total = 0, shown = 0;
@@ -1813,7 +1803,10 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
             v >>= 8;
         } while (v && pat_n < 8);
     }
-    auto row = [&](uint64_t gi, const char* lane, const Group& g) {
+    auto row = [&](uint64_t gi, const std::string& lane, const char* kind,
+                   char rw, const std::string& reg, uint64_t addr,
+                   uint8_t size, const Group& g) {
+        if ((reads_only && rw != 'r') || (writes_only && rw != 'w')) return;
         if (total++ < offset) return;
         if (shown >= lim) return;
         shown++;
@@ -1827,6 +1820,22 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
             o += ',';
             emit::kv_str(o, "lane", lane);
             o += ',';
+            emit::kv_str(o, "kind", kind);
+            if (rw) {
+                o += ',';
+                emit::kv_str(o, "rw", rw == 'w' ? "w" : "r");
+            }
+            if (!reg.empty()) {
+                o += ',';
+                emit::kv_str(o, "reg", reg);
+            }
+            if (!strcmp(kind, "mem") || !strcmp(kind, "dump")) {
+                o += ',';
+                emit::kv_hex(o, "addr", addr);
+                o += ',';
+                emit::kv_u64(o, "size", size);
+            }
+            o += ',';
             emit::kv_hex(o, "val", val);
             o += ',';
             emit::kv_str(o, "at", gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu));
@@ -1836,11 +1845,14 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
             printf("%llu", (unsigned long long)gi);
             if (g.source_line)
                 printf(" line=%llu", (unsigned long long)g.source_line);
-            printf(" %s 0x%llx %s\n", lane, (unsigned long long)val,
+            printf(" %s 0x%llx %s\n", lane.c_str(), (unsigned long long)val,
                    gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
         }
     };
-    Expander(f).for_each([&](uint64_t gi, const Group& g) {
+    Expander ex(f);
+    ex.for_each([&](uint64_t gi, const Group& g) {
+        if (gi > to_ev) return false;
+        if (gi < from_ev) return true;
         char rb[16];
         if (g.has_verbatim) {
             // hexdump rows: byte-exact content search at any offset. Qword-
@@ -1861,7 +1873,8 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
                             snprintf(lb, sizeof lb, "dump:0x%llx",
                                      (unsigned long long)(raddr +
                                                           uint64_t(o)));
-                            row(gi, lb, g);
+                            row(gi, lb, "dump", 0, "", raddr + uint64_t(o),
+                                uint8_t(pat_n), g);
                         }
             }
             // fall through: verbatim groups may carry synthesized mem lanes
@@ -1870,32 +1883,61 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         // lanes below already cover them, so skip the bare lane to avoid
         // counting one logical write twice
         for (int k = 0; k < g.n_wr; k++)
-            if (g.n_wobs == 0 && g.wr_val[k] == val)
-                row(gi, taint_reg_name(g.wr_id[k] & 31, rb), g);
+            if (g.n_wobs == 0 && g.wr_val[k] == val) {
+                std::string reg = taint_reg_name(g.wr_id[k] & 31, rb);
+                row(gi, reg, "reg", 'w', reg, 0, 0, g);
+            }
         for (int k = 0; k < g.n_obs; k++) {
             unsigned __int128 v = g.obs[k].val;
-            std::string ln = std::string("rd:") + f.arena.str(g.obs[k].name_id);
+            std::string reg = f.arena.str(g.obs[k].name_id);
+            std::string ln = std::string("rd:") + reg;
             if (v <= UINT64_MAX) {
-                if (uint64_t(v) == val) row(gi, ln.c_str(), g);
+                if (uint64_t(v) == val)
+                    row(gi, ln, "reg", 'r', reg, 0, 0, g);
             } else {
                 // 128-bit SIMD observation: match either 64-bit lane exactly
-                if (uint64_t(v) == val) row(gi, (ln + ".lo").c_str(), g);
-                else if (uint64_t(v >> 64) == val) row(gi, (ln + ".hi").c_str(), g);
+                if (uint64_t(v) == val)
+                    row(gi, ln + ".lo", "reg", 'r', reg + ".lo", 0, 0, g);
+                else if (uint64_t(v >> 64) == val)
+                    row(gi, ln + ".hi", "reg", 'r', reg + ".hi", 0, 0, g);
             }
         }
         for (int k = 0; k < g.n_wobs; k++) {
             unsigned __int128 v = g.wobs[k].val;
-            std::string ln = std::string("wr:") + f.arena.str(g.wobs[k].name_id);
+            std::string reg = f.arena.str(g.wobs[k].name_id);
+            std::string ln = std::string("wr:") + reg;
             if (v <= UINT64_MAX) {
-                if (uint64_t(v) == val) row(gi, ln.c_str(), g);
+                if (uint64_t(v) == val)
+                    row(gi, ln, "reg", 'w', reg, 0, 0, g);
             } else {
-                if (uint64_t(v) == val) row(gi, (ln + ".lo").c_str(), g);
-                else if (uint64_t(v >> 64) == val) row(gi, (ln + ".hi").c_str(), g);
+                if (uint64_t(v) == val)
+                    row(gi, ln + ".lo", "reg", 'w', reg + ".lo", 0, 0, g);
+                else if (uint64_t(v >> 64) == val)
+                    row(gi, ln + ".hi", "reg", 'w', reg + ".hi", 0, 0, g);
             }
         }
-        for (int k = 0; k < g.n_mem; k++)
-            if (g.mem[k].value_known && g.mem[k].value == val)
-                row(gi, g.mem[k].is_write ? "mem_w" : "mem_r", g);
+        std::vector<AgentRegVal> reconstructed_rd, reconstructed_wr;
+        std::vector<AgentMemVal> mems;
+        if (g.has_exec)
+            reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
+                                     ex.regfile(), reconstructed_rd,
+                                     reconstructed_wr, mems);
+        int mem_count = mems.empty() ? g.n_mem : int(mems.size());
+        for (int k = 0; k < mem_count; k++) {
+            bool known = mems.empty() ? g.mem[k].value_known
+                                      : mems[size_t(k)].known;
+            unsigned __int128 mem_val = mems.empty() ? g.mem[k].value
+                                                      : mems[size_t(k)].val;
+            if (!known || mem_val != val) continue;
+            bool is_write = mems.empty() ? g.mem[k].is_write
+                                         : mems[size_t(k)].is_w;
+            uint64_t addr = mems.empty() ? g.mem[k].addr
+                                         : mems[size_t(k)].addr;
+            uint8_t size = mems.empty() ? g.mem[k].size
+                                        : mems[size_t(k)].size;
+            row(gi, is_write ? "mem_w" : "mem_r", "mem",
+                is_write ? 'w' : 'r', "", addr, size, g);
+        }
         return true;
     });
     emit::Meta meta;
@@ -1903,11 +1945,16 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
     meta.shown = shown;
     meta.truncated = offset + shown < total;
     if (meta.truncated) {
-        char b[320];
-        snprintf(b, sizeof b, "gt find-value 0x%llx --offset %llu %s%s",
-                 (unsigned long long)val, (unsigned long long)(offset + shown),
-                 gtb.c_str(), json ? " --json" : "");
-        meta.next = b;
+        std::string next = "gt find-value " + emit::hex64(val);
+        if (reads_only) next += " --read";
+        if (writes_only) next += " --write";
+        if (from_ev) next += " --from " + std::to_string(from_ev);
+        if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
+        if (limit > 0) next += " --limit " + std::to_string(limit);
+        next += " --offset " + std::to_string(offset + shown);
+        next += ' ' + gtb;
+        if (json) next += " --json";
+        meta.next = std::move(next);
     }
     emit::finish(meta, json);
     return 0;

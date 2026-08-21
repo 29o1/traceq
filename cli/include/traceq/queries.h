@@ -8,6 +8,7 @@
 //
 // Every query sequentially scans the loaded .gtb event buffer (one Expander
 // pass); there is no index/ingest step.
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -28,7 +29,7 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                    bool use_range, uint64_t range_base, uint64_t range_len,
                    int limit, uint64_t offset, uint64_t from_ev,
                    uint64_t to_ev, int last, bool json = false,
-                   bool writes_only = false);
+                   bool writes_only = false, bool reads_only = false);
 int q_mem_state(const std::string& gtb, uint64_t range_base,
                 uint64_t range_len, uint64_t at_ev, bool json = false);
 int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
@@ -39,6 +40,8 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
 int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
                 bool json = false);
 int q_find_value(const std::string& gtb, uint64_t val, int limit,
-                 uint64_t offset = 0, bool json = false);
+                 uint64_t offset = 0, bool json = false,
+                 uint64_t from_ev = 0, uint64_t to_ev = UINT64_MAX,
+                 bool reads_only = false, bool writes_only = false);
 int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json = false);
