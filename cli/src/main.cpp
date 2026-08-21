@@ -1,8 +1,6 @@
 #include <traceq/common.h>
 #include <traceq/ingest.h>
 #include <traceq/queries.h>
-#include <traceq/recorder.h>
-#include <traceq/site.h>
 #include "emit.h"
 #include <cstdio>
 #include <cstring>
@@ -352,7 +350,7 @@ static void usage() {
         "gt — traceq: agent-facing trace CLI\n"
         "usage:\n"
         "  gt import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
-        "  gt export    [--format auto|compact|jsonl|upstream]\n"
+        "  gt export    [--format compact|jsonl|upstream]\n"
         "               [--from E --to E --limit N] trace.gtb [-o FILE]\n"
         "  gt taint     (--seed-addr A|--seed-reg R|--seed-q Q) [--back]\n"
         "               [--at-ev N] [--off O [--mod M]] [--window N] trace.gtb\n"
@@ -370,11 +368,11 @@ static void usage() {
         "\n"
         "most commands take --json (JSON Lines, one object per line + a final\n"
         "{\"meta\":{...}} cursor line; u64 values as hex strings).\n"
-        "all queries stream the .gtb directly — there is no ingest step.\n"
+        "all queries scan the loaded .gtb event buffer — there is no index step.\n"
         "\n"
-        "recording: this build has no event source. Tracing a live process needs\n"
-        "a Stalker-backed source; existing GumTrace text logs convert with\n"
-        "`gt import`. Benchmarks run on real trace files (see bench/).\n");
+        "capture live traces with GumTrace, then convert them with `gt import`.\n"
+        "traceq does not capture processes or expose a record command.\n"
+        "benchmarks run on real trace files (see bench/).\n");
 }
 
 int main(int argc, char** argv) {
@@ -402,13 +400,13 @@ int main(int argc, char** argv) {
 }
 
 int cmd_export(int argc, char** argv) {
-    std::string in, out = "-", fmt = "auto";
+    std::string in, out = "-", fmt = "compact";
     uint64_t from = 0, to = UINT64_MAX, limit = 0;
     bool json = false, have_to = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt export [--format auto|compact|jsonl|upstream] "
+            printf("usage: gt export [--format compact|jsonl|upstream] "
                    "[--from E] [--to E] [--limit N] trace.gtb [-o FILE] [--json]\n");
             return 0;
         }
@@ -422,22 +420,18 @@ int cmd_export(int argc, char** argv) {
         else return unknown_option("export", argv[i]);
     }
     if (in.empty() || from > to) {
-        fprintf(stderr, "usage: gt export [--format auto|compact|jsonl|upstream] "
+        fprintf(stderr, "usage: gt export [--format compact|jsonl|upstream] "
                         "[--from E] [--to E] [--limit N] trace.gtb [-o FILE] [--json]\n");
         return 2;
     }
-    if (fmt != "auto" && fmt != "compact" && fmt != "jsonl" && fmt != "upstream") {
-        fprintf(stderr, "export: unknown --format %s (auto|compact|jsonl|upstream)\n",
+    if (fmt != "compact" && fmt != "jsonl" && fmt != "upstream") {
+        fprintf(stderr, "export: unknown --format %s (compact|jsonl|upstream)\n",
                 fmt.c_str());
         return 2;
     }
     gt::GtbFile f;
     if (!f.load(in)) { fprintf(stderr, "load failed\n"); return 1; }
-    // auto resolves by the footer dialect byte: imported logs replay their
-    // original upstream text, native recordings render compact
-    if (fmt == "auto") fmt = (f.dialect & 1) ? "upstream" : "compact";
-    if (json && fmt == "upstream")
-        fmt = "jsonl"; // --json selects the JSON Lines format
+    if (json) fmt = "jsonl"; // --json always selects the JSON Lines format
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     gt::Expander ex(f);
@@ -445,7 +439,6 @@ int cmd_export(int argc, char** argv) {
     if (fmt == "upstream") n = ex.expand_upstream(o, from, to, limit, &stop_gi);
     else if (fmt == "compact") n = ex.expand_compact(o, from, to, limit, &stop_gi);
     else n = ex.expand_jsonl(o, from, to, limit, &stop_gi);
-    if (out != "-") fclose(o);
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {
@@ -458,7 +451,7 @@ int cmd_export(int argc, char** argv) {
         if (have_to) next_cmd += " --to " + std::to_string(to);
         next_cmd += " --format " + fmt;
         next_cmd += " " + in;
-        if (fmt == "compact") fprintf(stdout, "next: %s\n", next_cmd.c_str());
+        if (fmt == "compact") fprintf(o, "next: %s\n", next_cmd.c_str());
         else if (fmt == "upstream")
             fprintf(stderr, "next: %s\n", next_cmd.c_str());
     }
@@ -474,13 +467,14 @@ int cmd_export(int argc, char** argv) {
                 return true;
             });
         } else {
-            total = from + n; // jsonl emits exactly one line per event
+            total = n; // jsonl emits exactly one line per selected event
         }
         meta.total = total;
         meta.shown = truncated ? stop_gi - from : n;
         meta.next = next_cmd;
-        gt::emit::finish(meta, true, stdout);
+        gt::emit::finish(meta, true, o);
     }
+    if (out != "-") fclose(o);
     fprintf(stderr, "%llu lines\n", (unsigned long long)n);
     return 0;
 }

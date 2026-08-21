@@ -5,7 +5,7 @@
 // bounded output ends in a machine-parseable trailer: JSON mode gets a
 // {"meta":{...}} line as the last line, text mode keeps the
 // "... [N more rows truncated]" marker plus "next:" (copy-executable
-// continuation) and "# suggest:" lines.
+// continuation).
 //
 // Value convention for JSON Lines: integer values (including u128 SIMD memory
 // values) ride in hex strings ("val":"0x1ff") so they survive precision loss;
@@ -21,12 +21,6 @@
 
 namespace gt {
 namespace emit {
-
-// --json mode flag, set by the command dispatcher after argv parsing. The
-// default finish() overload reads it; query entry points take an explicit
-// bool instead so in-process tests (bench selftest) can pick the mode per
-// call.
-inline bool json_mode = false;
 
 // JSON string escaping (RFC 8259): quotes, backslash, control characters.
 inline void esc_append(std::string& out, const char* s) {
@@ -103,17 +97,6 @@ inline void kv_str(std::string& out, const char* key, const std::string& v) {
     esc_append(out, v.c_str());
 }
 
-// ["0x1","0x2"] / [] — array of hex-string values.
-inline std::string hex_array(const std::vector<uint64_t>& vs) {
-    std::string s = "[";
-    for (size_t i = 0; i < vs.size(); i++) {
-        if (i) s += ',';
-        s += hex64(vs[i]);
-    }
-    s += ']';
-    return s;
-}
-
 // ["a","b"] / [] — array of escaped strings.
 inline std::string str_array(const std::vector<std::string>& vs) {
     std::string s = "[";
@@ -130,13 +113,13 @@ struct Meta {
     uint64_t total = 0;              // rows existing in the answer
     uint64_t shown = 0;              // rows actually emitted
     std::string next;                // full continuation command ("" = none)
-    std::vector<std::string> suggest; // filled-in next-step commands
 };
 
 // Trailing footer. JSON mode: the {"meta":{...}} line. Text mode: the
 // print_truncated marker ("... [N more rows truncated]") when rows were cut,
-// plus "next: <cmd>" and "# suggest: <cmd>" lines when present.
-inline void finish(const Meta& m, bool json, FILE* out) {    if (json) {
+// plus "next: <cmd>" when present.
+inline void finish(const Meta& m, bool json, FILE* out) {
+    if (json) {
         std::string s = "{\"meta\":{\"truncated\":";
         s += m.truncated ? "true" : "false";
         char b[96];
@@ -145,12 +128,7 @@ inline void finish(const Meta& m, bool json, FILE* out) {    if (json) {
         s += b;
         if (m.next.empty()) s += "null";
         else esc_append(s, m.next.c_str());
-        s += ",\"suggest\":[";
-        for (size_t i = 0; i < m.suggest.size(); i++) {
-            if (i) s += ',';
-            esc_append(s, m.suggest[i].c_str());
-        }
-        s += "]}}\n";
+        s += "}}\n";
         fwrite(s.data(), 1, s.size(), out);
         return;
     }
@@ -158,11 +136,9 @@ inline void finish(const Meta& m, bool json, FILE* out) {    if (json) {
         fprintf(out, "... [%llu more rows truncated]\n",
                 (unsigned long long)(m.total - m.shown));
     if (!m.next.empty()) fprintf(out, "next: %s\n", m.next.c_str());
-    for (const auto& s : m.suggest) fprintf(out, "# suggest: %s\n", s.c_str());
 }
 
 inline void finish(const Meta& m, bool json) { finish(m, json, stdout); }
-inline void finish(const Meta& m, FILE* out) { finish(m, json_mode, out); }
 
 } // namespace emit
 } // namespace gt

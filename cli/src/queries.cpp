@@ -439,7 +439,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 return true;
             }
             const TaintSite& ts = taint_site(g.site_id);
-            uint64_t mr, mw;
+            uint64_t mr = 0, mw = 0;
             bool has_mr, has_mw;
             group_mem(g, mr, has_mr, mw, has_mw);
             uint64_t mr2 = mr + ts.elem, mw2 = mw + ts.elem;
@@ -801,11 +801,12 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     };
     // edges are capped by --limit; the walk itself is one pass
     bool edges_trunc = edges_total > edges.size();
+    std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
+    std::sort(addrs.begin(), addrs.end());
 
     if (json) {
-        if (partial) printf("{\"partial\":true}\n");
         std::string o;
-        emit::kv_str(o, "seed_desc", seed_desc()); // human-readable seed summary
+        emit::kv_bool(o, "partial", partial);
         o += ",\"seed\":{";
         if (seed_addr) { emit::kv_hex(o, "addr", seed_addr); o += ','; }
         if (seed_reg >= 0) { emit::kv_u64(o, "reg", uint64_t(seed_reg)); o += ','; }
@@ -865,14 +866,12 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             o += "\"nzcv\"";
         }
         o += "],\"addrs\":[";
-        std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
-        std::sort(addrs.begin(), addrs.end());
         for (size_t i = 0; i < addrs.size(); i++) {
             if (i) o += ',';
             o += '"' + emit::hex64(addrs[i]) + '"';
         }
         o += ']';
-        printf("{\"taint\":{%s}}\n", o.c_str());
+        printf("{%s}\n", o.c_str());
     } else {
         if (partial)
             printf("PARTIAL: window limited — walked %llu of %llu events; widen with "
@@ -898,7 +897,14 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 printf(" %s", taint_reg_name(slot, rb));
             }
         if (nzcv_t) printf(" nzcv");
-        printf("\nfinal tainted addrs: %zu\n", addr_t.size());
+        printf("\nfinal tainted addrs (%zu):", addrs.size());
+        size_t frontier_limit = limit > 0 ? size_t(limit) : 20;
+        size_t frontier_shown = std::min(addrs.size(), frontier_limit);
+        for (size_t i = 0; i < frontier_shown; i++)
+            printf(" 0x%llx", (unsigned long long)addrs[i]);
+        if (frontier_shown < addrs.size())
+            printf(" ... [%zu more]", addrs.size() - frontier_shown);
+        putchar('\n');
     }
 
     emit::Meta meta;
@@ -907,22 +913,6 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     meta.truncated = edges_trunc;
     if (edges_trunc)
         meta.next = taint_cmd(limit > 0 ? limit * 5 : 100); // raise --limit; rerun from seed
-    // suggestions: first tainted addrs -> mem queries; seed ev -> export window
-    std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
-    std::sort(addrs.begin(), addrs.end());
-    for (size_t i = 0; i < addrs.size() && i < 3; i++) {
-        char b[256];
-        snprintf(b, sizeof b, "gt mem-access --addr 0x%llx --limit 10 %s",
-                 (unsigned long long)addrs[i], gtb.c_str());
-        meta.suggest.push_back(b);
-    }
-    {
-        uint64_t lo = seed_ev > 5 ? seed_ev - 5 : 0;
-        char b[256];
-        snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)lo, (unsigned long long)(seed_ev + 5), gtb.c_str());
-        meta.suggest.push_back(b);
-    }
     emit::finish(meta, json);
     if (edges_trunc && !json)
         printf("note: taint is not resumable — the next command reruns from the seed with a raised --limit\n");
@@ -1046,16 +1036,6 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         }
     }
     emit::Meta meta;
-    if (!identical) {
-        uint64_t lo = div > 5 ? div - 5 : 0;
-        char b1[256], b2[256];
-        snprintf(b1, sizeof b1, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)lo, (unsigned long long)(div + 5), a_p.c_str());
-        snprintf(b2, sizeof b2, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)lo, (unsigned long long)(div + 5), b_p.c_str());
-        meta.suggest.push_back(b1);
-        meta.suggest.push_back(b2);
-    }
     emit::finish(meta, json);
     return 0;
 }
@@ -1145,20 +1125,12 @@ int q_fold(const std::string& gtb, int top, bool json) {
     meta.total = loops.size();
     meta.shown = shown;
     meta.truncated = loops.size() > shown;
-    if (!loops.empty()) {
-        const Loop& L = loops[0];
-        char b[256];
-        snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)L.start,
-                 (unsigned long long)(L.start + 2 * L.period), gtb.c_str());
-        meta.suggest.push_back(b);
-    }
     emit::finish(meta, json);
     return 0;
 }
 
 // ---------------------------------------------------------------------------
-// W3b: streaming gtb queries. One Expander pass each, the dual-mode
+// Agent-facing gtb queries. One pass over the loaded event buffer, with the
 // (text / JSON Lines) + meta-footer contract.
 // ---------------------------------------------------------------------------
 
@@ -1281,10 +1253,6 @@ int q_stat(const std::string& gtb, bool json) {
     }
     emit::Meta meta;
     meta.total = meta.shown = 1;
-    meta.suggest.push_back("gt export --format compact --limit 200 " + gtb);
-    meta.suggest.push_back("gt find-value 0xVALUE " + gtb);
-    meta.suggest.push_back("gt mem-access --addr 0xADDR " + gtb);
-    meta.suggest.push_back("gt taint --seed-reg 0 --at-ev 0 " + gtb);
     emit::finish(meta, json);
     return 0;
 }
@@ -1304,21 +1272,16 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
         uint64_t ev, line, addr;
         unsigned __int128 value;
         uint32_t site_id;
-        bool is_write, value_known, has_exec;
+        uint8_t size;
+        bool is_write, value_known, has_exec, has_prior_write;
+        uint64_t prior_write_ev;
     };
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
+    std::unordered_map<uint64_t, uint64_t> last_write;
     std::deque<Row> tail;
-    uint64_t total = 0, shown = 0;
+    uint64_t total = 0, shown = 0, read_total = 0, write_total = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
-    bool have_suggest = false, suggest_is_read = false;
-    uint64_t suggest_ev = 0, suggest_addr = 0;
     auto emit_row = [&](const Row& r) {
-        if (!have_suggest || (!r.is_write && !suggest_is_read)) {
-            have_suggest = true;
-            suggest_is_read = !r.is_write;
-            suggest_ev = r.ev;
-            suggest_addr = r.addr;
-        }
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", r.ev);
@@ -1330,6 +1293,19 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
             emit::kv_str(o, "rw", r.is_write ? "w" : "r");
             o += ',';
             emit::kv_hex(o, "addr", r.addr);
+            if (use_range) {
+                o += ',';
+                emit::kv_hex(o, "off", r.addr - range_base);
+            }
+            o += ',';
+            emit::kv_u64(o, "size", r.size);
+            if (!r.is_write) {
+                o += ",\"prior_write_ev\":";
+                if (r.has_prior_write)
+                    o += std::to_string(r.prior_write_ev);
+                else
+                    o += "null";
+            }
             if (r.value_known) {
                 o += ',';
                 emit::kv_hex128(o, "val", r.value);
@@ -1347,12 +1323,21 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                 std::string value = emit::hex128(r.value);
                 printf(" =%s", value.c_str());
             }
+            if (use_range)
+                printf(" off=0x%llx", (unsigned long long)(r.addr - range_base));
+            printf(" size=%u", unsigned(r.size));
+            if (!r.is_write) {
+                if (r.has_prior_write)
+                    printf(" prior_write_ev=%llu",
+                           (unsigned long long)r.prior_write_ev);
+                else
+                    printf(" prior_write_ev=none");
+            }
             printf(" %s\n", gtb_at(f, r.has_exec ? r.site_id : 0xFFFFFFFFu).c_str());
         }
     };
     Expander ex(f);
     ex.for_each([&](uint64_t gi, const Group& g) {
-        if (gi < from_ev) return true;
         if (gi > to_ev) return false;
         if (g.n_mem == 0) return true;
         std::vector<AgentRegVal> rd, wr;
@@ -1368,13 +1353,28 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                                             : mems[size_t(k)].known;
             unsigned __int128 value = mems.empty() ? g.mem[k].value
                                                     : mems[size_t(k)].val;
-            if (writes_only && !is_write) continue;
+            uint8_t mem_size = mems.empty() ? g.mem[k].size
+                                            : mems[size_t(k)].size;
             bool hit = use_range ? (mem_addr >= range_base &&
                                     mem_addr - range_base < range_len)
                                  : addr_set.count(mem_addr) != 0;
             if (!hit) continue;
-            Row row{gi, g.source_line, mem_addr, value, g.site_id,
-                    is_write, value_known, g.has_exec};
+            if (gi < from_ev) {
+                if (is_write) last_write[mem_addr] = gi;
+                continue;
+            }
+            if (writes_only && !is_write) continue;
+            auto prior = last_write.find(mem_addr);
+            Row row{gi, g.source_line, mem_addr, value, g.site_id, mem_size,
+                    is_write, value_known, g.has_exec,
+                    prior != last_write.end(),
+                    prior != last_write.end() ? prior->second : 0};
+            if (is_write) {
+                write_total++;
+                last_write[mem_addr] = gi;
+            } else {
+                read_total++;
+            }
             uint64_t row_index = total++;
             if (last > 0) {
                 if (tail.size() == size_t(last)) tail.pop_front();
@@ -1391,6 +1391,18 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
             emit_row(row);
             shown++;
         }
+    }
+    if (json) {
+        std::string o = "{\"mem_access_summary\":{";
+        emit::kv_u64(o, "reads", read_total);
+        o += ',';
+        emit::kv_u64(o, "writes", write_total);
+        o += "}}";
+        printf("%s\n", o.c_str());
+    } else {
+        printf("summary: reads=%llu writes=%llu\n",
+               (unsigned long long)read_total,
+               (unsigned long long)write_total);
     }
     emit::Meta meta;
     meta.total = total;
@@ -1413,31 +1425,8 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    if (have_suggest) {
-        char b[384];
-        snprintf(b, sizeof b,
-                 "gt taint --seed-addr 0x%llx --back --at-ev %llu --window 50000 --limit 20 %s",
-                 (unsigned long long)suggest_addr,
-                 (unsigned long long)suggest_ev, gtb.c_str());
-        meta.suggest.push_back(b);
-        uint64_t from = suggest_ev > 5 ? suggest_ev - 5 : 0;
-        snprintf(b, sizeof b,
-                 "gt export --format compact --from %llu --to %llu %s",
-                 (unsigned long long)from,
-                 (unsigned long long)(suggest_ev + 5), gtb.c_str());
-        meta.suggest.push_back(b);
-    }
     emit::finish(meta, json);
     return 0;
-}
-
-int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
-                 uint64_t range_base, uint64_t range_len, int limit,
-                 uint64_t offset, bool json, bool writes_only) {
-    std::vector<uint64_t> addrs;
-    if (!use_range) addrs.push_back(addr);
-    return q_mem_accesses(gtb, addrs, use_range, range_base, range_len, limit,
-                          offset, 0, UINT64_MAX, 0, json, writes_only);
 }
 
 int q_mem_state(const std::string& gtb, uint64_t range_base,
@@ -1549,11 +1538,6 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
         }
     }
     emit::Meta meta;
-    char b[320];
-    snprintf(b, sizeof b, "gt mem-access --range 0x%llx,0x%llx --limit 20 %s",
-             (unsigned long long)range_base, (unsigned long long)range_len,
-             gtb.c_str());
-    meta.suggest.push_back(b);
     emit::finish(meta, json);
     return 0;
 }
@@ -1566,8 +1550,7 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
-    uint64_t total = 0, shown = 0, first_ev = 0;
-    bool have_first = false;
+    uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     Expander ex(f);
     ex.for_each([&](uint64_t gi, const Group& g) {
@@ -1587,7 +1570,6 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
         if (!hit) return true;
         if (total++ < offset || shown >= lim) return true;
         shown++;
-        if (!have_first) { have_first = true; first_ev = gi; }
 
         std::vector<AgentRegVal> rd, wr;
         std::vector<AgentMemVal> mems;
@@ -1682,26 +1664,8 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    if (have_first) {
-        char b[384];
-        uint64_t from = first_ev > 5 ? first_ev - 5 : 0;
-        snprintf(b, sizeof b,
-                 "gt export --format compact --from %llu --to %llu %s",
-                 (unsigned long long)from,
-                 (unsigned long long)(first_ev + 5), gtb.c_str());
-        meta.suggest.push_back(b);
-    }
     emit::finish(meta, json);
     return 0;
-}
-
-int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
-              bool use_off, uint64_t off, const std::string& mod, int limit,
-              uint64_t offset, bool json) {
-    std::vector<uint64_t> addrs, offs;
-    if (use_addr) addrs.push_back(addr);
-    if (use_off) offs.push_back(off);
-    return q_find_pcs(gtb, addrs, offs, mod, limit, offset, 0, UINT64_MAX, json);
 }
 
 // function call sites directly on a gtb: streams the CALL events whose symbol
@@ -1826,14 +1790,6 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
                  (unsigned long long)lim, gtb.c_str(), json ? " --json" : "");
         meta.next = b;
     }
-    if (!rows.empty()) {
-        uint64_t ev0 = rows[0].ev;
-        char b[320];
-        uint64_t lo = ev0 > 5 ? ev0 - 5 : 0;
-        snprintf(b, sizeof b, "gt export --from %llu --to %llu --format compact %s",
-                 (unsigned long long)lo, (unsigned long long)(ev0 + 5), gtb.c_str());
-        meta.suggest.push_back(b);
-    }
     emit::finish(meta, json);
     return 0;
 }
@@ -1953,7 +1909,6 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
                  gtb.c_str(), json ? " --json" : "");
         meta.next = b;
     }
-    meta.suggest.push_back("gt export --format compact --from EV --to EV+100 " + gtb);
     emit::finish(meta, json);
     return 0;
 }

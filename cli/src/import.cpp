@@ -156,7 +156,7 @@ struct Importer {
         if (abs < off) return false;
         if (p >= e || *p != ' ') return false;
         p++;
-        // disasm ends at "; " (capstone output contains no ';')
+        // The upstream instruction prefix ends at the first "; ".
         const char* semi = nullptr;
         for (const char* q = p; q + 1 < e; q++)
             if (q[0] == ';' && q[1] == ' ') { semi = q; break; }
@@ -391,7 +391,7 @@ struct Importer {
         res.stopped = stopped;
         struct stat sb;
         res.gtb_bytes = stat(out_path.c_str(), &sb) == 0 ? uint64_t(sb.st_size) : 0;
-        return true;
+        return rec.ok();
     }
 };
 
@@ -473,10 +473,8 @@ bool parse_hexdump_row(const char* p, size_t n, uint64_t& addr,
 
 bool import_mem(const char* p, size_t len, const std::string& out_path,
                 const RecOptions& opts_in, ImportResult& res) {
-    RecOptions opts = opts_in;
-    opts.defer_meta = true; // the arena grows while events stream in
     Importer imp(p, len);
-    return imp.run(out_path, opts, res);
+    return imp.run(out_path, opts_in, res);
 }
 
 bool import_log(const std::string& in_path, const std::string& out_path,

@@ -1,6 +1,5 @@
 #pragma once
 // .gtb parsing and the Expander (upstream/compact/jsonl expansion).
-#include "event.h"
 #include "recorder.h"
 #include "site.h"
 #include <cstdint>
@@ -9,6 +8,14 @@
 #include <vector>
 
 namespace gt {
+
+struct MemOp {
+    bool is_write;
+    uint64_t addr;
+    uint8_t size;
+    uint64_t value;
+    bool value_known = true;
+};
 
 struct GtbFile {
     SiteArena arena;

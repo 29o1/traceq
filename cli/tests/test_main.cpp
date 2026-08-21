@@ -1,11 +1,8 @@
 // gt-test — libtraceq correctness suite.
 //
-// Fixture philosophy: no behavioral simulator. Tests are driven by
-//   - upstream-dialect text logs (hand-written, byte-exact canonical), which
-//     exercise the import -> gtb -> query/export path that real GumTrace logs
-//     take, and
-//   - ExecEvent literals, which exercise the native recorder path a future
-//     Stalker callout provider would drive (no production provider today).
+// Fixture philosophy: no behavioral simulator. Tests use upstream-dialect
+// text logs (hand-written, byte-exact canonical) and exercise the same
+// import -> gtb -> query/export path that real GumTrace logs take.
 //
 // Coverage map (what each group pins down):
 //   t_roundtrip  import/export byte-exactness: LF/CRLF, VERBATIM passthrough,
@@ -17,9 +14,6 @@
 //   t_taint      NZCV as source (subs -> csel), q/SIMD propagation, kill on
 //                overwrite (movz), pure-dataflow (base reg does not taint),
 //                backward walk (demand -> sources), matched counts
-//   t_native     GtbRecorder via ExecEvent literals: group reconstruction,
-//                call/svc/ret, guards (max_events/max_bytes), crash flush,
-//                ring+trigger, detail levels
 //   t_queries    query surface + agent contract on an imported file:
 //                stat/find-pc/find-value/mem-access/func-args/calltree, export windows
 //                and cursor, JSON Lines shape
@@ -29,15 +23,15 @@
 #include <traceq/import.h>
 #include <traceq/ingest.h>
 #include <traceq/queries.h>
-#include <traceq/recorder.h>
-#include <traceq/site.h>
+#include <traceq/varint.h>
 
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <sys/resource.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 using namespace gt;
@@ -131,6 +125,12 @@ static const char* kLogCall8[] = {
     "ret: 0x99",
 };
 
+static const char* kLogMemHistory[] = {
+    "[m.so] 0xe000!0x0 strb w7, [x10]; x7=0xaa x10=0x4000 mem_w=0x4000 ",
+    "[m.so] 0xe004!0x4 ldrb w8, [x10]; x10=0x4000 mem_r=0x4000 -> x8=0xaa ",
+    "[m.so] 0xe008!0x8 ldrb w9, [x11]; x11=0x5000 mem_r=0x5000 -> x9=0xbb ",
+};
+
 static std::string join_log(const char* const* lines, int n, const char* nl) {
     std::string s;
     for (int i = 0; i < n; i++) {
@@ -212,6 +212,8 @@ static bool import_str(const std::string& log, const std::string& out,
 // ---------------------------------------------------------------------------
 static void t_roundtrip() {
     printf("t_roundtrip (import/export byte-exactness)\n");
+    CHECK(zigzag_enc(-5) == 9 && zigzag_dec(9) == -5,
+          "zigzag handles negative deltas without signed left shift");
     std::string lf = join_log(kLogRT, sizeof(kLogRT) / sizeof(kLogRT[0]), "\n");
     std::string crlf =
         join_log(kLogRT, sizeof(kLogRT) / sizeof(kLogRT[0]), "\r\n");
@@ -247,6 +249,52 @@ static void t_roundtrip() {
     CHECK(import_str(lf, tmp_path("rt2.gtb"), r3), "re-import");
     CHECK(read_file(tmp_path("rt.gtb")) == read_file(tmp_path("rt2.gtb")),
           "import is deterministic (identical gtb bytes)");
+
+    // The only remaining recorder guards apply to text import. A capped file
+    // remains valid and replays exactly the accepted prefix.
+    RecOptions capped_opts;
+    capped_opts.max_events = 3;
+    ImportResult capped;
+    CHECK(import_mem(lf.data(), lf.size(), tmp_path("capped.gtb"),
+                     capped_opts, capped),
+          "capped import succeeds");
+    CHECK(capped.stopped && capped.stats.reason == STOP_MAX_EVENTS,
+          "max_events stops text import");
+    GtbFile capped_file;
+    CHECK(capped_file.load(tmp_path("capped.gtb")) &&
+              capped_file.stop_reason == STOP_MAX_EVENTS,
+          "capped import is readable and preserves stop reason");
+    std::string capped_out = tmp_path("capped.out");
+    FILE* capped_fp = fopen(capped_out.c_str(), "wb");
+    Expander(capped_file).expand_upstream(capped_fp);
+    fclose(capped_fp);
+    CHECK(read_file(capped_out) == join_log(kLogRT, 3, "\n"),
+          "capped import replays the accepted prefix");
+
+    RecOptions byte_opts;
+    byte_opts.max_bytes = 1;
+    ImportResult byte_capped;
+    CHECK(import_mem(lf.data(), lf.size(), tmp_path("byte-capped.gtb"),
+                     byte_opts, byte_capped) && byte_capped.stopped &&
+              byte_capped.stats.reason == STOP_MAX_BYTES,
+          "max_bytes accounts for the current import chunk");
+
+    struct rlimit old_limit;
+    CHECK(getrlimit(RLIMIT_FSIZE, &old_limit) == 0,
+          "read output file-size limit");
+    if (old_limit.rlim_max >= 512) {
+        struct rlimit small_limit = old_limit;
+        small_limit.rlim_cur = 512;
+        auto old_handler = signal(SIGXFSZ, SIG_IGN);
+        CHECK(setrlimit(RLIMIT_FSIZE, &small_limit) == 0,
+              "set output file-size limit");
+        std::string large = lf + lf + lf + lf;
+        ImportResult io_failed;
+        CHECK(!import_str(large, tmp_path("write-failed.gtb"), io_failed),
+              "import reports a write failure");
+        setrlimit(RLIMIT_FSIZE, &old_limit);
+        signal(SIGXFSZ, old_handler);
+    }
 
     // the non-canonical line survived only as verbatim (not parsed as exec)
     CHECK(r1.cnt.exec == 7, "leading-zero hex line excluded from exec count");
@@ -290,6 +338,19 @@ static void t_gumtrace() {
     CHECK(ct.find("GetMethodID(x0=0x1234, x1=0x5678, x2=0x9abc, x3=0xdef0)") !=
               std::string::npos,
           "calltree exposes JNI call");
+
+    std::string json_out = tmp_path("gumtrace.jsonl");
+    o = fopen(json_out.c_str(), "wb");
+    uint64_t json_lines = Expander(f).expand_jsonl(o);
+    fclose(o);
+    std::string json_text = read_file(json_out);
+    CHECK(json_lines == 5 &&
+              json_text.find("\n}\n") == std::string::npos &&
+              json_text.find("\n,{\"") == std::string::npos &&
+              json_text.find("\"verbatim\":true") != std::string::npos &&
+              json_text.find("{\"ev\":4,\"ret\":\"0x42\"}") !=
+                  std::string::npos,
+          "jsonl marks verbatim groups and structures a standalone return");
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +419,9 @@ static void t_taint() {
         q_taint(tmp_path("taint.gtb"), 0, 8, -1, false, false, 20, 0, 0, 0,
                 "", true);
     });
+    CHECK(fwd.rfind("{\"partial\":false,", 0) == 0 &&
+              fwd.find("\"taint\":") == std::string::npos,
+          "taint JSON exposes result fields at the top level");
     CHECK(fwd.find("\"matched\":4") != std::string::npos,
           "forward matched = seed + subs + csel + tainted-base ldr (4)");
     CHECK(fwd.find("\"x10\"") != std::string::npos &&
@@ -383,6 +447,13 @@ static void t_taint() {
           "store carries q0 taint into memory cell 0xa000");
     CHECK(mem.find("\"x13\"") != std::string::npos,
           "reload carries cell taint back to x13");
+    std::string mem_text = cap_out([&] {
+        q_taint(tmp_path("taint.gtb"), 0x9000, -1, -1, false, false, 20, 0, 0,
+                0, "", false);
+    });
+    CHECK(mem_text.find("final tainted addrs (") != std::string::npos &&
+              mem_text.find("0xa000") != std::string::npos,
+          "text taint output lists final memory dependencies");
 
     // backward from the reloaded cell: demand walks store -> eor -> load
     std::string bwd = cap_out([&] {
@@ -422,203 +493,6 @@ static void t_taint() {
 }
 
 // ---------------------------------------------------------------------------
-// t_native — the recorder's own path, fed with ExecEvent literals
-// ---------------------------------------------------------------------------
-static void intern_fixture_sites(SiteArena& arena) {
-    static const char pre_a[] = "[t.so] 0x1000!0x0 mov x8, x9; ";
-    static const char pre_b[] = "[t.so] 0x1004!0x4 str x8, [x10]; ";
-    static const char pre_c[] = "[t.so] 0x1008!0x8 bl #0x2000; ";
-    TextOp a[] = {{"x9", 2, OP_REG_R, 0}, {"x8", 2, OP_REG_W, 0}};
-    TextOp b[] = {{"x8", 2, OP_REG_R, 0}, {"x10", 3, OP_REG_R, 0},
-                  {"mem_w", 5, OP_MEM_W, 8}};
-    CHECK(arena.intern_text(0x1000, pre_a, sizeof(pre_a) - 1, "t.so", 0x1000,
-                            a, 2) != 0xFFFFFFFFu,
-          "intern site A");
-    CHECK(arena.intern_text(0x1004, pre_b, sizeof(pre_b) - 1, "t.so", 0x1004,
-                            b, 3) != 0xFFFFFFFFu,
-          "intern site B");
-    CHECK(arena.intern_text(0x1008, pre_c, sizeof(pre_c) - 1, "t.so", 0x1008,
-                            nullptr, 0) != 0xFFFFFFFFu,
-          "intern site C");
-}
-
-static ExecEvent ev_mov(uint64_t v) {
-    ExecEvent e{};
-    e.pc = 0x1000;
-    e.n_wr = 1;
-    e.wr_id[0] = 8;
-    e.wr_val[0] = v;
-    return e;
-}
-
-static void t_native() {
-    printf("t_native (recorder via ExecEvent literals)\n");
-    SiteArena arena;
-    intern_fixture_sites(arena);
-
-    // full-detail record: exec/mem/call/ret/svc reconstruction
-    {
-        GtbRecorder rec(arena);
-        RecOptions ro;
-        ro.initial_sp = 0x7000100000;
-        CHECK(rec.open(tmp_path("native.gtb"), ro), "open native.gtb");
-        rec.record_event(ev_mov(0x55));
-        ExecEvent e{};
-        e.pc = 0x1004;
-        e.n_mem = 1;
-        e.mem[0] = MemOp{true, 0x3000, 8, 0x55, true};
-        rec.record_event(e);
-        e = ExecEvent{};
-        e.pc = 0x1008;
-        e.is_call = true;
-        e.call_name = "sub_fn";
-        e.x[0] = 0x3000;
-        e.x[1] = 0x2000;
-        e.x[2] = 0x10;
-        e.n_wr = 1;
-        e.wr_id[0] = 30;
-        e.wr_val[0] = 0x100c;
-        rec.record_event(e);
-        rec.record_event(ev_mov(0x66));
-        e = ExecEvent{};
-        e.pc = 0x1000;
-        e.is_ret = true;
-        e.ret_val = 0x66;
-        rec.record_event(e);
-        e = ExecEvent{};
-        e.pc = 0x1004;
-        e.is_svc = true;
-        e.svc_num = 63; // read
-        e.x[0] = 0x7;
-        e.x[1] = 0x3000;
-        e.x[2] = 0x10;
-        rec.record_event(e);
-        rec.finish();
-    }
-    GtbFile f;
-    CHECK(f.load(tmp_path("native.gtb")), "native.gtb loads");
-    CHECK(f.n_exec == 6 && f.n_call == 1 && f.n_ret == 1 && f.n_svc == 1,
-          "counts: 6 exec, 1 call, 1 ret, 1 svc");
-    CHECK(f.n_regw == 3 && f.n_mem == 1,
-          "3 regw (x8 twice + implicit x30), 1 mem");
-    CHECK(f.initial_sp == 0x7000100000, "initial_sp round-trips via footer");
-    {
-        std::string out = tmp_path("native.txt");
-        FILE* o = fopen(out.c_str(), "wb");
-        Expander(f).expand_compact(o);
-        fclose(o);
-        std::string s = read_file(out);
-        CHECK(s.find("+call sub_fn(x0=0x3000, x1=0x2000, x2=0x10, x3=0x0)") !=
-                  std::string::npos,
-              "compact export: call args reconstructed");
-        CHECK(s.find("+svc read(x0=0x7") != std::string::npos,
-              "compact export: svc named and args reconstructed");
-        CHECK(s.find("+ret x0=0x66") != std::string::npos,
-              "compact export: ret value reconstructed");
-        CHECK(s.find("-> x8=0x66") != std::string::npos,
-              "compact export: register write reconstructed");
-    }
-    std::string st = cap_out([&] { q_stat(tmp_path("native.gtb"), false); });
-    CHECK(st.find("dialect native") != std::string::npos,
-          "stat labels native recordings (dialect 0)");
-
-    // guard: max_events
-    {
-        GtbRecorder rec(arena);
-        RecOptions ro;
-        ro.max_events = 3;
-        rec.open(tmp_path("guard_ev.gtb"), ro);
-        for (int i = 0; i < 6; i++) rec.record_event(ev_mov(0x55));
-        RecStats st2 = rec.finish();
-        CHECK(st2.reason == STOP_MAX_EVENTS, "max_events stops recording");
-        CHECK(st2.events_seen == 6 && st2.events_recorded == 3,
-              "seen keeps counting, recorded capped at 3");
-    }
-    // guard: max_bytes (checked every 4096 events). bytes_written only
-    // accumulates when a chunk is handed to the writer, so shrink the chunk
-    // to 1 KB — with the default 256 KB chunk, ~10 KB of events never trip
-    // the byte counter (real granularity property of the recorder)
-    {
-        GtbRecorder rec(arena);
-        RecOptions ro;
-        ro.max_bytes = 300;
-        ro.chunk_size = 1024;
-        rec.open(tmp_path("guard_by.gtb"), ro);
-        for (int i = 0; i < 5000; i++) rec.record_event(ev_mov(0x55));
-        RecStats st2 = rec.finish();
-        CHECK(st2.reason == STOP_MAX_BYTES, "max_bytes stops recording");
-        GtbFile g;
-        CHECK(g.load(tmp_path("guard_by.gtb")) &&
-                  g.stop_reason == STOP_MAX_BYTES,
-              "guard stop reason survives in the footer");
-    }
-    // crash flush: child dies mid-recording, parent reads the footer
-    {
-        std::string path = tmp_path("crash.gtb");
-        pid_t pid = fork();
-        if (pid == 0) {
-            SiteArena carena;
-            intern_fixture_sites(carena);
-            GtbRecorder rec(carena);
-            RecOptions ro;
-            if (!rec.open(path, ro)) _exit(2);
-            for (int i = 0; i < 100; i++) rec.record_event(ev_mov(0x55));
-            *(volatile int*)0 = 1; // SIGSEGV mid-recording
-            _exit(3);
-        }
-        int status = 0;
-        waitpid(pid, &status, 0);
-        CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV,
-              "child died of SIGSEGV");
-        GtbFile g;
-        CHECK(g.load(path), "crashed trace parses");
-        CHECK(g.stop_reason == STOP_CRASH, "footer records reason=crash");
-        CHECK(g.n_exec == 100,
-              "all 100 events survived (signal handler flushed the chunk)");
-    }
-    // flight recorder: ring keeps the tail, trigger symbol dumps and stops
-    {
-        GtbRecorder rec(arena);
-        RecOptions ro;
-        ro.ring_keep_chunks = 1;
-        ro.chunk_size = 256;
-        ro.trigger_sym = "stop_fn";
-        rec.open(tmp_path("ring.gtb"), ro);
-        for (int i = 0; i < 300; i++) rec.record_event(ev_mov(0x55));
-        ExecEvent e{};
-        e.pc = 0x1008;
-        e.is_call = true;
-        e.call_name = "stop_fn";
-        rec.record_event(e);
-        RecStats st2 = rec.finish();
-        CHECK(st2.reason == STOP_TRIGGER, "trigger symbol stops recording");
-        GtbFile g;
-        CHECK(g.load(tmp_path("ring.gtb")), "ring dump parses");
-        CHECK(g.n_exec > 0 && g.n_exec < 300,
-              "ring retained only the tail window");
-        CHECK(g.events_seen == 301, "events_seen counts the full stream");
-    }
-    // detail levels: calls-only records calls, not exec events
-    {
-        GtbRecorder rec(arena);
-        RecOptions ro;
-        ro.detail = DETAIL_CALLS;
-        rec.open(tmp_path("calls.gtb"), ro);
-        for (int i = 0; i < 50; i++) rec.record_event(ev_mov(0x55));
-        ExecEvent e{};
-        e.pc = 0x1008;
-        e.is_call = true;
-        e.call_name = "stop_fn";
-        rec.record_event(e);
-        rec.finish();
-        GtbFile g;
-        CHECK(g.load(tmp_path("calls.gtb")), "calls-only trace parses");
-        CHECK(g.n_exec == 0 && g.n_call == 1,
-              "calls-only detail keeps calls, drops exec events");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // t_queries
 // ---------------------------------------------------------------------------
 static void t_queries() {
@@ -633,6 +507,9 @@ static void t_queries() {
     CHECK(sj.find("\"exec\":7") != std::string::npos &&
               sj.find("\"dialect\":\"upstream\"") != std::string::npos,
           "stat --json shape + dialect");
+    CHECK(sj.find("\"next\":null") != std::string::npos &&
+              sj.find("\"suggest\"") == std::string::npos,
+          "meta contains pagination facts without workflow suggestions");
 
     std::string fv = cap_out([&] { q_find_value(gtb, 0xca, 20, 0, false); });
     CHECK(fv.find("wr:x7") != std::string::npos &&
@@ -641,26 +518,25 @@ static void t_queries() {
     CHECK(fv.find("line=2") != std::string::npos &&
               fv.find("line=3") != std::string::npos,
           "find-value reports original source-log lines");
-    CHECK(fv.find("# suggest:") != std::string::npos,
-          "text mode emits the agent footer");
 
     std::string ma = cap_out([&] {
-        q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, true);
+        q_mem_accesses(gtb, {0x3000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, false, true);
     });
     CHECK(ma.find(" w 0x3000 =0xca ") != std::string::npos,
           "mem-access --write reconstructs the stored value");
     CHECK(ma.find("2 line=3") != std::string::npos,
           "mem-access reports the original source-log line");
-    CHECK(ma.find("gt taint --seed-addr 0x3000 --back --at-ev 2") !=
-              std::string::npos,
-          "mem-access suggests a filled-in backward taint");
     std::string maj = cap_out([&] {
-        q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, true, true);
+        q_mem_accesses(gtb, {0x3000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, true);
     });
     CHECK(maj.find("\"val\":\"0xca\"") != std::string::npos,
           "mem-access --json includes the reconstructed value");
-    ma = cap_out(
-        [&] { q_mem_access(gtb, 0x3000, false, 0, 0, 20, 0, false, false); });
+    ma = cap_out([&] {
+        q_mem_accesses(gtb, {0x3000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, false, false);
+    });
     CHECK(ma.find(" r 0x3000 ") == std::string::npos,
           "no read of 0x3000 exists (honest negative)");
 
@@ -688,6 +564,38 @@ static void t_queries() {
               mab.find("\"total\":2,\"shown\":1") != std::string::npos,
           "mem-access --last applies event bounds and returns the final hit");
 
+    ImportResult history_result;
+    std::string history_gtb = tmp_path("mem_history.gtb");
+    CHECK(import_str(join_log(kLogMemHistory, 3, "\n"), history_gtb,
+                     history_result),
+          "import memory-history fixture");
+    std::string history = cap_out([&] {
+        q_mem_accesses(history_gtb, {}, true, 0x3ff0, 0x20, 20, 0, 0,
+                       UINT64_MAX, 0, true, false);
+    });
+    CHECK(history.find("\"off\":\"0x10\"") != std::string::npos &&
+              history.find("\"size\":1") != std::string::npos,
+          "range mem-access reports relative offset and access size");
+    CHECK(history.find("\"reads\":1,\"writes\":1") != std::string::npos &&
+              history.find("\"prior_write_ev\":0") != std::string::npos,
+          "mem-access summarizes reads/writes and links a read to its writer");
+    CHECK(history.find("\"focus_ev\"") == std::string::npos,
+          "mem-access rows carry facts without a selected focus");
+    history = cap_out([&] {
+        q_mem_accesses(history_gtb, {0x4000}, false, 0, 0, 20, 0, 1,
+                       UINT64_MAX, 0, true, false);
+    });
+    CHECK(history.find("\"reads\":1,\"writes\":0") != std::string::npos &&
+              history.find("\"prior_write_ev\":0") != std::string::npos,
+          "prior-write lookup includes writes before --from");
+    history = cap_out([&] {
+        q_mem_accesses(history_gtb, {0x5000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, false, false);
+    });
+    CHECK(history.find("summary: reads=1 writes=0") != std::string::npos &&
+              history.find("prior_write_ev=none") != std::string::npos,
+          "read-only address reports that no producer was observed");
+
     std::string ms = cap_out([&] {
         q_mem_state(gtb, 0x3000, 4, 2, true);
     });
@@ -696,7 +604,7 @@ static void t_queries() {
           "mem-state reconstructs known bytes and marks gaps honestly");
 
     std::string pc = cap_out([&] {
-        q_find_pc(gtb, false, 0, true, 0x8, "libc.so", 20, 0, true);
+        q_find_pcs(gtb, {}, {0x8}, "libc.so", 20, 0, 0, UINT64_MAX, true);
     });
     CHECK(pc.find("\"ev\":2") != std::string::npos &&
               pc.find("\"line\":3") != std::string::npos &&
@@ -704,12 +612,12 @@ static void t_queries() {
               pc.find("\"val\":\"0xca\"") != std::string::npos,
           "find-pc returns executions with register and memory values");
     pc = cap_out([&] {
-        q_find_pc(gtb, true, 0x1008, false, 0, "", 20, 0, false);
+        q_find_pcs(gtb, {0x1008}, {}, "", 20, 0, 0, UINT64_MAX, false);
     });
     CHECK(pc.find("2 line=3 libc.so!0x8 strb") != std::string::npos,
           "find-pc accepts an absolute address");
     pc = cap_out([&] {
-        q_find_pc(gtb, false, 0, true, 0x10, "libc.so", 20, 0, true);
+        q_find_pcs(gtb, {}, {0x10}, "libc.so", 20, 0, 0, UINT64_MAX, true);
     });
     CHECK(pc.find("\"line\":6") != std::string::npos,
           "find-pc line accounts for attached call records");
@@ -725,7 +633,7 @@ static void t_queries() {
     CHECK(import_str(join_log(kLogPair, 2, "\n"), pair_gtb, pair_result),
           "import pair load/store fixture");
     pc = cap_out([&] {
-        q_find_pc(pair_gtb, false, 0, true, 0, "p.so", 20, 0, true);
+        q_find_pcs(pair_gtb, {}, {0}, "p.so", 20, 0, 0, UINT64_MAX, true);
     });
     CHECK(pc.find("\"addr\":\"0x2008\",\"val\":\"0x11\"") !=
               std::string::npos &&
@@ -733,7 +641,7 @@ static void t_queries() {
               std::string::npos,
           "find-pc exposes both ldp memory lanes");
     pc = cap_out([&] {
-        q_find_pc(pair_gtb, false, 0, true, 4, "p.so", 20, 0, true);
+        q_find_pcs(pair_gtb, {}, {4}, "p.so", 20, 0, 0, UINT64_MAX, true);
     });
     CHECK(pc.find("\"addr\":\"0x3000\",\"val\":\"0x11\"") !=
               std::string::npos &&
@@ -741,7 +649,8 @@ static void t_queries() {
               std::string::npos,
           "find-pc exposes both stp memory lanes");
     ma = cap_out([&] {
-        q_mem_access(pair_gtb, 0x200c, false, 0, 0, 20, 0, false, false);
+        q_mem_accesses(pair_gtb, {0x200c}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, false, false);
     });
     CHECK(ma.find(" r 0x200c =0x22 ") != std::string::npos,
           "mem-access can query the synthesized second pair lane");
@@ -751,18 +660,21 @@ static void t_queries() {
     CHECK(import_str(join_log(kLogSimdMem, 3, "\n"), simd_gtb, simd_result),
           "import SIMD memory-value fixture");
     ma = cap_out([&] {
-        q_mem_access(simd_gtb, 0xb000, false, 0, 0, 20, 0, true, true);
+        q_mem_accesses(simd_gtb, {0xb000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, true);
     });
     CHECK(ma.find("\"val\":\"0x1122334455667788\"") != std::string::npos,
           "mem-access reconstructs str d register data, not the address");
     ma = cap_out([&] {
-        q_mem_access(simd_gtb, 0xc000, false, 0, 0, 20, 0, true, true);
+        q_mem_accesses(simd_gtb, {0xc000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, true);
     });
     CHECK(ma.find("\"val\":\"0x112233445566778899aabbccddeeff\"") !=
               std::string::npos,
           "mem-access preserves a full 128-bit str q value");
     ma = cap_out([&] {
-        q_mem_access(simd_gtb, 0xd000, false, 0, 0, 20, 0, true, false);
+        q_mem_accesses(simd_gtb, {0xd000}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, false);
     });
     CHECK(ma.find("\"val\":\"0xffeeddccbbaa99887766554433221100\"") !=
               std::string::npos,
@@ -773,7 +685,7 @@ static void t_queries() {
                   std::string::npos,
           "mem-state materializes all 16 bytes of a q store");
     pc = cap_out([&] {
-        q_find_pc(simd_gtb, false, 0, true, 4, "s.so", 20, 0, true);
+        q_find_pcs(simd_gtb, {}, {4}, "s.so", 20, 0, 0, UINT64_MAX, true);
     });
     CHECK(pc.find("\"val\":\"0x112233445566778899aabbccddeeff\"") !=
               std::string::npos,
@@ -887,7 +799,6 @@ int main() {
     t_gumtrace();
     t_dump();
     t_taint();
-    t_native();
     t_queries();
     t_diff();
 

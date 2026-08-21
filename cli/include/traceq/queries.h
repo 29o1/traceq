@@ -4,10 +4,10 @@
 // context window, so queries must return small structured answers, never raw
 // dumps. W2 contract: every command runs in text or --json mode (JSON Lines,
 // integer values as hex strings) and ends with a meta footer carrying the cursor
-// (truncated/total/shown/next) and suggested next commands.
+// (truncated/total/shown/next).
 //
-// Every query streams the .gtb directly (one Expander pass); there is no
-// index/ingest step.
+// Every query sequentially scans the loaded .gtb event buffer (one Expander
+// pass); there is no index/ingest step.
 #include <string>
 #include <vector>
 
@@ -24,9 +24,6 @@ int q_diff(const std::string& a_gtb, const std::string& b_gtb, int context,
            bool json = false);
 int q_fold(const std::string& gtb, int top, bool json = false);
 int q_stat(const std::string& gtb, bool json = false);
-int q_mem_access(const std::string& gtb, uint64_t addr, bool use_range,
-                 uint64_t range_base, uint64_t range_len, int limit,
-                 uint64_t offset = 0, bool json = false, bool writes_only = false);
 int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                    bool use_range, uint64_t range_base, uint64_t range_len,
                    int limit, uint64_t offset, uint64_t from_ev,
@@ -34,9 +31,6 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                    bool writes_only = false);
 int q_mem_state(const std::string& gtb, uint64_t range_base,
                 uint64_t range_len, uint64_t at_ev, bool json = false);
-int q_find_pc(const std::string& gtb, bool use_addr, uint64_t addr,
-              bool use_off, uint64_t off, const std::string& mod, int limit,
-              uint64_t offset = 0, bool json = false);
 int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
                const std::vector<uint64_t>& offs, const std::string& mod,
                int limit, uint64_t offset, uint64_t from_ev, uint64_t to_ev,

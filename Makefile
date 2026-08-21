@@ -11,7 +11,7 @@ all: cli
 cli:
 	$(MAKE) -C cli
 
-# correctness: the cli test suite (real-log fixtures + ExecEvent literals)
+# correctness: the cli test suite (upstream-log fixtures through import/query)
 test:
 	$(MAKE) -C cli test
 

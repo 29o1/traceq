@@ -1,22 +1,8 @@
 #include <traceq/site.h>
 #include <traceq/varint.h>
-#include <capstone/capstone.h>
-#include <cassert>
 #include <cstring>
-#include <algorithm>
 
 namespace gt {
-
-static csh g_cs = 0;
-
-bool site_compiler_init() {
-    if (g_cs) return true;
-    return cs_open(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN, &g_cs) == CS_ERR_OK &&
-           cs_option(g_cs, CS_OPT_DETAIL, CS_OPT_ON) == CS_ERR_OK;
-}
-void site_compiler_shutdown() {
-    if (g_cs) { cs_close(&g_cs); g_cs = 0; }
-}
 
 size_t legacy_hex64(char* p, uint64_t v) {
     // matches Utils::append_uint64_hex: 0 -> "0", otherwise trimmed hex
@@ -41,189 +27,12 @@ size_t legacy_hex128(char* p, unsigned __int128 v) {
     return legacy_hex64(p, lo);
 }
 
-// ctx_idx: 0..30 for x/w views, -1 unsupported (SIMD/nzcv)
-static int ctx_idx_of(arm64_reg r) {
-    if (r >= ARM64_REG_X0 && r <= ARM64_REG_X28) return r - ARM64_REG_X0;
-    if (r >= ARM64_REG_W0 && r <= ARM64_REG_W30) return r - ARM64_REG_W0;
-    if (r == ARM64_REG_FP) return 29;
-    if (r == ARM64_REG_LR) return 30;
-    if (r == ARM64_REG_SP) return 31;
-    return -1;
-}
-// simd_idx: 0..31 for q/d/s/h/b/v views of the same SIMD/FP register file,
-// -1 for non-SIMD. The value width is irrelevant for dependence tracking.
-static int simd_idx_of(arm64_reg r) {
-    if (r >= ARM64_REG_Q0 && r <= ARM64_REG_Q31) return r - ARM64_REG_Q0;
-    if (r >= ARM64_REG_V0 && r <= ARM64_REG_V31) return r - ARM64_REG_V0;
-    if (r >= ARM64_REG_D0 && r <= ARM64_REG_D31) return r - ARM64_REG_D0;
-    if (r >= ARM64_REG_S0 && r <= ARM64_REG_S31) return r - ARM64_REG_S0;
-    if (r >= ARM64_REG_H0 && r <= ARM64_REG_H31) return r - ARM64_REG_H0;
-    if (r >= ARM64_REG_B0 && r <= ARM64_REG_B31) return r - ARM64_REG_B0;
-    return -1;
-}
-static int name_id_of(arm64_reg r) {
-    if (r >= ARM64_REG_X0 && r <= ARM64_REG_X28) return r - ARM64_REG_X0;
-    if (r >= ARM64_REG_W0 && r <= ARM64_REG_W30) return 32 + (r - ARM64_REG_W0);
-    if (r == ARM64_REG_FP) return 29;  // "x29" matches how values are keyed
-    if (r == ARM64_REG_LR) return 30;
-    if (r == ARM64_REG_SP) return 31;
-    if (r == ARM64_REG_WSP) return 63;
-    return -1;
-}
-
 int32_t SiteArena::intern_string(const std::string& s) {
     auto it = str_ids_.find(s);
     if (it != str_ids_.end()) return int32_t(it->second);
     str_ids_[s] = strings_.size();
     strings_.push_back(s);
     return int32_t(strings_.size() - 1);
-}
-
-uint32_t SiteArena::intern(uint64_t addr, uint32_t word, const char* module_name,
-                           uint64_t module_base, int32_t func_sym) {
-    auto it = by_addr_.find(addr);
-    if (it != by_addr_.end()) return it->second;
-
-    cs_insn* arr = nullptr;
-    size_t n = site_compiler_init()
-                   ? cs_disasm(g_cs, (const uint8_t*)&word, 4, addr, 1, &arr)
-                   : 0;
-    if (n != 1) return 0xFFFFFFFFu; // should not happen with a valid encoder
-    uint32_t id = intern_disasm(addr, arr, module_name, module_base, func_sym);
-    cs_free(arr, 1);
-    return id;
-}
-
-uint32_t SiteArena::intern_disasm(uint64_t addr, const cs_insn* insn,
-                                  const char* module_name, uint64_t module_base,
-                                  int32_t func_sym) {
-    auto it = by_addr_.find(addr);
-    if (it != by_addr_.end()) return it->second;
-
-    auto mid = module_ids_.find(module_name);
-    uint32_t module_id;
-    if (mid == module_ids_.end()) {
-        module_id = modules_.size();
-        modules_.push_back(module_name);
-        module_ids_[module_name] = module_id;
-        module_str_ids_.push_back(uint32_t(intern_string(module_name)));
-        module_bases_.push_back(module_base);
-    } else {
-        module_id = mid->second;
-    }
-
-    Site s;
-    s.addr = addr;
-    s.module_id = module_id;
-    s.func_sym = func_sym;
-
-    const cs_arm64* a = &insn->detail->arm64;
-
-    switch (insn->id) {
-        case ARM64_INS_BL:  s.kind = SK_CALL_IMM; break;
-        case ARM64_INS_BLR: s.kind = SK_CALL_REG; break;
-        case ARM64_INS_BR:  s.kind = SK_BR; break;
-        case ARM64_INS_RET: s.kind = SK_RET; break;
-        case ARM64_INS_SVC: s.kind = SK_SVC; break;
-        case ARM64_INS_B:
-            // capstone 5: conditional branches are ARM64_INS_B with a valid cc
-            s.kind = (a->cc != ARM64_CC_INVALID && a->cc != ARM64_CC_AL)
-                         ? SK_BCOND : SK_B_IMM;
-            break;
-        default:            s.kind = SK_NORMAL; break;
-    }
-    if ((s.kind == SK_CALL_IMM || s.kind == SK_B_IMM) && a->op_count >= 1 &&
-        a->operands[0].type == ARM64_OP_IMM)
-        s.branch_imm = uint64_t(a->operands[0].imm);
-
-    // ---- disasm text ("mnem ops") for query display ----
-    // The text prefix ("[mod] 0xPC!0xOFF ...") only exists for text-built
-    // sites (intern_text), where it replays the source log verbatim.
-    char tmp[160];
-    size_t mn = strlen(insn->mnemonic);
-    size_t on = strlen(insn->op_str);
-    assert(mn + 1 + on < sizeof(tmp));
-    memcpy(tmp, insn->mnemonic, mn);
-    tmp[mn] = ' ';
-    memcpy(tmp + mn + 1, insn->op_str, on);
-    s.prefix_off = 0; s.prefix_len = 0;
-    s.disasm_off = prefix_pool_.size();
-    prefix_pool_.append(tmp, mn + 1 + on);
-    s.disasm_len = uint32_t(mn + 1 + on);
-
-    // ---- operand plan ----
-    // NZCV dependence of the whole instruction, from capstone detail:
-    // cc covers conditional consumers (b.cond/csel/cset/ccmp/fcsel/...),
-    // update_flags covers producers (adds/subs/cmp/fcmp/ccmp/...).
-    uint8_t nzcv_flags = 0;
-    if (a->cc != ARM64_CC_INVALID && a->cc != ARM64_CC_AL) nzcv_flags |= OPF_R_NZCV;
-    if (a->update_flags) nzcv_flags |= OPF_W_NZCV;
-    auto push_reg_op = [&](uint8_t kind, int idx, int sidx, int name) {
-        if (s.n_ops >= 8) return;
-        OpPlan& p = s.ops[s.n_ops];
-        p.kind = kind;
-        p.ctx_idx = int8_t(idx);
-        p.simd_idx = int8_t(sidx);
-        p.name_id = uint8_t(name < 0 ? 0 : name);
-        p.op_flags = nzcv_flags;
-        s.n_ops++;
-    };
-    bool writeback = strstr(insn->op_str, "],") != nullptr ||
-                     strstr(insn->op_str, "]!") != nullptr;
-    // capstone 5 quirk: cmp (subs xzr) marks its source operand as WRITE;
-    // force READ so the plan prints the compared register inline
-    bool is_cmp = insn->id == ARM64_INS_CMP;
-    for (uint8_t i = 0; i < a->op_count && s.n_ops < 8; i++) {
-        const cs_arm64_op& op = a->operands[i];
-        if (op.type == ARM64_OP_REG) {
-            int idx = ctx_idx_of(op.reg);
-            int name = name_id_of(op.reg);
-            if (idx < 0) {
-                // SIMD/FP register: no runtime value (never recorded), but the
-                // plan carries the register identity for dependence tracking
-                int sidx = simd_idx_of(op.reg);
-                if (sidx < 0) continue; // psr etc still unsupported
-                bool r = op.access & CS_AC_READ;
-                bool w = op.access & CS_AC_WRITE;
-                if (r && s.n_ops < 8) push_reg_op(OP_REG_R, -1, sidx, -1);
-                if (w && s.n_ops < 8) push_reg_op(OP_REG_W, -1, sidx, -1);
-                continue;
-            }
-            if (name < 0) continue;
-            bool r = is_cmp || (op.access & CS_AC_READ);
-            bool w = !is_cmp && (op.access & CS_AC_WRITE);
-            if (r && w) {
-                push_reg_op(OP_REG_R, idx, -1, name);
-                if (s.n_ops < 8) push_reg_op(OP_REG_W, idx, -1, name);
-            } else if (r) {
-                push_reg_op(OP_REG_R, idx, -1, name);
-            } else if (w) {
-                push_reg_op(OP_REG_W, idx, -1, name);
-            }
-        } else if (op.type == ARM64_OP_MEM) {
-            OpPlan& p = s.ops[s.n_ops];
-            p.kind = (op.access & CS_AC_WRITE) ? OP_MEM_W : OP_MEM_R;
-            p.op_flags = nzcv_flags;
-            p.base_ctx_idx = int8_t(ctx_idx_of(op.mem.base));
-            p.index_ctx_idx = int8_t(ctx_idx_of(op.mem.index));
-            p.shift_type = uint8_t(op.shift.type);
-            p.shift_amt = uint8_t(op.shift.value);
-            p.disp = op.mem.disp;
-            p.size = 8;
-            // width heuristics (subset of Utils::get_data_width)
-            if (op.reg != ARM64_REG_INVALID) p.size = 8;
-            s.n_ops++;
-            if (writeback && op.mem.base != ARM64_REG_INVALID && s.n_ops < 8) {
-                // writeback: base register is written after the access
-                push_reg_op(OP_REG_W, ctx_idx_of(op.mem.base), -1,
-                            name_id_of(op.mem.base));
-            }
-        }
-    }
-
-    by_addr_[addr] = sites_.size();
-    sites_.push_back(std::move(s));
-    return uint32_t(sites_.size() - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -254,8 +63,9 @@ int text_name_ctx(const char* s, size_t n, int* simd_idx) {
     return -1;
 }
 
-// mnemonic -> NZCV flags / site kind, for plans built from text (no capstone)
-static uint8_t mnem_nzcv(const char* m, size_t n) {    auto is = [&](const char* w) {
+// mnemonic -> NZCV flags / site kind for plans built from imported text
+static uint8_t mnem_nzcv(const char* m, size_t n) {
+    auto is = [&](const char* w) {
         size_t l = strlen(w);
         return n == l && memcmp(m, w, l) == 0;
     };
@@ -277,7 +87,7 @@ static uint8_t mnem_nzcv(const char* m, size_t n) {    auto is = [&](const char*
     return f;
 }
 
-// mnemonic -> NZCV flags / site kind, for plans built from text (no capstone)
+// mnemonic -> NZCV flags / site kind for plans built from imported text
 static uint8_t mnem_kind(const char* m, size_t n) {
     auto is = [&](const char* w) {
         size_t l = strlen(w);

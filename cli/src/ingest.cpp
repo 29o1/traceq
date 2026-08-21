@@ -826,6 +826,12 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
             return false;
         }
         line.clear();
+        if (json && !g.has_exec) {
+            char b[64];
+            snprintf(b, sizeof b, "{\"ev\":%llu", (unsigned long long)gi);
+            line += b;
+            if (g.has_verbatim) line += ",\"verbatim\":true";
+        }
         const uint64_t* regs = ex.regfile();
         if (g.has_exec) {
             const Site& s = A.get(g.site_id);
@@ -971,7 +977,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                 line += b;
             }
         }
-        if (json) line += "}\n"; // closes the {"ev":... object opened above
+        if (json && !line.empty()) line += "}\n";
         if (!line.empty()) {
             fwrite(line.data(), 1, line.size(), out);
             count_line();

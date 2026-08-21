@@ -24,7 +24,7 @@ inline size_t get_uvar(const uint8_t* p, size_t len, uint64_t& out) {
 }
 
 inline uint64_t zigzag_enc(int64_t v) {
-    return (uint64_t((v << 1) ^ (v >> 63)));
+    return (uint64_t(v) << 1) ^ uint64_t(-(v < 0));
 }
 inline int64_t zigzag_dec(uint64_t v) {
     return int64_t(v >> 1) ^ -int64_t(v & 1);

@@ -1,20 +1,10 @@
 #pragma once
-// Site compiler + arena.
-//
-// At transform time (once per unique instruction, like a Stalker transformer)
-// the compiler disassembles each instruction and precomputes everything the
-// hot path needs: the disasm text ("mnem ops"), the operand plan (which
-// registers to read/format, memory operand shape, branch kind). The arena
-// dedupes sites by address and hands out stable ids — unlike GumTrace's
-// CallbackContext ring (102400 slots, wraps and overwrites contexts still
-// referenced by live callouts on large modules), a re-translated block gets
-// the same site id back.
+// Site arena for instructions parsed from GumTrace text logs. Each unique
+// address owns its module identity, disassembly text, and operand plan.
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
-
-#include <capstone/capstone.h>
 
 namespace gt {
 
@@ -49,16 +39,15 @@ struct OpPlan {
     // SIMD/FP register index 0..31 (q/d/s/h/b/vN share one index space by N),
     // set when ctx_idx == -1 and the operand is a SIMD/FP register.
     //
-    // Native ExecEvent has no SIMD/NZCV value lanes; imported GumTrace logs do
-    // preserve their observed values separately. The static register identity
-    // here is enough for taint to propagate through q registers and flags.
+    // Imported GumTrace logs preserve SIMD/NZCV observations separately. The
+    // static register identity here is enough for taint propagation.
     int8_t simd_idx = -1;
     uint8_t op_flags = 0;       // OPF_* — NZCV dependence of the whole
                                 // instruction, repeated on every op
     // memory shape
     int8_t base_ctx_idx = -1;
     int8_t index_ctx_idx = -1;
-    uint8_t shift_type = 0;     // ARM64_SFT_*
+    uint8_t shift_type = 0;     // serialized shift kind (legacy files)
     uint8_t shift_amt = 0;
     int32_t disp = 0;
     uint8_t size = 0;           // access size in bytes (best effort)
@@ -69,8 +58,8 @@ struct Site {
     uint8_t kind = SK_NORMAL;
     uint64_t branch_imm = 0;         // absolute target for CALL_IMM / B_IMM
     uint32_t module_id = 0;          // into arena modules() (name + base at record time)
-    uint32_t prefix_off = 0, prefix_len = 0;   // "[mod] 0xPC!0xOFF mnem ops; " (intern_text only:
-                                               // the verbatim source-log slice; 0 for capstone sites)
+    uint32_t prefix_off = 0, prefix_len = 0;   // "[mod] 0xPC!0xOFF mnem ops; "
+                                               // verbatim source-log slice
     uint32_t disasm_off = 0, disasm_len = 0;   // "mnem ops" without prefix
     uint8_t n_ops = 0;
     OpPlan ops[8];
@@ -81,13 +70,6 @@ struct TextOp; // defined below (text-built sites, gt import)
 
 class SiteArena {
 public:
-    // Disassembles `word` at `addr` (capstone) and interns the site.
-    // Returns the stable site id. Second translation of the same address
-    // returns the existing id.
-    uint32_t intern(uint64_t addr, uint32_t word, const char* module_name,
-                    uint64_t module_base, int32_t func_sym);
-    uint32_t intern_disasm(uint64_t addr, const cs_insn* insn, const char* module_name,
-                           uint64_t module_base, int32_t func_sym);
     // Intern a site from an upstream log line. prefix is the verbatim
     // "[mod] 0xABS!0xOFF mnem ops; " text; the disasm slice is recovered from
     // it. Site kind and NZCV flags come from a mnemonic table. Returns the
@@ -108,11 +90,6 @@ public:
         return id < module_bases_.size() ? module_bases_[id] : 0;
     }
 
-    // hot-path lookup: 0xFFFFFFFF if not interned
-    uint32_t by_addr_find(uint64_t addr) const {
-        auto it = by_addr_.find(addr);
-        return it == by_addr_.end() ? 0xFFFFFFFFu : it->second;
-    }
     int32_t symbol_id(const char* name) { return intern_string(name); }
 
     // ---- serialization (META chunk payload) ----
@@ -142,11 +119,7 @@ private:
     std::unordered_map<std::string, uint32_t> module_ids_;
 };
 
-// Shared capstone handle (CS_MODE_ARM, little endian, detail on).
-bool site_compiler_init();
-void site_compiler_shutdown();
-
-// ---- text-built sites (gt import; no instruction word available) ----
+// ---- text-built sites (gt import) ----
 // One plan operand per printed value token, in print order. name points into
 // the caller's buffer (usually the mmapped log) and is copied by intern_text.
 struct TextOp {
