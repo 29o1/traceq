@@ -286,7 +286,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      uint64_t window, uint64_t at_ev, uint64_t off,
                      const std::string& mod, bool json, bool index_deps) {
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
 
     // --off resolves to the set of sites at that module-relative offset
     std::unordered_set<uint32_t> off_sites;
@@ -939,14 +939,18 @@ int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, int seed_q
 // ---------------------------------------------------------------------------
 int q_diff(const std::string& a_p, const std::string& b_p, int context, bool json) {
     GtbFile a, b;
-    if (!a.load(a_p) || !b.load(b_p)) { fprintf(stderr, "load failed\n"); return 1; }
-    std::vector<uint32_t> sa, sb;
-    Expander(a).for_each([&](uint64_t, const Group& g) {
-        if (g.has_exec) sa.push_back(g.site_id);
+    if (!a.load(a_p, false) || !b.load(b_p, false)) {
+        fprintf(stderr, "load failed\n");
+        return 1;
+    }
+    struct Exec { uint32_t site; uint64_t ev; };
+    std::vector<Exec> sa, sb;
+    Expander(a).for_each([&](uint64_t ev, const Group& g) {
+        if (g.has_exec) sa.push_back({g.site_id, ev});
         return true;
     });
-    Expander(b).for_each([&](uint64_t, const Group& g) {
-        if (g.has_exec) sb.push_back(g.site_id);
+    Expander(b).for_each([&](uint64_t ev, const Group& g) {
+        if (g.has_exec) sb.push_back({g.site_id, ev});
         return true;
     });
     auto key = [](const GtbFile& f, uint32_t site, std::string& mod_out, uint64_t& off_out) {
@@ -955,11 +959,11 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
                       ? f.arena.modules()[s.module_id] : std::string("?");
         off_out = s.addr - f.arena.module_base(s.module_id);
     };
-    auto same = [&](uint32_t x, uint32_t y) {
+    auto same = [&](const Exec& x, const Exec& y) {
         std::string ma, mb;
         uint64_t oa, ob;
-        key(a, x, ma, oa);
-        key(b, y, mb, ob);
+        key(a, x.site, ma, oa);
+        key(b, y.site, mb, ob);
         return ma == mb && oa == ob;
     };
     size_t n = std::min(sa.size(), sb.size());
@@ -988,23 +992,39 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         emit::kv_bool(o, "identical", identical);
         if (!identical) {
             o += ',';
-            emit::kv_u64(o, "diverge_ev", div);
+            emit::kv_u64(o, "diverge_exec", div);
+            o += ",\"a_ev\":";
+            if (div < sa.size()) o += std::to_string(sa[div].ev);
+            else o += "null";
+            o += ",\"b_ev\":";
+            if (div < sb.size()) o += std::to_string(sb[div].ev);
+            else o += "null";
             size_t from = div >= size_t(context) ? div - size_t(context) : 0;
             size_t to = div + size_t(context) + 1;
             o += ",\"ctx\":[";
+            bool first = true;
             for (size_t i = from; i < to; i++) {
                 if (i >= sa.size() && i >= sb.size()) continue;
-                if (i > from) o += ',';
+                if (!first) o += ',';
+                first = false;
                 o += '{';
-                emit::kv_u64(o, "ev", i);
+                emit::kv_u64(o, "exec", i);
+                o += ",\"a_ev\":";
+                if (i < sa.size()) o += std::to_string(sa[i].ev);
+                else o += "null";
+                o += ",\"b_ev\":";
+                if (i < sb.size()) o += std::to_string(sb[i].ev);
+                else o += "null";
                 o += ',';
-                emit::kv_str(o, "a", i < sa.size() ? loc(a, sa[i]) : "-");
+                emit::kv_str(o, "a", i < sa.size() ? loc(a, sa[i].site) : "-");
                 o += ',';
-                emit::kv_str(o, "a_txt", i < sa.size() ? txt(a, sa[i]) : "<end>");
+                emit::kv_str(o, "a_txt",
+                             i < sa.size() ? txt(a, sa[i].site) : "<end>");
                 o += ',';
-                emit::kv_str(o, "b", i < sb.size() ? loc(b, sb[i]) : "-");
+                emit::kv_str(o, "b", i < sb.size() ? loc(b, sb[i].site) : "-");
                 o += ',';
-                emit::kv_str(o, "b_txt", i < sb.size() ? txt(b, sb[i]) : "<end>");
+                emit::kv_str(o, "b_txt",
+                             i < sb.size() ? txt(b, sb[i].site) : "<end>");
                 o += ',';
                 emit::kv_bool(o, "diverges", i == div);
                 o += '}';
@@ -1020,17 +1040,25 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
             emit::finish(meta, json);
             return 0;
         }
-        printf("first divergence at exec index %zu (0-based)\n", div);
+        printf("first divergence at exec index %zu (0-based)", div);
+        if (div < sa.size()) printf(" A_ev=%llu", (unsigned long long)sa[div].ev);
+        else printf(" A_ev=end");
+        if (div < sb.size()) printf(" B_ev=%llu", (unsigned long long)sb[div].ev);
+        else printf(" B_ev=end");
+        putchar('\n');
         printf("context:\n");
         size_t from = div >= size_t(context) ? div - size_t(context) : 0;
         size_t to = div + size_t(context) + 1;
         for (size_t i = from; i < to; i++) {
             if (i < sa.size() || i < sb.size()) {
-                printf("  [%5zu] A: %-22s %-34s B: %-22s %s%s\n", i,
-                       i < sa.size() ? loc(a, sa[i]).c_str() : "-",
-                       i < sa.size() ? txt(a, sa[i]).c_str() : "<end>",
-                       i < sb.size() ? loc(b, sb[i]).c_str() : "-",
-                       i < sb.size() ? txt(b, sb[i]).c_str() : "<end>",
+                printf("  [%5zu] A_ev=%-8s A: %-22s %-34s B_ev=%-8s B: %-22s %s%s\n",
+                       i,
+                       i < sa.size() ? std::to_string(sa[i].ev).c_str() : "-",
+                       i < sa.size() ? loc(a, sa[i].site).c_str() : "-",
+                       i < sa.size() ? txt(a, sa[i].site).c_str() : "<end>",
+                       i < sb.size() ? std::to_string(sb[i].ev).c_str() : "-",
+                       i < sb.size() ? loc(b, sb[i].site).c_str() : "-",
+                       i < sb.size() ? txt(b, sb[i].site).c_str() : "<end>",
                        i == div ? "   <-- DIVERGES" : "");
             }
         }
@@ -1045,10 +1073,11 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
 // ---------------------------------------------------------------------------
 int q_fold(const std::string& gtb, int top, bool json) {
     GtbFile f;
-    if (!f.load(gtb)) return 1;
-    std::vector<uint32_t> s;
-    Expander(f).for_each([&](uint64_t, const Group& g) {
-        if (g.has_exec) s.push_back(g.site_id);
+    if (!f.load(gtb, false)) return 1;
+    struct Exec { uint32_t site; uint64_t ev; };
+    std::vector<Exec> s;
+    Expander(f).for_each([&](uint64_t ev, const Group& g) {
+        if (g.has_exec) s.push_back({g.site_id, ev});
         return true;
     });
     struct Loop { size_t start; size_t period; size_t reps; };
@@ -1060,13 +1089,16 @@ int q_fold(const std::string& gtb, int top, bool json) {
         for (size_t p = 1; p <= maxp; p++) {
             bool ok = true;
             for (size_t k = 0; k < 2 * p && ok; k++)
-                if (s[i + k] != s[i + p + k]) ok = false;
+                if (s[i + k].site != s[i + p + k].site) ok = false;
             if (!ok) continue;
             size_t reps = 2;
             while (i + (reps + 1) * p <= s.size()) {
                 bool eq = true;
                 for (size_t k = 0; k < p; k++)
-                    if (s[i + k] != s[i + reps * p + k]) { eq = false; break; }
+                    if (s[i + k].site != s[i + reps * p + k].site) {
+                        eq = false;
+                        break;
+                    }
                 if (!eq) break;
                 reps++;
             }
@@ -1085,11 +1117,16 @@ int q_fold(const std::string& gtb, int top, bool json) {
         std::string o = "\"loops\":[";
         for (size_t k = 0; k < shown; k++) {
             const Loop& L = loops[k];
+            size_t end_exec = L.start + L.reps * L.period;
             if (k) o += ',';
             o += '{';
-            emit::kv_u64(o, "start", L.start);
+            emit::kv_u64(o, "start_exec", L.start);
             o += ',';
-            emit::kv_u64(o, "end", L.start + L.reps * L.period);
+            emit::kv_u64(o, "end_exec", end_exec);
+            o += ',';
+            emit::kv_u64(o, "start_ev", s[L.start].ev);
+            o += ',';
+            emit::kv_u64(o, "end_ev", s[end_exec - 1].ev);
             o += ',';
             emit::kv_u64(o, "period", L.period);
             o += ',';
@@ -1098,8 +1135,9 @@ int q_fold(const std::string& gtb, int top, bool json) {
             for (size_t j = 0; j < L.period && j < 8; j++) {
                 if (j) o += ',';
                 o.push_back('"');
-                o.append(f.arena.pool_ptr() + f.arena.get(s[L.start + j]).disasm_off,
-                         f.arena.get(s[L.start + j]).disasm_len);
+                o.append(f.arena.pool_ptr() +
+                             f.arena.get(s[L.start + j].site).disasm_off,
+                         f.arena.get(s[L.start + j].site).disasm_len);
                 o.push_back('"');
             }
             o += "]}";
@@ -1110,11 +1148,15 @@ int q_fold(const std::string& gtb, int top, bool json) {
         printf("detected %zu loop regions (top %d by executed instructions):\n", loops.size(), top);
         for (size_t k = 0; k < shown; k++) {
             const Loop& L = loops[k];
-            printf("  exec [%zu, %zu): period=%zu reps=%zu (%zu insn execs)\n",
-                   L.start, L.start + L.reps * L.period, L.period, L.reps,
-                   L.reps * L.period);
+            size_t end_exec = L.start + L.reps * L.period;
+            printf("  exec [%zu, %zu) events [%llu, %llu]: period=%zu reps=%zu "
+                   "(%zu insn execs)\n",
+                   L.start, end_exec,
+                   (unsigned long long)s[L.start].ev,
+                   (unsigned long long)s[end_exec - 1].ev,
+                   L.period, L.reps, L.reps * L.period);
             for (size_t j = 0; j < L.period && j < 8; j++) {
-                const Site& st = f.arena.get(s[L.start + j]);
+                const Site& st = f.arena.get(s[L.start + j].site);
                 printf("    %s\n", std::string(f.arena.pool_ptr() + st.disasm_off,
                                                st.disasm_len).c_str());
             }
@@ -1268,7 +1310,7 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     struct Row {
         uint64_t ev, line, addr;
         unsigned __int128 value;
@@ -1338,14 +1380,15 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
         }
     };
     Expander ex(f);
+    std::vector<AgentMemVal> mems;
+    mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > to_ev) return false;
         if (g.n_mem == 0) return true;
-        std::vector<AgentRegVal> rd, wr;
-        std::vector<AgentMemVal> mems;
+        mems.clear();
         if (g.has_exec)
-            reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
-                                     ex.regfile(), rd, wr, mems);
+            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
+                                     ex.regfile(), mems);
         int lanes = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < lanes; k++) {
             bool is_write = mems.empty() ? g.mem[k].is_write : mems[size_t(k)].is_w;
@@ -1429,22 +1472,26 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed: %s\n", gtb.c_str()); return 1; }
+    if (!f.load(gtb, false)) {
+        fprintf(stderr, "load failed: %s\n", gtb.c_str());
+        return 1;
+    }
 
     std::vector<uint8_t> bytes(size_t(range_len), 0);
     std::vector<uint8_t> known(size_t(range_len), 0);
     uint64_t last_ev = 0;
     bool saw_event = false;
     Expander ex(f);
+    std::vector<AgentMemVal> mems;
+    mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > at_ev) return false;
         saw_event = true;
         last_ev = gi;
         if (!g.has_exec || g.n_mem == 0) return true;
-        std::vector<AgentRegVal> rd, wr;
-        std::vector<AgentMemVal> mems;
-        reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
-                                 ex.regfile(), rd, wr, mems);
+        mems.clear();
+        reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
+                                 ex.regfile(), mems);
         for (const auto& m : mems) {
             uint64_t width = m.size ? m.size : 8;
             if (m.addr >= range_base + range_len ||
@@ -1571,12 +1618,17 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
                int limit, uint64_t offset, uint64_t from_ev, uint64_t to_ev,
                bool json) {
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     Expander ex(f);
+    std::vector<AgentRegVal> rd, wr;
+    std::vector<AgentMemVal> mems;
+    rd.reserve(8);
+    wr.reserve(8);
+    mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi < from_ev) return true;
         if (gi > to_ev) return false;
@@ -1595,8 +1647,9 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
         if (total++ < offset || shown >= lim) return true;
         shown++;
 
-        std::vector<AgentRegVal> rd, wr;
-        std::vector<AgentMemVal> mems;
+        rd.clear();
+        wr.clear();
+        mems.clear();
         reconstruct_agent_values(f.arena, s, g, ex.regfile(), rd, wr, mems);
         std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
         if (json) {
@@ -1698,7 +1751,7 @@ int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
 int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
                 bool json) {
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     struct Row {
         uint64_t ev, line;
         std::string at;
@@ -1826,7 +1879,7 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     // dump-payload scan pattern: minimal-width LE bytes of val. Values that
@@ -1889,6 +1942,8 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         }
     };
     Expander ex(f);
+    std::vector<AgentMemVal> mems;
+    mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > to_ev) return false;
         if (gi < from_ev) return true;
@@ -1958,12 +2013,10 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
                     row(gi, ln + ".hi", "reg", 'w', reg + ".hi", 0, 0, g);
             }
         }
-        std::vector<AgentRegVal> reconstructed_rd, reconstructed_wr;
-        std::vector<AgentMemVal> mems;
-        if (g.has_exec)
-            reconstruct_agent_values(f.arena, f.arena.get(g.site_id), g,
-                                     ex.regfile(), reconstructed_rd,
-                                     reconstructed_wr, mems);
+        mems.clear();
+        if (g.has_exec && g.n_mem)
+            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
+                                     ex.regfile(), mems);
         int mem_count = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < mem_count; k++) {
             bool known = mems.empty() ? g.mem[k].value_known
@@ -2010,7 +2063,7 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
 int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json) {
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     std::vector<std::string> stack;
     bool capturing = false;
     size_t base = 0;

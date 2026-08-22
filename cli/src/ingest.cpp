@@ -32,7 +32,7 @@ static const char* decoded_call_name(const std::string& sym, bool& is_jni) {
     return sym.c_str();
 }
 
-bool GtbFile::load(const std::string& path) {
+bool GtbFile::load(const std::string& path, bool scan_stats) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) return false;
     uint32_t hdr[2];
@@ -75,7 +75,9 @@ bool GtbFile::load(const std::string& path) {
     if (!SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena, modules))
         return false;
 
-    // decode event stream once for stats + group streaming support
+    if (!scan_stats) return true;
+
+    // Decode the event stream only when the caller needs detailed counters.
     const uint8_t* p = events.data();
     size_t len = events.size(), o = 0;
     uint64_t last_reg[32] = {0}, last_addr = 0, last_mv[2] = {0};
@@ -216,10 +218,12 @@ bool GtbFile::load(const std::string& path) {
 bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     // sp comes from the trace itself (recorded in the footer by the event
     // source), not from any assumption about who produced the file
+    memset(regs_, 0, sizeof(regs_));
     regs_[31] = f_.initial_sp;
     const uint8_t* p = f_.events.data();
     size_t len = f_.events.size(), o = 0;
     std::string& verbatim = f_.verbatim;
+    verbatim.clear();
     Group g;
     uint64_t gi = 0;
     uint64_t next_source_line = 1;
@@ -694,7 +698,8 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
                        std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
     uint8_t inferred_size = disasm_mem_width(arena, s);
-    std::vector<unsigned __int128> pair_values;
+    unsigned __int128 pair_values[8];
+    int n_pair_values = 0;
     int mem_idx = 0;
     for (uint8_t i = 0; i < s.n_ops && mem_idx < g.n_mem; i++) {
         const OpPlan& op = s.ops[i];
@@ -707,7 +712,11 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
             mv.known = true;
         }
 
-        std::vector<unsigned __int128> data_values;
+        unsigned __int128 data_values[8];
+        int n_data_values = 0;
+        auto add_data_value = [&](unsigned __int128 value) {
+            if (n_data_values < 8) data_values[n_data_values++] = value;
+        };
         if (op.kind == OP_MEM_W) {
             for (uint8_t j = 0; j < s.n_ops; j++) {
                 const OpPlan& r = s.ops[j];
@@ -716,31 +725,35 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
                     (r.ctx_idx == op.base_ctx_idx || r.ctx_idx == op.index_ctx_idx))
                     continue;
                 if (om.use_obs && om.obs_at[j] >= 0)
-                    data_values.push_back(g.obs[om.obs_at[j]].val);
+                    add_data_value(g.obs[om.obs_at[j]].val);
                 else if (r.ctx_idx >= 0)
-                    data_values.push_back(r.ctx_idx == 31 ? regs[31]
-                                                          : regs[r.ctx_idx & 31]);
+                    add_data_value(r.ctx_idx == 31 ? regs[31]
+                                                    : regs[r.ctx_idx & 31]);
             }
         } else {
             for (uint8_t j = 0; j < s.n_ops; j++) {
                 const OpPlan& w = s.ops[j];
                 if (w.kind != OP_REG_W) continue;
                 if (om.use_wobs && om.wobs_at[j] >= 0) {
-                    data_values.push_back(g.wobs[om.wobs_at[j]].val);
+                    add_data_value(g.wobs[om.wobs_at[j]].val);
                     continue;
                 }
                 for (int k = 0; k < g.n_wr; k++)
                     if (w.ctx_idx >= 0 && g.wr_id[k] == w.ctx_idx) {
-                        data_values.push_back(g.wr_val[k]);
+                        add_data_value(g.wr_val[k]);
                         break;
                     }
             }
         }
-        if (!mv.known && !data_values.empty()) {
+        if (!mv.known && n_data_values > 0) {
             mv.val = data_values[0];
             mv.known = true;
         }
-        if (pair_values.empty()) pair_values = std::move(data_values);
+        if (n_pair_values == 0) {
+            n_pair_values = n_data_values;
+            for (int j = 0; j < n_data_values; j++)
+                pair_values[j] = data_values[j];
+        }
         out.push_back(mv);
     }
 
@@ -752,7 +765,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
         second.addr += stride;
         second.size = uint8_t(stride);
         second.known = false;
-        if (pair_values.size() >= 2) {
+        if (n_pair_values >= 2) {
             second.val = pair_values[1];
             second.known = true;
         }
@@ -760,14 +773,26 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
     }
 }
 
+void reconstruct_agent_registers(const Site& site, const Group& group,
+                                 const uint64_t* regs,
+                                 std::vector<AgentRegVal>& reads,
+                                 std::vector<AgentRegVal>& writes) {
+    agent_regs(site, group, regs, reads, writes);
+}
+
+void reconstruct_agent_memory(const SiteArena& arena, const Site& site,
+                              const Group& group, const uint64_t* regs,
+                              std::vector<AgentMemVal>& mems) {
+    agent_mems(arena, site, group, regs, mems);
+}
+
 void reconstruct_agent_values(const SiteArena& arena, const Site& site,
-                              const Group& group,
-                              const uint64_t* regs,
+                              const Group& group, const uint64_t* regs,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
-    std::vector<AgentMemVal>& mems) {
-    agent_regs(site, group, regs, reads, writes);
-    agent_mems(arena, site, group, regs, mems);
+                              std::vector<AgentMemVal>& mems) {
+    reconstruct_agent_registers(site, group, regs, reads, writes);
+    reconstruct_agent_memory(arena, site, group, regs, mems);
 }
 
 static void agent_call_text(std::string& line, const Group& g) {
@@ -815,21 +840,31 @@ static void agent_svc_text(std::string& line, const Group& g) {
 
 static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool json,
                              uint64_t from_idx, uint64_t to_idx, uint64_t max_lines,
-                             uint64_t* stop_gi) {
+                             uint64_t* stop_gi, uint64_t* total_selected) {
     if (stop_gi) *stop_gi = UINT64_MAX;
+    if (total_selected) *total_selected = 0;
     const SiteArena& A = f.arena;
-    uint64_t lines = 0;
+    uint64_t lines = 0, selected = 0;
     uint32_t cur_mod = 0xFFFFFFFFu;
     std::string line;
+    std::vector<AgentRegVal> rd, wr;
+    std::vector<AgentMemVal> mems;
+    rd.reserve(8);
+    wr.reserve(8);
+    mems.reserve(2);
     auto count_line = [&]() {
         size_t nl = std::count(line.begin(), line.end(), '\n');
         lines += nl;
     };
     ex.for_each([&](uint64_t gi, const Group& g) -> bool {
-        if (gi < from_idx || gi > to_idx) return true;
+        if (gi < from_idx) return true;
+        if (gi > to_idx) return false;
+        selected++;
         if (max_lines && lines >= max_lines) {
-            if (stop_gi) *stop_gi = gi;
-            return false;
+            if (stop_gi && *stop_gi == UINT64_MAX) *stop_gi = gi;
+            // JSON needs an exact meta.total. Keep decoding the same pass but
+            // stop formatting rows once the output limit is reached.
+            return json && total_selected;
         }
         line.clear();
         if (json && !g.has_exec) {
@@ -849,8 +884,9 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
             }
             uint64_t off = s.addr - A.module_base(mod_id);
             std::string txt(A.pool_ptr() + s.disasm_off, s.disasm_len);
-            std::vector<AgentRegVal> rd, wr;
-            std::vector<AgentMemVal> mems;
+            rd.clear();
+            wr.clear();
+            mems.clear();
             reconstruct_agent_values(A, s, g, regs, rd, wr, mems);
             if (json) {
                 char b[64];
@@ -990,17 +1026,21 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
         }
         return true;
     });
+    if (total_selected) *total_selected = selected;
     return lines;
 }
 
 uint64_t Expander::expand_compact(FILE* out, uint64_t from_idx, uint64_t to_idx,
                                   uint64_t max_lines, uint64_t* stop_gi) {
-    return expand_agent(f_, *this, out, false, from_idx, to_idx, max_lines, stop_gi);
+    return expand_agent(f_, *this, out, false, from_idx, to_idx, max_lines,
+                        stop_gi, nullptr);
 }
 
 uint64_t Expander::expand_jsonl(FILE* out, uint64_t from_idx, uint64_t to_idx,
-                                uint64_t max_lines, uint64_t* stop_gi) {
-    return expand_agent(f_, *this, out, true, from_idx, to_idx, max_lines, stop_gi);
+                                uint64_t max_lines, uint64_t* stop_gi,
+                                uint64_t* total_selected) {
+    return expand_agent(f_, *this, out, true, from_idx, to_idx, max_lines,
+                        stop_gi, total_selected);
 }
 
 } // namespace gt

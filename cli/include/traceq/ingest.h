@@ -35,7 +35,10 @@ struct GtbFile {
     uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_svc = 0, n_ret = 0;
     uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0, n_call2 = 0;
 
-    bool load(const std::string& path);
+    // scan_stats decodes the event stream to populate n_* counters. Queries
+    // that do not expose those counters can skip that otherwise redundant
+    // pass; true remains the default for library callers.
+    bool load(const std::string& path, bool scan_stats = true);
 };
 
 // One reconstructed execution group: everything that happened at one EXEC
@@ -93,9 +96,15 @@ struct AgentMemVal {
 };
 
 const char* agent_reg_name(int ctx_idx);
+void reconstruct_agent_registers(const Site& site, const Group& group,
+                                 const uint64_t* regs,
+                                 std::vector<AgentRegVal>& reads,
+                                 std::vector<AgentRegVal>& writes);
+void reconstruct_agent_memory(const SiteArena& arena, const Site& site,
+                              const Group& group, const uint64_t* regs,
+                              std::vector<AgentMemVal>& mems);
 void reconstruct_agent_values(const SiteArena& arena, const Site& site,
-                              const Group& group,
-                              const uint64_t* regs,
+                              const Group& group, const uint64_t* regs,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems);
@@ -124,7 +133,8 @@ public:
                             uint64_t* stop_gi = nullptr);
     uint64_t expand_jsonl(FILE* out, uint64_t from_idx = 0,
                           uint64_t to_idx = UINT64_MAX, uint64_t max_lines = 0,
-                          uint64_t* stop_gi = nullptr);
+                          uint64_t* stop_gi = nullptr,
+                          uint64_t* total_selected = nullptr);
 
     const uint64_t* regfile() const { return regs_; }
 

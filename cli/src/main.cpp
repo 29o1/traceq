@@ -446,15 +446,15 @@ int cmd_export(int argc, char** argv) {
         return 2;
     }
     gt::GtbFile f;
-    if (!f.load(in)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!f.load(in, false)) { fprintf(stderr, "load failed\n"); return 1; }
     if (json) fmt = "jsonl"; // --json always selects the JSON Lines format
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     gt::Expander ex(f);
-    uint64_t stop_gi = UINT64_MAX, n = 0;
+    uint64_t stop_gi = UINT64_MAX, n = 0, total_selected = 0;
     if (fmt == "upstream") n = ex.expand_upstream(o, from, to, limit, &stop_gi);
     else if (fmt == "compact") n = ex.expand_compact(o, from, to, limit, &stop_gi);
-    else n = ex.expand_jsonl(o, from, to, limit, &stop_gi);
+    else n = ex.expand_jsonl(o, from, to, limit, &stop_gi, &total_selected);
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {
@@ -474,19 +474,8 @@ int cmd_export(int argc, char** argv) {
     if (fmt == "jsonl") {
         gt::emit::Meta meta;
         meta.truncated = truncated;
-        uint64_t total;
-        if (truncated) {
-            // events remaining in the window (counting pass over the tail)
-            total = 0;
-            gt::Expander(f).for_each([&](uint64_t gi, const gt::Group&) {
-                if (gi >= from && gi <= to) total++;
-                return true;
-            });
-        } else {
-            total = n; // jsonl emits exactly one line per selected event
-        }
-        meta.total = total;
-        meta.shown = truncated ? stop_gi - from : n;
+        meta.total = total_selected;
+        meta.shown = n;
         meta.next = next_cmd;
         gt::emit::finish(meta, true, o);
     }

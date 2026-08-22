@@ -17,8 +17,8 @@
 //   t_queries    query surface + agent contract on an imported file:
 //                stat/find-pc/find-value/mem-access/func-args/calltree, export windows
 //                and cursor, JSON Lines shape
-//   t_diff       (module, offset) identity: inserted instruction diverges,
-//                rebased copy compares identical
+//   t_diff       (module, offset) identity, event coordinates, and fold
+//                navigation across non-exec groups
 
 #include <traceq/import.h>
 #include <traceq/ingest.h>
@@ -330,6 +330,7 @@ static void t_gumtrace() {
     Expander(f).expand_upstream(o);
     fclose(o);
     CHECK(read_file(out) == log, "JNI dialect replays byte-for-byte");
+    size_t verbatim_bytes = f.verbatim.size();
 
     std::string fa = cap_out(
         [&] { q_func_args(gtb, "GetMethodID", 1, 5, true); });
@@ -354,8 +355,9 @@ static void t_gumtrace() {
               json_text.find("\n,{\"") == std::string::npos &&
               json_text.find("\"verbatim\":true") != std::string::npos &&
               json_text.find("{\"ev\":4,\"ret\":\"0x42\"}") !=
-                  std::string::npos,
-          "jsonl marks verbatim groups and structures a standalone return");
+                  std::string::npos &&
+              f.verbatim.size() == verbatim_bytes,
+          "jsonl marks verbatim groups without growing the replay cache");
 }
 
 // ---------------------------------------------------------------------------
@@ -808,9 +810,12 @@ static void t_queries() {
         std::string out = tmp_path("q.jsonl");
         FILE* o = fopen(out.c_str(), "wb");
         uint64_t stop = UINT64_MAX;
-        uint64_t n = Expander(f).expand_jsonl(o, 0, UINT64_MAX, 4, &stop);
+        uint64_t total = 0;
+        uint64_t n = Expander(f).expand_jsonl(o, 0, UINT64_MAX, 4, &stop,
+                                             &total);
         fclose(o);
-        CHECK(n == 4 && stop != UINT64_MAX, "jsonl --limit 4 + cursor");
+        CHECK(n == 4 && total == 9 && stop == 4,
+              "jsonl --limit 4 counts the tail in the same pass");
         std::string s = read_file(out);
         CHECK(s.rfind("{\"ev\":0,", 0) == 0, "jsonl lines are ev objects");
         CHECK(s.find("\"txt\":\"mov x8, x9\"") != std::string::npos,
@@ -835,23 +840,52 @@ static void t_queries() {
 // t_diff
 // ---------------------------------------------------------------------------
 static void t_diff() {
-    printf("t_diff ((module, offset) identity)\n");
+    printf("t_diff ((module, offset) identity + event coordinates)\n");
     ImportResult r;
-    CHECK(import_str(join_log(kLogA, 3, "\n"), tmp_path("da.gtb"), r),
+    CHECK(import_str("banner A\n" + join_log(kLogA, 3, "\n"),
+                     tmp_path("da.gtb"), r),
           "import A");
-    CHECK(import_str(join_log(kLogB, 4, "\n"), tmp_path("db.gtb"), r),
+    CHECK(import_str("banner B1\nbanner B2\n" + join_log(kLogB, 4, "\n"),
+                     tmp_path("db.gtb"), r),
           "import B");
-    CHECK(import_str(join_log(kLogAR, 3, "\n"), tmp_path("dar.gtb"), r),
+    CHECK(import_str("banner AR\n" + join_log(kLogAR, 3, "\n"),
+                     tmp_path("dar.gtb"), r),
           "import A rebased");
 
     std::string d = cap_out(
         [&] { q_diff(tmp_path("da.gtb"), tmp_path("db.gtb"), 3, false); });
-    CHECK(d.find("first divergence at exec index 2") != std::string::npos,
-          "inserted instruction diverges at exec index 2");
+    CHECK(d.find("first divergence at exec index 2 (0-based) A_ev=3 B_ev=4") !=
+              std::string::npos,
+          "text diff reports execution and per-run event coordinates");
+    std::string dj = cap_out(
+        [&] { q_diff(tmp_path("da.gtb"), tmp_path("db.gtb"), 3, true); });
+    CHECK(dj.find("\"diverge_exec\":2,\"a_ev\":3,\"b_ev\":4") !=
+                  std::string::npos &&
+              dj.find("\"exec\":2,\"a_ev\":3,\"b_ev\":4") !=
+                  std::string::npos,
+          "JSON diff exposes export-ready event coordinates");
     std::string same = cap_out(
         [&] { q_diff(tmp_path("da.gtb"), tmp_path("dar.gtb"), 3, false); });
     CHECK(same.find("identical execution sequences") != std::string::npos,
           "rebased copy compares identical (ASLR-stable identity)");
+
+    static const char* kLoop[] = {
+        "loop banner",
+        "[l.so] 0x2000!0x0 add x8, x8, #1; x8=0x0 -> x8=0x1 ",
+        "[l.so] 0x2004!0x4 add x9, x9, #1; x9=0x0 -> x9=0x1 ",
+        "[l.so] 0x2000!0x0 add x8, x8, #1; x8=0x1 -> x8=0x2 ",
+        "[l.so] 0x2004!0x4 add x9, x9, #1; x9=0x1 -> x9=0x2 ",
+        "[l.so] 0x2000!0x0 add x8, x8, #1; x8=0x2 -> x8=0x3 ",
+        "[l.so] 0x2004!0x4 add x9, x9, #1; x9=0x2 -> x9=0x3 ",
+    };
+    CHECK(import_str(join_log(kLoop, 7, "\n"), tmp_path("loop.gtb"), r),
+          "import loop with a leading non-exec event");
+    std::string fold = cap_out(
+        [&] { q_fold(tmp_path("loop.gtb"), 1, true); });
+    CHECK(fold.find("\"start_exec\":0,\"end_exec\":6,\"start_ev\":1,"
+                    "\"end_ev\":6,\"period\":2,\"reps\":3") !=
+              std::string::npos,
+          "fold exposes exec indices and export-ready event coordinates");
 }
 
 // ---------------------------------------------------------------------------
