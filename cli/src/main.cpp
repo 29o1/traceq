@@ -201,13 +201,15 @@ int cmd_mem_access(int argc, char** argv) {
 int cmd_mem_state(int argc, char** argv) {
     std::string gtb;
     uint64_t range_base = 0, range_len = 0, at_ev = 0;
-    bool have_range = false, have_ev = false, json = false;
+    bool have_range = false, have_ev = false, json = false, qword = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-state trace.gtb --range B,L --at-ev N [--json]\n"
+            printf("usage: gt mem-state trace.gtb --range B,L --at-ev N "
+                   "[--qword] [--json]\n"
                    "  reconstruct known bytes from observed reads/writes up to event N; "
-                   "unknown bytes print as ??\n");
+                   "unknown bytes print as ??\n"
+                   "  --qword emits 8-byte little-endian cells from the range base\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--range")) {
@@ -221,15 +223,17 @@ int cmd_mem_state(int argc, char** argv) {
             at_ev = strtoull(next(), nullptr, 10);
             have_ev = true;
         }
+        else if (!strcmp(argv[i], "--qword")) qword = true;
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("mem-state", argv[i]);
     }
     if (gtb.empty() || !have_range || !have_ev) {
-        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L --at-ev N [--json]\n");
+        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L --at-ev N "
+                        "[--qword] [--json]\n");
         return 2;
     }
-    return q_mem_state(gtb, range_base, range_len, at_ev, json);
+    return q_mem_state(gtb, range_base, range_len, at_ev, json, qword);
 }
 
 int cmd_find_pc(int argc, char** argv) {
@@ -370,7 +374,7 @@ static void usage() {
         "  gt stat      trace.gtb [--json]\n"
         "  gt mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--json]\n"
-        "  gt mem-state trace.gtb --range B,L --at-ev N [--json]\n"
+        "  gt mem-state trace.gtb --range B,L --at-ev N [--qword] [--json]\n"
         "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
         "               [--from E] [--to E] [--limit N] [--offset M] [--json]\n"
         "  gt find-value V trace.gtb [--read | --write] [--from E] [--to E]\n"

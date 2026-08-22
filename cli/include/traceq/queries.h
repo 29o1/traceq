@@ -31,7 +31,8 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
                    uint64_t to_ev, int last, bool json = false,
                    bool writes_only = false, bool reads_only = false);
 int q_mem_state(const std::string& gtb, uint64_t range_base,
-                uint64_t range_len, uint64_t at_ev, bool json = false);
+                uint64_t range_len, uint64_t at_ev, bool json = false,
+                bool qword = false);
 int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
                const std::vector<uint64_t>& offs, const std::string& mod,
                int limit, uint64_t offset, uint64_t from_ev, uint64_t to_ev,

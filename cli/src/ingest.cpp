@@ -603,22 +603,28 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
 // ---------------------------------------------------------------------------
 static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
                        std::vector<AgentRegVal>& rd, std::vector<AgentRegVal>& wr) {
+    auto push_unique = [](std::vector<AgentRegVal>& values, int ctx, uint64_t val) {
+        for (const auto& item : values)
+            if (item.ctx == ctx) return;
+        values.push_back({ctx, val});
+    };
     ObsMap m = obs_map(s, g);
     for (uint8_t i = 0; i < s.n_ops; i++) {
         const OpPlan& op = s.ops[i];
         if (op.kind == OP_REG_R && op.ctx_idx >= 0)
-            rd.push_back({op.ctx_idx,
-                          m.use_obs ? uint64_t(g.obs[m.obs_at[i]].val)
-                                    : op.ctx_idx == 31 ? regs[31]
-                                                       : regs[op.ctx_idx & 31]});
+            push_unique(rd, op.ctx_idx,
+                        m.use_obs ? uint64_t(g.obs[m.obs_at[i]].val)
+                                  : op.ctx_idx == 31 ? regs[31]
+                                                     : regs[op.ctx_idx & 31]);
         else if (op.kind == OP_REG_W && op.ctx_idx >= 0) {
             if (m.use_wobs) {
-                wr.push_back({op.ctx_idx, uint64_t(g.wobs[m.wobs_at[i]].val)});
+                push_unique(wr, op.ctx_idx,
+                            uint64_t(g.wobs[m.wobs_at[i]].val));
                 continue;
             }
             for (int k = 0; k < g.n_wr; k++)
                 if (g.wr_id[k] == op.ctx_idx) {
-                    wr.push_back({op.ctx_idx, g.wr_val[k]});
+                    push_unique(wr, op.ctx_idx, g.wr_val[k]);
                     break;
                 }
         }

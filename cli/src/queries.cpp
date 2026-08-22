@@ -1415,13 +1415,17 @@ int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
 }
 
 int q_mem_state(const std::string& gtb, uint64_t range_base,
-                uint64_t range_len, uint64_t at_ev, bool json) {
+                uint64_t range_len, uint64_t at_ev, bool json, bool qword) {
     if (range_len == 0 || range_len > (1u << 20)) {
         fprintf(stderr, "mem-state: range length must be 1..0x100000 bytes\n");
         return 2;
     }
     if (range_base > UINT64_MAX - range_len) {
         fprintf(stderr, "mem-state: range overflows address space\n");
+        return 2;
+    }
+    if (qword && (range_len & 7)) {
+        fprintf(stderr, "mem-state: --qword range length must be a multiple of 8\n");
         return 2;
     }
     GtbFile f;
@@ -1466,6 +1470,41 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
         fprintf(stderr, "mem-state: --at-ev %llu is outside the trace\n",
                 (unsigned long long)at_ev);
         return 2;
+    }
+
+    if (qword) {
+        uint64_t count = range_len / 8;
+        for (size_t i = 0; i < bytes.size(); i += 8) {
+            bool word_known = true;
+            uint64_t val = 0;
+            for (size_t j = 0; j < 8; j++) {
+                if (!known[i + j]) word_known = false;
+                val |= uint64_t(bytes[i + j]) << (j * 8);
+            }
+            if (json) {
+                std::string o = "{";
+                emit::kv_hex(o, "addr", range_base + i);
+                o += ",\"known\":";
+                o += word_known ? "true" : "false";
+                o += ",\"val\":";
+                if (word_known) emit::esc_append(o, emit::hex64(val).c_str());
+                else o += "null";
+                o += '}';
+                printf("%s\n", o.c_str());
+            } else if (word_known) {
+                printf("0x%llx =0x%llx\n",
+                       (unsigned long long)(range_base + i),
+                       (unsigned long long)val);
+            } else {
+                printf("0x%llx =??\n",
+                       (unsigned long long)(range_base + i));
+            }
+        }
+        emit::Meta meta;
+        meta.total = count;
+        meta.shown = count;
+        emit::finish(meta, json);
+        return 0;
     }
 
     static const char kHex[] = "0123456789abcdef";
@@ -1890,6 +1929,9 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
         for (int k = 0; k < g.n_obs; k++) {
             unsigned __int128 v = g.obs[k].val;
             std::string reg = f.arena.str(g.obs[k].name_id);
+            // Imported mem_r/mem_w observations carry the accessed address,
+            // not a register value. Memory matches are emitted from mems below.
+            if (reg == "mem_r" || reg == "mem_w") continue;
             std::string ln = std::string("rd:") + reg;
             if (v <= UINT64_MAX) {
                 if (uint64_t(v) == val)

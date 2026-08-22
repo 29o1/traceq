@@ -131,6 +131,11 @@ static const char* kLogMemHistory[] = {
     "[m.so] 0xe008!0x8 ldrb w9, [x11]; x11=0x5000 mem_r=0x5000 -> x9=0xbb ",
 };
 
+static const char* kLogRepeatedReg[] = {
+    "[r.so] 0xf000!0x0 ldr x9, [x25, x9, lsl #3]; "
+        "x9=0x92 x25=0x1000 x9=0x92 mem_r=0x1490 -> x9=0x2000 ",
+};
+
 static std::string join_log(const char* const* lines, int n, const char* nl) {
     std::string s;
     for (int i = 0; i < n; i++) {
@@ -526,6 +531,12 @@ static void t_queries() {
               fvj.find("\"kind\":\"mem\",\"rw\":\"w\",\"addr\":\"0x3000\",\"size\":1") !=
                   std::string::npos,
           "find-value JSON identifies register and memory locations");
+    std::string addr_hits = cap_out([&] {
+        q_find_value(gtb, 0x2000, 20, 0, true);
+    });
+    CHECK(addr_hits.find("\"reg\":\"x4\"") != std::string::npos &&
+              addr_hits.find("\"reg\":\"mem_r\"") == std::string::npos,
+          "find-value does not expose memory address observations as registers");
     fvj = cap_out([&] {
         q_find_value(gtb, 0xca, 20, 0, true, 1, 1, true, false);
     });
@@ -657,6 +668,20 @@ static void t_queries() {
               pc.find("\"ev\":0") == std::string::npos,
           "find-pc batches PCs and applies an event range in one pass");
 
+    ImportResult repeated_result;
+    std::string repeated_gtb = tmp_path("repeated_reg.gtb");
+    CHECK(import_str(join_log(kLogRepeatedReg, 1, "\n"), repeated_gtb,
+                     repeated_result),
+          "import repeated-register fixture");
+    pc = cap_out([&] {
+        q_find_pcs(repeated_gtb, {}, {0}, "r.so", 20, 0, 0, UINT64_MAX, true);
+    });
+    const std::string x9_read = "[\"x9\",\"0x92\"]";
+    size_t x9_first = pc.find(x9_read);
+    CHECK(x9_first != std::string::npos &&
+              pc.find(x9_read, x9_first + x9_read.size()) == std::string::npos,
+          "find-pc emits one read observation per register");
+
     ImportResult pair_result;
     std::string pair_gtb = tmp_path("pair.gtb");
     CHECK(import_str(join_log(kLogPair, 2, "\n"), pair_gtb, pair_result),
@@ -713,6 +738,17 @@ static void t_queries() {
               ms.find("\"hex\":\"ffeeddccbbaa99887766554433221100\"") !=
                   std::string::npos,
           "mem-state materializes all 16 bytes of a q store");
+    ms = cap_out([&] { q_mem_state(simd_gtb, 0xc000, 16, 1, true, true); });
+    CHECK(ms.find("{\"addr\":\"0xc000\",\"known\":true,"
+                  "\"val\":\"0x8899aabbccddeeff\"}") != std::string::npos &&
+              ms.find("{\"addr\":\"0xc008\",\"known\":true,"
+                      "\"val\":\"0x11223344556677\"}") != std::string::npos &&
+              ms.find("\"total\":2,\"shown\":2") != std::string::npos,
+          "mem-state --qword emits little-endian cells and meta");
+    ms = cap_out([&] { q_mem_state(gtb, 0x3000, 8, 2, true, true); });
+    CHECK(ms.find("{\"addr\":\"0x3000\",\"known\":false,\"val\":null}") !=
+              std::string::npos,
+          "mem-state --qword marks partial cells unknown");
     pc = cap_out([&] {
         q_find_pcs(simd_gtb, {}, {4}, "s.so", 20, 0, 0, UINT64_MAX, true);
     });
