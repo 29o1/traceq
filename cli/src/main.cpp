@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 int cmd_import(int argc, char** argv);
@@ -77,8 +78,20 @@ int cmd_taint(int argc, char** argv) {
         usage_taint(stderr);
         return 2;
     }
-    return q_taint(gtb, seed_addr, seed_reg, seed_q, seed_nzcv, back, limit, window,
-                   at_ev, off, mod, json, index_deps);
+    TaintOptions options;
+    options.seed_addr = seed_addr;
+    options.seed_reg = seed_reg;
+    options.seed_q = seed_q;
+    options.seed_nzcv = seed_nzcv;
+    options.backward = back;
+    options.limit = limit;
+    options.window = window;
+    options.at_ev = at_ev;
+    options.off = off;
+    options.mod = std::move(mod);
+    options.json = json;
+    options.index_deps = index_deps;
+    return q_taint(gtb, options);
 }
 
 int cmd_diff(int argc, char** argv) {
@@ -193,9 +206,20 @@ int cmd_mem_access(int argc, char** argv) {
                         "([--limit N] [--offset M] | --last N) [--json]\n");
         return 2;
     }
-    return q_mem_accesses(gtb, addrs, use_range, range_base, range_len, limit,
-                          offset, from_ev, to_ev, last, json, writes_only,
-                          reads_only);
+    MemAccessOptions options;
+    options.addrs = std::move(addrs);
+    options.use_range = use_range;
+    options.range_base = range_base;
+    options.range_len = range_len;
+    options.limit = limit;
+    options.offset = offset;
+    options.from_ev = from_ev;
+    options.to_ev = to_ev;
+    options.last = last;
+    options.json = json;
+    options.writes_only = writes_only;
+    options.reads_only = reads_only;
+    return q_mem_accesses(gtb, options);
 }
 
 int cmd_mem_state(int argc, char** argv) {
@@ -269,7 +293,16 @@ int cmd_find_pc(int argc, char** argv) {
                         "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
         return 2;
     }
-    return q_find_pcs(gtb, addrs, offs, mod, limit, offset, from_ev, to_ev, json);
+    FindPcOptions options;
+    options.addrs = std::move(addrs);
+    options.offs = std::move(offs);
+    options.mod = std::move(mod);
+    options.limit = limit;
+    options.offset = offset;
+    options.from_ev = from_ev;
+    options.to_ev = to_ev;
+    options.json = json;
+    return q_find_pcs(gtb, options);
 }
 
 int cmd_func_args(int argc, char** argv) {
@@ -330,8 +363,16 @@ int cmd_find_value(int argc, char** argv) {
                         "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
         return 2;
     }
-    return q_find_value(gtb, val, limit, offset, json, from_ev, to_ev,
-                        reads_only, writes_only);
+    FindValueOptions options;
+    options.value = val;
+    options.limit = limit;
+    options.offset = offset;
+    options.json = json;
+    options.from_ev = from_ev;
+    options.to_ev = to_ev;
+    options.reads_only = reads_only;
+    options.writes_only = writes_only;
+    return q_find_value(gtb, options);
 }
 
 int cmd_calltree(int argc, char** argv) {
