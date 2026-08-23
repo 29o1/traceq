@@ -2,7 +2,8 @@ CXX      := clang++
 CXXFLAGS := -std=c++17 -O2 -g -Wall -Wno-unused-parameter -Iinclude
 AR       := ar
 
-LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp src/import.cpp
+LIB_SRC := src/site.cpp src/recorder.cpp src/event_decoder.cpp src/ingest.cpp \
+	src/queries.cpp src/import.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
 HEADERS := $(wildcard include/traceq/*.h) $(wildcard src/*.h)
 
