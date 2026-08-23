@@ -915,12 +915,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     return 0;
 }
 
-int q_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg, int seed_q,
-            bool seed_nzcv, bool backward, int limit, uint64_t window,
-            uint64_t at_ev, uint64_t off, const std::string& mod, bool json,
-            bool index_deps) {
-    return run_taint(gtb, seed_addr, seed_reg, seed_q, seed_nzcv, backward, limit, window,
-                     at_ev, off, mod, json, index_deps);
+int q_taint(const std::string& gtb, const TaintOptions& o) {
+    return run_taint(gtb, o.seed_addr, o.seed_reg, o.seed_q, o.seed_nzcv,
+                     o.backward, o.limit, o.window, o.at_ev, o.off, o.mod,
+                     o.json, o.index_deps);
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,11 +1293,15 @@ int q_stat(const std::string& gtb, bool json) {
     return 0;
 }
 
-int q_mem_accesses(const std::string& gtb, const std::vector<uint64_t>& addrs,
-                   bool use_range, uint64_t range_base, uint64_t range_len,
-                   int limit, uint64_t offset, uint64_t from_ev,
-                   uint64_t to_ev, int last, bool json, bool writes_only,
-                   bool reads_only) {
+int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
+    const auto& addrs = options.addrs;
+    bool use_range = options.use_range;
+    uint64_t range_base = options.range_base, range_len = options.range_len;
+    int limit = options.limit, last = options.last;
+    uint64_t offset = options.offset, from_ev = options.from_ev;
+    uint64_t to_ev = options.to_ev;
+    bool json = options.json, writes_only = options.writes_only;
+    bool reads_only = options.reads_only;
     if ((!use_range && addrs.empty()) || (use_range && range_len == 0) ||
         from_ev > to_ev || (writes_only && reads_only)) {
         fprintf(stderr, "mem-access: invalid selector or event range\n");
@@ -1609,10 +1611,14 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
     return 0;
 }
 
-int q_find_pcs(const std::string& gtb, const std::vector<uint64_t>& addrs,
-               const std::vector<uint64_t>& offs, const std::string& mod,
-               int limit, uint64_t offset, uint64_t from_ev, uint64_t to_ev,
-               bool json) {
+int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
+    const auto& addrs = options.addrs;
+    const auto& offs = options.offs;
+    const auto& mod = options.mod;
+    int limit = options.limit;
+    uint64_t offset = options.offset, from_ev = options.from_ev;
+    uint64_t to_ev = options.to_ev;
+    bool json = options.json;
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
@@ -1867,9 +1873,12 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
     return 0;
 }
 
-int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offset,
-                 bool json, uint64_t from_ev, uint64_t to_ev,
-                 bool reads_only, bool writes_only) {
+int q_find_value(const std::string& gtb, const FindValueOptions& options) {
+    uint64_t val = options.value, offset = options.offset;
+    uint64_t from_ev = options.from_ev, to_ev = options.to_ev;
+    int limit = options.limit;
+    bool json = options.json, reads_only = options.reads_only;
+    bool writes_only = options.writes_only;
     if (from_ev > to_ev || (reads_only && writes_only)) {
         fprintf(stderr, "find-value: invalid event range or access filter\n");
         return 2;
