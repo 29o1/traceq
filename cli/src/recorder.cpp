@@ -1,21 +1,16 @@
 #include <traceq/recorder.h>
 #include <traceq/common.h>
 #include <traceq/varint.h>
+#include "gtb_format.h"
 #include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 
 namespace gt {
 
-static constexpr uint32_t CHUNK_MAGIC = 0x47544348u; // "GTCH"
-static constexpr uint32_t GTB_MAGIC   = 0x47544231u; // "GTB1"
 static constexpr size_t EVENT_CHUNK_SIZE = 256 * 1024;
 
-enum : uint8_t {
-    CH_META = 1, CH_EVENTS = 2, CH_FOOTER = 3,
-    EV_EXEC = 1, EV_REGW = 2, EV_MEM = 3, EV_RET = 5, EV_MEMW_NV = 7,
-    EV_RDVAL = 8, EV_SIMDV = 9, EV_VERBATIM = 10, EV_CALL2 = 11,
-};
+using namespace format;
 
 const char* svc_name(uint64_t n) {
     switch (n) {

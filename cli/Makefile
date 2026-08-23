@@ -4,7 +4,7 @@ AR       := ar
 
 LIB_SRC := src/site.cpp src/recorder.cpp src/ingest.cpp src/queries.cpp src/import.cpp
 LIB_OBJ := $(LIB_SRC:.cpp=.o)
-HEADERS := $(wildcard include/traceq/*.h)
+HEADERS := $(wildcard include/traceq/*.h) $(wildcard src/*.h)
 
 all: gt
 
