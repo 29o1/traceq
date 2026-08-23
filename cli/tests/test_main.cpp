@@ -330,7 +330,7 @@ static void t_gumtrace() {
     Expander(f).expand_upstream(o);
     fclose(o);
     CHECK(read_file(out) == log, "JNI dialect replays byte-for-byte");
-    size_t verbatim_bytes = f.verbatim.size();
+    std::vector<uint8_t> event_snapshot = f.events;
 
     std::string fa = cap_out(
         [&] { q_func_args(gtb, "GetMethodID", 1, 5, true); });
@@ -356,8 +356,8 @@ static void t_gumtrace() {
               json_text.find("\"verbatim\":true") != std::string::npos &&
               json_text.find("{\"ev\":4,\"ret\":\"0x42\"}") !=
                   std::string::npos &&
-              f.verbatim.size() == verbatim_bytes,
-          "jsonl marks verbatim groups without growing the replay cache");
+              f.events == event_snapshot,
+          "jsonl marks verbatim groups without mutating the event buffer");
 }
 
 // ---------------------------------------------------------------------------
