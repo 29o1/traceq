@@ -1,5 +1,7 @@
 # traceq — Query ARM64 Instruction Traces
 
+[简体中文](README.zh-CN.md)
+
 traceq converts ARM64 instruction logs produced by
 [GumTrace](https://github.com/lidongyooo/GumTrace) into compact, queryable `.gtb`
 files. It answers questions about PCs, values, memory, calls, loops, run
