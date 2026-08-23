@@ -20,14 +20,8 @@ struct MemOp {
 struct GtbFile {
     SiteArena arena;
     std::vector<std::string> modules;
-    std::string path;
     // concatenated EVENTS payload (bounded by guards; loaded once)
     std::vector<uint8_t> events;
-    // verbatim line payload (EV_VERBATIM bodies), referenced by Group.
-    // mutable: the Expander appends bodies on the fly (a lazy cache of the
-    // events payload — append-only, idempotent per file) while the logical
-    // content of the file stays const.
-    mutable std::string verbatim;
     uint8_t stop_reason = 0;
     uint8_t dialect = 0;       // footer dialect byte: bit0=upstream, bit1=CRLF
     uint64_t events_seen = 0, events_recorded = 0, bytes_written = 0;
@@ -67,9 +61,11 @@ struct Group {
     };
     int n_obs = 0, n_wobs = 0;
     Obs obs[MAX_OBS], wobs[MAX_OBS];
-    // verbatim group: the raw line replays byte-for-byte
+    // Verbatim group: a non-owning view into GtbFile::events. It is valid for
+    // the duration of the callback and the lifetime of the loaded GtbFile.
     bool has_verbatim = false;
-    uint32_t verbatim_off = 0, verbatim_len = 0;
+    const char* verbatim = nullptr;
+    uint32_t verbatim_len = 0;
     // CALL2 (upstream dialect): observed argument count
     int n_call_args = -1;     // -1 = legacy CALL (always 4)
     bool is_call = false;
@@ -111,7 +107,6 @@ void reconstruct_agent_values(const SiteArena& arena, const Site& site,
 
 // Streams groups from a GtbFile, reconstructing register values (reads are
 // rebuilt from write history; sp initialized from the footer, 0 = unknown).
-// One GtbFile is served by at most one Expander at a time.
 class Expander {
 public:
     explicit Expander(const GtbFile& f) : f_(f) {}

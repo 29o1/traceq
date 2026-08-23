@@ -407,10 +407,8 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 if (pend_copy) {
                     pend_copy = false;
                     uint64_t ha = 0, hl = 0;
-                    const std::string& vb = f.verbatim;
-                    if (g.verbatim_off + g.verbatim_len <= vb.size() &&
-                        parse_hexdump_header(vb.data() + g.verbatim_off,
-                                             g.verbatim_len, ha, hl) &&
+                    if (parse_hexdump_header(g.verbatim, g.verbatim_len,
+                                             ha, hl) &&
                         ha == pend_src && hl > 0 && hl <= (1u << 20)) {
                         std::vector<uint64_t> deltas;
                         for (uint64_t a : addr_t)
@@ -564,10 +562,8 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 if (pend_copy) {
                     pend_copy = false;
                     uint64_t ha = 0, hl = 0;
-                    const std::string& vb = f.verbatim;
-                    if (g.verbatim_off + g.verbatim_len <= vb.size() &&
-                        parse_hexdump_header(vb.data() + g.verbatim_off,
-                                             g.verbatim_len, ha, hl) &&
+                    if (parse_hexdump_header(g.verbatim, g.verbatim_len,
+                                             ha, hl) &&
                         ha == pend_src && hl > 0 && hl <= (1u << 20))
                         copies[gi] = {pend_dst, pend_src, hl};
                 }
@@ -1953,13 +1949,11 @@ int q_find_value(const std::string& gtb, uint64_t val, int limit, uint64_t offse
             // aligned full-width matches are already covered by the mem_r
             // lanes the importer synthesized from the same rows.
             if (pat_n >= 2) {
-                const std::string& vb = f.verbatim;
                 uint64_t raddr = 0;
                 uint8_t bytes[16];
                 int nb = 0;
-                if (g.verbatim_off + g.verbatim_len <= vb.size() &&
-                    parse_hexdump_row(vb.data() + g.verbatim_off,
-                                      g.verbatim_len, raddr, bytes, nb))
+                if (parse_hexdump_row(g.verbatim, g.verbatim_len,
+                                      raddr, bytes, nb))
                     for (int o = 0; o + pat_n <= nb; o++)
                         if (!memcmp(bytes + o, pat, size_t(pat_n)) &&
                             !(pat_n == 8 && (o & 7) == 0)) {

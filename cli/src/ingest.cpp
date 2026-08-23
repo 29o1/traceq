@@ -1,21 +1,15 @@
 #include <traceq/ingest.h>
 #include <traceq/varint.h>
+#include "event_decoder.h"
 #include "emit.h"
+#include "gtb_format.h"
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
-#include <unordered_map>
 
 namespace gt {
 
-static constexpr uint32_t CHUNK_MAGIC = 0x47544348u;
-static constexpr uint32_t GTB_MAGIC   = 0x47544231u;
-
-// event tags (mirror recorder.cpp; importer tags 8..11 replay in for_each)
-enum : uint8_t {
-    T_EXEC = 1, T_REGW = 2, T_MEM = 3, T_CALL = 4, T_RET = 5, T_SVC = 6,
-    T_MEMW_NV = 7, T_RDVAL = 8, T_SIMDV = 9, T_VERBATIM = 10, T_CALL2 = 11,
-};
+using namespace format;
 
 // Import-only string-pool marker used to retain the upstream
 // "call jni func:" spelling while keeping the existing CALL2 event layout.
@@ -47,11 +41,11 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
         std::vector<uint8_t> payload(ch[2]);
         if (!payload.empty() && fread(payload.data(), 1, payload.size(), f) != payload.size())
             break;
-        if (ch[1] == 1) { // META
+        if (ch[1] == CH_META) {
             meta_payload = std::move(payload);
-        } else if (ch[1] == 2) { // EVENTS
+        } else if (ch[1] == CH_EVENTS) {
             events.insert(events.end(), payload.begin(), payload.end());
-        } else if (ch[1] == 3) { // FOOTER
+        } else if (ch[1] == CH_FOOTER) {
             size_t o = 0;
             auto gv = [&](uint64_t& v) {
                 size_t n = get_uvar(payload.data() + o, payload.size() - o, v);
@@ -77,139 +71,25 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
 
     if (!scan_stats) return true;
 
-    // Decode the event stream only when the caller needs detailed counters.
-    const uint8_t* p = events.data();
-    size_t len = events.size(), o = 0;
-    uint64_t last_reg[32] = {0}, last_addr = 0, last_mv[2] = {0};
-    uint64_t last_arg[8] = {0}, last_ret = 0;
-    std::unordered_map<uint32_t, uint64_t> last_obs;
-    while (o < len) {
-        uint8_t tag = p[o++];
-        if (tag == 1) { // EXEC (site id delta carries no stats of its own)
-            int64_t d;
-            size_t n = get_var(p + o, len - o, d);
-            if (!n) break;
-            o += n;
-            (void)d;
-            n_exec++;
-        } else if (tag == 2 || (tag & 0x80)) { // REGW (extended or inline)
-            if (tag & 0x80) {
-                uint8_t reg = (tag >> 3) & 15;
-                uint8_t code = tag & 7;
-                int64_t d = code == 7 ? 0 : zigzag_dec(code); // 7 never emitted
-                last_reg[reg & 31] = uint64_t(int64_t(last_reg[reg & 31]) + d);
-                n_regw++;
-            } else {
-                if (o >= len) break;
-                uint8_t reg = p[o++];
-                int64_t d;
-                size_t n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_reg[reg & 31] = uint64_t(int64_t(last_reg[reg & 31]) + d);
-                n_regw++;
+    EventCursor cursor(events);
+    RawEvent batch[64];
+    size_t count;
+    while ((count = cursor.next_batch(batch, 64)) != 0) {
+        for (size_t i = 0; i < count; i++) {
+            switch (batch[i].tag) {
+            case EV_EXEC: n_exec++; break;
+            case EV_REGW: n_regw++; break;
+            case EV_MEM:
+            case EV_MEMW_NV: n_mem++; break;
+            case EV_CALL: n_call++; break;
+            case EV_CALL2: n_call++; n_call2++; break;
+            case EV_RET: n_ret++; break;
+            case EV_SVC: n_svc++; break;
+            case EV_RDVAL: n_rdval++; break;
+            case EV_SIMDV: n_simdv++; break;
+            case EV_VERBATIM: n_verbatim++; break;
+            default: break;
             }
-        } else if (tag == 3 || tag == 7) { // MEM (with value / store-no-value)
-            if (o >= len) break;
-            uint8_t fl = p[o++];
-            // both encoders set flags bit0 = is_write (the hot path's MEMW_NV
-            // is write-only and always has it set; the importer's tag-7 mem
-            // events carry real reads with bit0 clear)
-            bool is_w = (fl & 1);
-            int64_t ad, vd = 0;
-            size_t n = get_var(p + o, len - o, ad);
-            if (!n) break;
-            o += n;
-            if (tag == 3) {
-                n = get_var(p + o, len - o, vd);
-                if (!n) break;
-                o += n;
-                last_mv[is_w ? 1 : 0] = uint64_t(int64_t(last_mv[is_w ? 1 : 0]) + vd);
-            }
-            last_addr = uint64_t(int64_t(last_addr) + ad);
-            n_mem++;
-        } else if (tag == 4) { // CALL
-            uint64_t sym;
-            size_t n = get_uvar(p + o, len - o, sym);
-            if (!n) break;
-            o += n;
-            if (sym == 0) {
-                int64_t a;
-                n = get_var(p + o, len - o, a);
-                if (!n) break;
-                o += n;
-            }
-            for (int i = 0; i < 4; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[i] = uint64_t(int64_t(last_arg[i]) + d);
-            }
-            n_call++;
-        } else if (tag == 5) { // RET
-            int64_t d;
-            size_t n = get_var(p + o, len - o, d);
-            if (!n) break;
-            o += n;
-            last_ret = uint64_t(int64_t(last_ret) + d);
-            n_ret++;
-        } else if (tag == 6) { // SVC
-            uint64_t num;
-            size_t n = get_uvar(p + o, len - o, num);
-            if (!n) break;
-            o += n;
-            for (int i = 0; i < 3; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[4 + i] = uint64_t(int64_t(last_arg[4 + i]) + d);
-            }
-            n_svc++;
-        } else if (tag == 8 || tag == 9) { // RDVAL / SIMDV (importer only)
-            uint64_t name;
-            size_t n = get_uvar(p + o, len - o, name);
-            if (!n) break;
-            o += n;
-            if (o >= len) break;
-            uint8_t kind = p[o++];
-            if (kind == 0) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_obs[uint32_t(name)] =
-                    uint64_t(int64_t(last_obs[uint32_t(name)]) + d);
-            } else if (kind == 1) {
-                if (o + 16 > len) break;
-                o += 16;
-            } else break; // corrupt
-            if (tag == 8) n_rdval++; else n_simdv++;
-        } else if (tag == 10) { // VERBATIM
-            uint64_t vl;
-            size_t n = get_uvar(p + o, len - o, vl);
-            if (!n || o + n + vl > len) break;
-            o += n + vl;
-            n_verbatim++;
-        } else if (tag == 11) { // CALL2 (importer only)
-            uint64_t sym;
-            size_t n = get_uvar(p + o, len - o, sym);
-            if (!n) break;
-            o += n;
-            if (o >= len) break;
-            uint8_t na = p[o++];
-            if (na > 8) break;
-            for (int i = 0; i < na; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[i] = uint64_t(int64_t(last_arg[i]) + d);
-            }
-            n_call++; n_call2++;
-        } else {
-            break; // corrupt
         }
     }
     return true;
@@ -220,14 +100,9 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     // source), not from any assumption about who produced the file
     memset(regs_, 0, sizeof(regs_));
     regs_[31] = f_.initial_sp;
-    const uint8_t* p = f_.events.data();
-    size_t len = f_.events.size(), o = 0;
-    std::string& verbatim = f_.verbatim;
-    verbatim.clear();
     Group g;
     uint64_t gi = 0;
     uint64_t next_source_line = 1;
-    std::unordered_map<uint32_t, uint64_t> last_obs;
     auto add_obs = [&](Group::Obs* arr, int& cnt, uint32_t name_id,
                        unsigned __int128 val) {
         if (cnt >= Group::MAX_OBS) return;
@@ -242,7 +117,7 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
             if (g.has_verbatim) {
                 g.source_line = next_source_line;
                 uint64_t lines = 0;
-                const char* vp = verbatim.data() + g.verbatim_off;
+                const char* vp = g.verbatim;
                 for (uint32_t i = 0; i < g.verbatim_len; i++)
                     if (vp[i] == '\n') lines++;
                 if (g.verbatim_len && vp[g.verbatim_len - 1] != '\n') lines++;
@@ -261,85 +136,39 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
         g = Group();
         return go;
     };
-    int64_t last_site = 0;
-    uint64_t last_reg[32] = {0}, last_addr = 0, last_mv[2] = {0};
-    uint64_t last_arg[8] = {0}, last_ret = 0;
-    while (o < len) {
-        uint8_t tag = p[o++];
-        if (tag == 1) {
+
+    auto consume_event = [&](const RawEvent& event) -> bool {
+        if (event.tag == EV_EXEC) {
             // EXEC terminates the previous group
-            if (!flush_group()) return true;
-            int64_t d;
-            size_t n = get_var(p + o, len - o, d);
-            if (!n) break;
-            o += n;
-            last_site += d;
+            if (!flush_group()) return false;
             g.has_exec = true;
-            g.site_id = uint32_t(last_site);
-        } else if (tag == 2 || (tag & 0x80)) {
-            if (tag & 0x80) {
-                uint8_t reg = (tag >> 3) & 15;
-                uint8_t code = tag & 7;
-                int64_t d = code == 7 ? 0 : zigzag_dec(code);
-                last_reg[reg & 31] = uint64_t(int64_t(last_reg[reg & 31]) + d);
-                if (g.n_wr < 8) {
-                    g.wr_id[g.n_wr] = reg;
-                    g.wr_val[g.n_wr] = last_reg[reg & 31];
-                    g.n_wr++;
-                }
-            } else {
-                uint8_t reg = p[o++];
-                int64_t d;
-                size_t n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_reg[reg & 31] = uint64_t(int64_t(last_reg[reg & 31]) + d);
-                if (g.n_wr < 8) {
-                    g.wr_id[g.n_wr] = reg;
-                    g.wr_val[g.n_wr] = last_reg[reg & 31];
-                    g.n_wr++;
-                }
+            g.site_id = event.site_id;
+        } else if (event.tag == EV_REGW) {
+            if (g.n_wr < 8) {
+                g.wr_id[g.n_wr] = event.reg;
+                g.wr_val[g.n_wr] = event.value;
+                g.n_wr++;
             }
-        } else if (tag == 3 || tag == 7) {
-            uint8_t fl = p[o++];
-            bool is_w = (fl & 1); // flags bit0 = is_write in both encoders
-            uint8_t size = uint8_t(fl >> 1);
-            int64_t ad, vd = 0;
-            size_t n = get_var(p + o, len - o, ad);
-            if (!n) break;
-            o += n;
-            if (tag == 3) {
-                n = get_var(p + o, len - o, vd);
-                if (!n) break;
-                o += n;
-                last_mv[is_w ? 1 : 0] = uint64_t(int64_t(last_mv[is_w ? 1 : 0]) + vd);
-            }
-            last_addr = uint64_t(int64_t(last_addr) + ad);
+        } else if (event.tag == EV_MEM || event.tag == EV_MEMW_NV) {
             if (g.n_mem < 2) {
-                MemOp m{is_w, last_addr, size,
-                        tag == 3 ? last_mv[is_w ? 1 : 0] : 0,
-                        tag == 3};
+                MemOp m{event.is_write, event.addr, event.size,
+                        event.value_known ? event.value : 0,
+                        event.value_known};
                 g.mem[g.n_mem++] = m;
             }
-        } else if (tag == 4) {
+        } else if (event.tag == EV_CALL || event.tag == EV_CALL2) {
             // a second call in one group would silently overwrite the first
             // (importer files can emit consecutive call lines with no EXEC
             // between them) — close the group instead
-            if (g.is_call && !flush_group()) return true;
-            uint64_t sym;
-            size_t n = get_uvar(p + o, len - o, sym);
-            if (!n) break;
-            o += n;
+            if (g.is_call && !flush_group()) return false;
             g.is_call = true;
-            if (sym == 0) {
-                int64_t a;
-                n = get_var(p + o, len - o, a);
-                if (!n) break;
-                o += n;
-                g.call_target = uint64_t(a);
+            g.n_call_args = event.tag == EV_CALL2 ? int(event.nargs) : -1;
+            if (event.symbol_plus_one == 0) {
+                g.call_target = event.target;
                 g.call_name = nullptr;
-            } else if (sym - 1 < f_.arena.strings().size()) {
-                const std::string& name = f_.arena.str(uint32_t(sym - 1));
+            } else if (event.symbol_plus_one - 1 < f_.arena.strings().size()) {
+                const std::string& name =
+                    f_.arena.str(uint32_t(event.symbol_plus_one - 1));
                 g.call_name = decoded_call_name(name, g.is_jni_call);
                 g.call_target = 0;
             } else {
@@ -348,119 +177,42 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
                 g.call_name = nullptr;
                 g.call_target = 0;
             }
-            for (int i = 0; i < 4; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[i] = uint64_t(int64_t(last_arg[i]) + d);
-                g.args[i] = last_arg[i];
-            }
-        } else if (tag == 5) {
-            int64_t d;
-            size_t n = get_var(p + o, len - o, d);
-            if (!n) break;
-            o += n;
-            last_ret = uint64_t(int64_t(last_ret) + d);
+            for (uint8_t i = 0; i < event.nargs; i++) g.args[i] = event.args[i];
+        } else if (event.tag == EV_RET) {
             g.is_ret = true;
-            g.ret_val = last_ret;
-        } else if (tag == T_SVC) {
-            uint64_t num;
-            size_t n = get_uvar(p + o, len - o, num);
-            if (!n) break;
-            o += n;
+            g.ret_val = event.value;
+        } else if (event.tag == EV_SVC) {
             g.is_svc = true;
-            g.svc_num = num;
-            for (int i = 0; i < 3; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[4 + i] = uint64_t(int64_t(last_arg[4 + i]) + d);
-                g.svc_args[i] = last_arg[4 + i];
-            }
-        } else if (tag == T_RDVAL || tag == T_SIMDV) {
+            g.svc_num = event.svc_num;
+            for (int i = 0; i < 3; i++) g.svc_args[i] = event.args[i];
+        } else if (event.tag == EV_RDVAL || event.tag == EV_SIMDV) {
             // observed value token (importer files): RDVAL extends the read
             // list, SIMDV extends the "-> " write list
-            uint64_t name;
-            size_t n = get_uvar(p + o, len - o, name);
-            if (!n) break;
-            o += n;
-            if (o >= len) break;
-            uint8_t kind = p[o++];
-            if (kind == 0) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                uint64_t v = uint64_t(int64_t(last_obs[uint32_t(name)]) + d);
-                last_obs[uint32_t(name)] = v;
-                if (tag == T_RDVAL) add_obs(g.obs, g.n_obs, uint32_t(name), v);
-                else add_obs(g.wobs, g.n_wobs, uint32_t(name), v);
-            } else if (kind == 1) {
-                if (o + 16 > len) break;
-                unsigned __int128 w;
-                memcpy(&w, p + o, 16);
-                o += 16;
-                if (tag == T_RDVAL)
-                    add_obs(g.obs, g.n_obs, uint32_t(name), w);
-                else
-                    add_obs(g.wobs, g.n_wobs, uint32_t(name), w);
-            } else break; // corrupt
-        } else if (tag == T_VERBATIM) {
-            uint64_t vl;
-            size_t n = get_uvar(p + o, len - o, vl);
-            if (!n || o + n + vl > len) break;
+            if (event.tag == EV_RDVAL)
+                add_obs(g.obs, g.n_obs, event.name_id, event.observed);
+            else
+                add_obs(g.wobs, g.n_wobs, event.name_id, event.observed);
+        } else if (event.tag == EV_VERBATIM) {
             // verbatim is ALWAYS its own group: the upstream renderer replays
             // only the raw body for such groups, so letting it ride an open
             // exec group would drop that group's line
-            if (!flush_group()) return true;
+            if (!flush_group()) return false;
             g.has_verbatim = true;
-            g.verbatim_off = uint32_t(verbatim.size());
-            g.verbatim_len = uint32_t(vl);
-            verbatim.append((const char*)p + o + n, size_t(vl));
-            if (!flush_group()) return true;
-            o += n + vl;
-        } else if (tag == T_CALL2) {
-            if (g.is_call && !flush_group()) return true; // see T_CALL
-            uint64_t sym;
-            size_t n = get_uvar(p + o, len - o, sym);
-            if (!n) break;
-            o += n;
-            if (o >= len) break;
-            uint8_t na = p[o++];
-            if (na > 8) break;
-            g.is_call = true;
-            g.n_call_args = na;
-            if (sym == 0) {
-                int64_t a;
-                n = get_var(p + o, len - o, a);
-                if (!n) break;
-                o += n;
-                g.call_target = uint64_t(a);
-                g.call_name = nullptr;
-            } else if (sym - 1 < f_.arena.strings().size()) {
-                const std::string& name = f_.arena.str(uint32_t(sym - 1));
-                g.call_name = decoded_call_name(name, g.is_jni_call);
-                g.call_target = 0;
-            } else {
-                g.call_name = nullptr; // see T_CALL
-                g.call_target = 0;
-            }
-            for (int i = 0; i < na; i++) {
-                int64_t d;
-                n = get_var(p + o, len - o, d);
-                if (!n) break;
-                o += n;
-                last_arg[i] = uint64_t(int64_t(last_arg[i]) + d);
-                g.args[i] = last_arg[i];
-            }
-        } else {
-            break;
+            g.verbatim = reinterpret_cast<const char*>(event.verbatim);
+            g.verbatim_len = event.verbatim_len;
+            if (!flush_group()) return false;
         }
+        return true;
+    };
+
+    EventCursor cursor(f_.events);
+    RawEvent batch[64];
+    size_t count;
+    while ((count = cursor.next_batch(batch, 64)) != 0) {
+        for (size_t i = 0; i < count; i++)
+            if (!consume_event(batch[i])) return true;
     }
     flush_group();
-    (void)last_mv;
     return true;
 }
 
@@ -521,7 +273,6 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
     if (stop_gi) *stop_gi = UINT64_MAX;
     const SiteArena& A = f_.arena;
     const char* pool = A.pool_ptr();
-    const std::string& vb = f_.verbatim;
     const char* nl = (f_.dialect & 2) ? "\r\n" : "\n";
     std::string line;
     uint64_t lines = 0;
@@ -545,7 +296,7 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
         }
         line.clear();
         if (g.has_verbatim) {
-            line.append(vb.data() + g.verbatim_off, g.verbatim_len);
+            line.append(g.verbatim, g.verbatim_len);
             fwrite(line.data(), 1, line.size(), out);
             lines++;
             return true; // verbatim is always its own group
