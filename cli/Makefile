@@ -1,6 +1,10 @@
-CXX      := clang++
-CXXFLAGS := -std=c++17 -O2 -g -Wall -Wno-unused-parameter -Iinclude
-AR       := ar
+CXX      ?= c++
+CPPFLAGS ?=
+CXXFLAGS ?= -std=c++17 -O2 -g -Wall -Wno-unused-parameter
+LDFLAGS  ?=
+LDLIBS   ?=
+AR       ?= ar
+INCLUDES := -Iinclude
 
 LIB_SRC := src/site.cpp src/recorder.cpp src/event_decoder.cpp src/ingest.cpp \
 	src/queries.cpp src/import.cpp
@@ -14,14 +18,14 @@ libtraceq.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
 %.o: %.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(INCLUDES) $(CXXFLAGS) -c $< -o $@
 
 gt: src/main.o libtraceq.a
-	$(CXX) $(CXXFLAGS) $< libtraceq.a -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< libtraceq.a $(LDLIBS) -o $@
 
 # correctness suite: upstream-log fixtures through the product path
 gt-test: tests/test_main.o libtraceq.a
-	$(CXX) $(CXXFLAGS) $< libtraceq.a -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< libtraceq.a $(LDLIBS) -o $@
 
 test: gt-test
 	./gt-test
