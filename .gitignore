@@ -12,6 +12,9 @@ bench/build/
 bench/reports/*
 !bench/reports/historical/
 
+# private traces retained locally; never publish captured third-party data
+bench/private/
+
 # stray top-level build dir (ad-hoc artifacts)
 build/
 
