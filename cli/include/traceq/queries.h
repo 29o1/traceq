@@ -40,6 +40,9 @@ struct MemAccessOptions {
     bool json = false;
     bool writes_only = false;
     bool reads_only = false;
+    // Explicit opt-in for selectorless write enumeration. The query accepts
+    // it only for a finite event window and with writes_only=true.
+    bool all_writes = false;
 };
 
 struct FindPcOptions {

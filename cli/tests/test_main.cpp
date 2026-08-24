@@ -107,6 +107,8 @@ static const char* kLogPair[] = {
         "w8=0xaaaa w9=0xbbbb x0=0x2000 mem_r=0x2008 -> w8=0x11 w9=0x22 ",
     "[p.so] 0x8004!0x4 stp x8, x9, [x0]; "
         "x8=0x11 x9=0x22 x0=0x3000 mem_w=0x3000 ",
+    "[p.so] 0x8008!0x8 ldr w10, [x0, #4]; "
+        "x0=0x3000 mem_r=0x3004 -> w10=0x0 ",
 };
 
 static const char* kLogSimdMem[] = {
@@ -597,6 +599,18 @@ static void t_queries() {
               mab.find("\"ev\":1") == std::string::npos &&
               mab.find("\"total\":2,\"shown\":1") != std::string::npos,
           "mem-access --last applies event bounds and returns the final hit");
+    MemAccessOptions window_writes;
+    window_writes.all_writes = true;
+    window_writes.writes_only = true;
+    window_writes.from_ev = 1;
+    window_writes.to_ev = 2;
+    window_writes.json = true;
+    mab = cap_out([&] { q_mem_accesses(gtb, window_writes); });
+    CHECK(mab.find("\"ev\":2") != std::string::npos &&
+              mab.find("\"addr\":\"0x3000\"") != std::string::npos &&
+              mab.find("\"ev\":1") == std::string::npos &&
+              mab.find("\"total\":1,\"shown\":1") != std::string::npos,
+          "mem-access lists all writes in an explicit finite event window");
 
     ImportResult history_result;
     std::string history_gtb = tmp_path("mem_history.gtb");
@@ -686,7 +700,7 @@ static void t_queries() {
 
     ImportResult pair_result;
     std::string pair_gtb = tmp_path("pair.gtb");
-    CHECK(import_str(join_log(kLogPair, 2, "\n"), pair_gtb, pair_result),
+    CHECK(import_str(join_log(kLogPair, 3, "\n"), pair_gtb, pair_result),
           "import pair load/store fixture");
     pc = cap_out([&] {
         q_find_pcs(pair_gtb, {}, {0}, "p.so", 20, 0, 0, UINT64_MAX, true);
@@ -710,6 +724,15 @@ static void t_queries() {
     });
     CHECK(ma.find(" r 0x200c =0x22 ") != std::string::npos,
           "mem-access can query the synthesized second pair lane");
+    ma = cap_out([&] {
+        q_mem_accesses(pair_gtb, {0x3004}, false, 0, 0, 20, 0, 0,
+                       UINT64_MAX, 0, true, false);
+    });
+    CHECK(ma.find("\"ev\":1") != std::string::npos &&
+              ma.find("\"addr\":\"0x3000\"") != std::string::npos &&
+              ma.find("\"ev\":2") != std::string::npos &&
+              ma.find("\"prior_write_ev\":1") != std::string::npos,
+          "mem-access matches containing accesses and links byte producers");
 
     ImportResult simd_result;
     std::string simd_gtb = tmp_path("simd_mem.gtb");

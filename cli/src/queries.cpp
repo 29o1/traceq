@@ -1314,8 +1314,12 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     uint64_t to_ev = options.to_ev;
     bool json = options.json, writes_only = options.writes_only;
     bool reads_only = options.reads_only;
-    if ((!use_range && addrs.empty()) || (use_range && range_len == 0) ||
-        from_ev > to_ev || (writes_only && reads_only)) {
+    bool all_writes = options.all_writes;
+    bool has_selector = use_range || !addrs.empty();
+    if ((!has_selector && !all_writes) ||
+        (all_writes && (has_selector || !writes_only || to_ev == UINT64_MAX)) ||
+        (use_range && range_len == 0) || from_ev > to_ev ||
+        (writes_only && reads_only)) {
         fprintf(stderr, "mem-access: invalid selector or event range\n");
         return 2;
     }
@@ -1348,7 +1352,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
             emit::kv_hex(o, "addr", r.addr);
             if (use_range) {
                 o += ',';
-                emit::kv_hex(o, "off", r.addr - range_base);
+                emit::kv_hex(o, "off", std::max(r.addr, range_base) - range_base);
             }
             o += ',';
             emit::kv_u64(o, "size", r.size);
@@ -1377,7 +1381,9 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
                 printf(" =%s", value.c_str());
             }
             if (use_range)
-                printf(" off=0x%llx", (unsigned long long)(r.addr - range_base));
+                printf(" off=0x%llx",
+                       (unsigned long long)(std::max(r.addr, range_base) -
+                                            range_base));
             printf(" size=%u", unsigned(r.size));
             if (!r.is_write) {
                 if (r.has_prior_write)
@@ -1392,8 +1398,15 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     Expander ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
+    auto selected_byte = [&](uint64_t addr) {
+        return use_range ? addr >= range_base && addr - range_base < range_len
+                         : addr_set.count(addr) != 0;
+    };
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > to_ev) return false;
+        // In selectorless mode no pre-window write history is needed: only
+        // writes inside the explicitly bounded event window are returned.
+        if (all_writes && gi < from_ev) return true;
         if (g.n_mem == 0) return true;
         mems.clear();
         if (g.has_exec)
@@ -1409,21 +1422,54 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
                                                     : mems[size_t(k)].val;
             uint8_t mem_size = mems.empty() ? g.mem[k].size
                                             : mems[size_t(k)].size;
-            bool hit = use_range ? (mem_addr >= range_base &&
-                                    mem_addr - range_base < range_len)
-                                 : addr_set.count(mem_addr) != 0;
+            uint64_t width = mem_size ? mem_size : 1;
+            bool hit = all_writes ||
+                       (use_range
+                            ? (mem_addr >= range_base
+                                   ? mem_addr - range_base < range_len
+                                   : range_base - mem_addr < width)
+                            : std::any_of(addrs.begin(), addrs.end(),
+                                          [&](uint64_t addr) {
+                                              return addr >= mem_addr &&
+                                                     addr - mem_addr < width;
+                                          }));
             if (!hit) continue;
+            bool has_prior = false;
+            uint64_t prior_write_ev = 0;
+            if (!all_writes) {
+                for (uint64_t lane = 0; lane < width; lane++) {
+                    if (lane > UINT64_MAX - mem_addr) break;
+                    uint64_t addr = mem_addr + lane;
+                    if (!selected_byte(addr)) continue;
+                    auto prior = last_write.find(addr);
+                    if (prior != last_write.end() &&
+                        (!has_prior || prior->second > prior_write_ev)) {
+                        has_prior = true;
+                        prior_write_ev = prior->second;
+                    }
+                }
+            }
             if (gi < from_ev) {
-                if (is_write) last_write[mem_addr] = gi;
+                if (is_write) {
+                    for (uint64_t lane = 0; lane < width; lane++) {
+                        if (lane > UINT64_MAX - mem_addr) break;
+                        uint64_t addr = mem_addr + lane;
+                        if (selected_byte(addr)) last_write[addr] = gi;
+                    }
+                }
                 continue;
             }
-            auto prior = last_write.find(mem_addr);
-            if (is_write) last_write[mem_addr] = gi;
+            if (is_write && !all_writes) {
+                for (uint64_t lane = 0; lane < width; lane++) {
+                    if (lane > UINT64_MAX - mem_addr) break;
+                    uint64_t addr = mem_addr + lane;
+                    if (selected_byte(addr)) last_write[addr] = gi;
+                }
+            }
             if ((writes_only && !is_write) || (reads_only && is_write)) continue;
             Row row{gi, g.source_line, mem_addr, value, g.site_id, mem_size,
-                    is_write, value_known, g.has_exec,
-                    prior != last_write.end(),
-                    prior != last_write.end() ? prior->second : 0};
+                    is_write, value_known, g.has_exec, has_prior,
+                    prior_write_ev};
             uint64_t row_index = total++;
             if (last > 0) {
                 if (tail.size() == size_t(last)) tail.pop_front();
@@ -1455,7 +1501,8 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
             for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
         if (reads_only) next += " --read";
         if (writes_only) next += " --write";
-        if (from_ev) next += " --from " + std::to_string(from_ev);
+        if (all_writes || from_ev)
+            next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
         if (limit > 0) next += " --limit " + std::to_string(limit);
         next += " --offset " + std::to_string(offset + shown);

@@ -161,12 +161,17 @@ int cmd_mem_access(int argc, char** argv) {
     int limit = 20, last = 0;
     bool use_range = false, json = false, writes_only = false, reads_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
+    bool have_from = false, have_to = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
             printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
                    "[--read | --write] [--from E] [--to E] "
-                   "([--limit N] [--offset M] | --last N) [--json]\n");
+                   "([--limit N] [--offset M] | --last N) [--json]\n"
+                   "       gt mem-access trace.gtb --write --from E --to E "
+                   "([--limit N] [--offset M] | --last N) [--json]\n"
+                   "  the selectorless form lists writes only inside an explicit "
+                   "finite event window\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--addr"))
@@ -180,8 +185,14 @@ int cmd_mem_access(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
-        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 0);
-        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 0);
+        else if (!strcmp(argv[i], "--from")) {
+            from_ev = strtoull(next(), nullptr, 0);
+            have_from = true;
+        }
+        else if (!strcmp(argv[i], "--to")) {
+            to_ev = strtoull(next(), nullptr, 0);
+            have_to = true;
+        }
         else if (!strcmp(argv[i], "--limit")) {
             limit = atoi(next());
             have_limit = true;
@@ -198,17 +209,23 @@ int cmd_mem_access(int argc, char** argv) {
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("mem-access", argv[i]);
     }
-    if (gtb.empty() || addrs.empty() == !use_range || from_ev > to_ev ||
+    bool all_writes = addrs.empty() && !use_range && writes_only &&
+                      have_from && have_to;
+    if (gtb.empty() || (!all_writes && addrs.empty() == !use_range) ||
+        from_ev > to_ev ||
         (reads_only && writes_only) ||
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
         fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
                         "[--read | --write] [--from E] [--to E] "
+                        "([--limit N] [--offset M] | --last N) [--json]\n"
+                        "       gt mem-access trace.gtb --write --from E --to E "
                         "([--limit N] [--offset M] | --last N) [--json]\n");
         return 2;
     }
     MemAccessOptions options;
     options.addrs = std::move(addrs);
     options.use_range = use_range;
+    options.all_writes = all_writes;
     options.range_base = range_base;
     options.range_len = range_len;
     options.limit = limit;
