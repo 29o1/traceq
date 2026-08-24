@@ -59,11 +59,12 @@ gt --help
 | Inspect trace statistics | `gt stat trace.gtb` |
 | Export an event window | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
 | Find executed PCs | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] trace.gtb` |
-| Find runtime values | `gt find-value V [--read\|--write] [--from E --to E] trace.gtb` |
+| Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E]` |
 | Find memory accesses | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
-| Reconstruct known memory | `gt mem-state --range B,L --at-ev E [--qword] trace.gtb` |
-| Inspect call arguments | `gt func-args --func F [--nth N] [--limit L] trace.gtb` |
-| Rebuild a call tree | `gt calltree --func F --depth D trace.gtb` |
+| List writes in a finite window | `gt mem-access trace.gtb --write --from E --to E --limit N` |
+| Reconstruct known memory | `gt mem-state --range B,L... --at-ev E... [--qword] trace.gtb` |
+| Inspect call arguments | `gt func-args --func F... [--nth N] [--limit L] trace.gtb` |
+| Rebuild a call tree | `gt calltree [--func F] --depth D trace.gtb` |
 | Run forward/backward taint | `gt taint (--seed-addr A\|--seed-reg R\|--seed-q Q\|--seed-nzcv) [--back] trace.gtb` |
 | Compare two executions | `gt diff a.gtb b.gtb` |
 | Detect repeated loops | `gt fold --top N trace.gtb` |
@@ -71,6 +72,15 @@ gt --help
 Every subcommand supports `--help`. `gt` intentionally has no `record`
 subcommand: GumTrace captures live execution, then `gt import` brings the log
 into the query pipeline.
+
+Repeat `find-value --value` or `func-args --func` to inspect several candidates
+in one scan; `find-value` applies `--limit` and `--offset` per value. For
+`mem-state`, repeat `--range` and/or `--at-ev`; traceq emits their Cartesian
+product from one scan. The single-selector record shape remains unchanged.
+`mem-state --at E` and `call-tree` are accepted compatibility aliases. Omit
+`calltree --func` to inspect the bounded global call forest first. When the
+address is not yet known, selectorless `mem-access` is deliberately restricted
+to writes inside an explicit `--from`/`--to` event window.
 
 ## Agent Output Contract
 
@@ -95,8 +105,9 @@ Useful structured fields:
 
 - `find-value` returns `kind/rw/reg` or `kind/rw/addr/size`, so callers do not
   need to parse a textual lane description.
-- `mem-access` reports access width; reads also include `prior_write_ev` for
-  the same address when one was observed.
+- `mem-access` matches accesses that contain a selected address or overlap a
+  selected range. It reports access width; reads also include the most recent
+  overlapping `prior_write_ev` when one was observed.
 - `mem-state --qword` emits 8-byte little-endian cells; unknown values are
   `null`.
 - `diff` distinguishes execution indices from the real event indices on each
@@ -128,10 +139,11 @@ counts, the stop reason, and input dialect. Imported LF and CRLF logs can be
 reproduced byte-for-byte with `gt export --format upstream`. Unknown input forms
 become `VERBATIM` events instead of being silently discarded.
 
-Queries load the `.gtb` event buffer and scan it sequentially. There is no
-database ingestion or index-building step. In the intended agent workflow,
-query time is normally much smaller than one model-reasoning turn, while an
-index would add build time, storage, and dependencies.
+Queries load the `.gtb` event buffer and scan it sequentially. Repeatable
+selectors share that scan, avoiding repeated 100MB+ file loads without adding
+a database or index-building step. In the intended agent workflow, query time
+is normally much smaller than one model-reasoning turn, while an index would
+add build time, storage, and dependencies.
 
 ## Testing
 
