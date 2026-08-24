@@ -52,17 +52,25 @@ gt --help
 | 查看概况 | `gt stat trace.gtb` |
 | 导出窗口 | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
 | 查执行位置 | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] trace.gtb` |
-| 查运行时值 | `gt find-value V [--read\|--write] [--from E --to E] trace.gtb` |
+| 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E]` |
 | 查内存访问 | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
-| 重建已知内存 | `gt mem-state --range B,L --at-ev E [--qword] trace.gtb` |
-| 查调用参数 | `gt func-args --func F [--nth N] [--limit L] trace.gtb` |
-| 重建调用树 | `gt calltree --func F --depth D trace.gtb` |
+| 枚举有限窗口内的写入 | `gt mem-access trace.gtb --write --from E --to E --limit N` |
+| 重建已知内存 | `gt mem-state --range B,L... --at-ev E... [--qword] trace.gtb` |
+| 查调用参数 | `gt func-args --func F... [--nth N] [--limit L] trace.gtb` |
+| 重建调用树 | `gt calltree [--func F] --depth D trace.gtb` |
 | 正向/反向污点 | `gt taint (--seed-addr A\|--seed-reg R\|--seed-q Q\|--seed-nzcv) [--back] trace.gtb` |
 | 比较两次执行 | `gt diff a.gtb b.gtb` |
 | 检测循环 | `gt fold --top N trace.gtb` |
 
 每个子命令都支持 `--help`。`gt` 没有 `record` 子命令：实时 trace 始终由
 GumTrace 产生，再通过 `gt import` 进入查询链路。
+
+重复传 `find-value --value` 或 `func-args --func` 可在一次扫描中查询多个候选；
+`find-value` 的 `--limit` 和 `--offset` 按值分别生效。`mem-state` 可重复传
+`--range` 和/或 `--at-ev`，一次扫描输出两组 selector 的笛卡尔积；单 selector
+记录结构保持兼容。同时兼容 `mem-state --at E` 与 `call-tree` 别名。省略
+`calltree --func` 时会先输出有界的全局调用森林。地址未知时，无 selector 的
+`mem-access` 被刻意限制为显式 `--from`/`--to` 事件窗口内的写入。
 
 ## Agent 输出契约
 
@@ -82,7 +90,8 @@ GumTrace 产生，再通过 `gt import` 进入查询链路。
 常用结构化字段：
 
 - `find-value` 返回 `kind/rw/reg` 或 `kind/rw/addr/size`，无需再解析文本 lane。
-- `mem-access` 返回访问宽度；读事件还会给出同地址的 `prior_write_ev`。
+- `mem-access` 会匹配覆盖指定地址或与指定范围重叠的访问，并返回访问宽度；读事件还会
+  给出最近一次重叠写入的 `prior_write_ev`。
 - `mem-state --qword` 以 8 字节小端单元输出，未知值为 `null`。
 - `diff` 区分执行序号和两侧真实事件号；`fold` 同时返回执行范围与事件范围。
 - `taint` 明确报告 `partial`、种子、边、最终寄存器和内存地址集合。
@@ -109,8 +118,9 @@ footer 记录计数、停止原因和输入方言，导入的 LF/CRLF 日志都�
 `gt export --format upstream` 逐字节还原。未知输入形态进入 `VERBATIM`，不会被
 静默丢弃。
 
-所有查询直接加载 `.gtb` event buffer 并顺序扫描，没有入库或索引步骤。对 Agent
-工作流而言，查询延迟通常远低于一轮模型推理；索引会额外引入构建时间、存储和依赖。
+所有查询直接加载 `.gtb` event buffer 并顺序扫描；可重复 selector 共用同一次扫描，
+避免反复加载 100MB 以上的文件，同时不引入数据库或索引步骤。对 Agent 工作流而言，
+查询延迟通常远低于一轮模型推理；索引会额外引入构建时间、存储和依赖。
 
 ## 测试
 
