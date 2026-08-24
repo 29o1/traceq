@@ -32,6 +32,19 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
     uint32_t hdr[2];
     if (fread(hdr, 4, 2, f) != 2 || hdr[0] != GTB_MAGIC) { fclose(f); return false; }
 
+    // CH_EVENTS payloads occupy no more bytes than the file itself. Reserve
+    // that upper bound once so repeated chunk appends do not briefly retain
+    // both the old and newly grown event buffers on large traces.
+    long chunk_start = ftell(f);
+    if (chunk_start >= 0 && fseek(f, 0, SEEK_END) == 0) {
+        long file_size = ftell(f);
+        if (file_size > 0) events.reserve(size_t(file_size));
+        if (fseek(f, chunk_start, SEEK_SET) != 0) {
+            fclose(f);
+            return false;
+        }
+    }
+
     std::vector<uint8_t> meta_payload;
     bool footer_seen = false;
     while (!footer_seen) {

@@ -933,20 +933,31 @@ int q_taint(const std::string& gtb, const TaintOptions& o) {
 // ---------------------------------------------------------------------------
 int q_diff(const std::string& a_p, const std::string& b_p, int context, bool json) {
     GtbFile a, b;
-    if (!a.load(a_p, false) || !b.load(b_p, false)) {
+    if (!a.load(a_p, false)) {
         fprintf(stderr, "load failed\n");
         return 1;
     }
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> sa, sb;
+    sa.reserve(size_t(std::min<uint64_t>(a.events_seen, a.events.size())));
     Expander(a).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sa.push_back({g.site_id, ev});
         return true;
     });
+    // The comparison only needs A's arena and compact execution sequence from
+    // this point onward. Release its large event payload before loading B so
+    // diff does not hold two full traces plus both derived sequences at once.
+    std::vector<uint8_t>().swap(a.events);
+    if (!b.load(b_p, false)) {
+        fprintf(stderr, "load failed\n");
+        return 1;
+    }
+    sb.reserve(size_t(std::min<uint64_t>(b.events_seen, b.events.size())));
     Expander(b).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sb.push_back({g.site_id, ev});
         return true;
     });
+    std::vector<uint8_t>().swap(b.events);
     auto key = [](const GtbFile& f, uint32_t site, std::string& mod_out, uint64_t& off_out) {
         const Site& s = f.arena.get(site);
         mod_out = s.module_id < f.arena.modules().size()
@@ -1070,6 +1081,7 @@ int q_fold(const std::string& gtb, int top, bool json) {
     if (!f.load(gtb, false)) return 1;
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> s;
+    s.reserve(size_t(std::min<uint64_t>(f.events_seen, f.events.size())));
     Expander(f).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) s.push_back({g.site_id, ev});
         return true;
