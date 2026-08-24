@@ -801,6 +801,14 @@ static void t_queries() {
     CHECK(fa.find("\"ret\":\"0x0\"") != std::string::npos &&
               fa.find("\"ret_ev\":6") != std::string::npos,
           "func-args pairs the matching return event and value");
+    FuncArgsOptions fao;
+    fao.funcs = {"memcpy", "nosuch", "memcpy"};
+    fao.limit = 5;
+    fao.json = true;
+    fa = cap_out([&] { q_func_args(gtb, fao); });
+    CHECK(fa.find("\"func\":\"memcpy\"") != std::string::npos &&
+              fa.find("\"total\":1,\"shown\":1") != std::string::npos,
+          "func-args batches and deduplicates function selectors");
 
     ImportResult call8_result;
     std::string call8_gtb = tmp_path("call8.gtb");

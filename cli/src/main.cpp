@@ -331,29 +331,37 @@ int cmd_find_pc(int argc, char** argv) {
 }
 
 int cmd_func_args(int argc, char** argv) {
-    std::string gtb, func;
+    std::string gtb;
+    std::vector<std::string> funcs;
     int nth = 1, limit = 1;
     bool json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt func-args --func NAME [--nth N] [--limit L] "
-                   "trace.gtb [--json]\n");
+            printf("usage: gt func-args --func NAME... [--nth N] [--limit L] "
+                   "trace.gtb [--json]\n"
+                   "  repeat --func to query several symbols in one trace pass; "
+                   "--nth/--limit apply per function\n");
             return 0;
         }
-        else if (!strcmp(argv[i], "--func")) func = next();
+        else if (!strcmp(argv[i], "--func")) funcs.emplace_back(next());
         else if (!strcmp(argv[i], "--nth")) nth = atoi(next());
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("func-args", argv[i]);
     }
-    if (gtb.empty() || func.empty()) {
-        fprintf(stderr, "usage: gt func-args --func NAME [--nth N] [--limit L] "
+    if (gtb.empty() || funcs.empty()) {
+        fprintf(stderr, "usage: gt func-args --func NAME... [--nth N] [--limit L] "
                         "trace.gtb [--json]\n");
         return 2;
     }
-    return q_func_args(gtb, func, nth, limit, json);
+    FuncArgsOptions options;
+    options.funcs = std::move(funcs);
+    options.nth = nth;
+    options.limit = limit;
+    options.json = json;
+    return q_func_args(gtb, options);
 }
 
 int cmd_find_value(int argc, char** argv) {

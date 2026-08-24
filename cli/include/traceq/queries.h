@@ -79,6 +79,13 @@ struct MemStateOptions {
     bool qword = false;
 };
 
+struct FuncArgsOptions {
+    std::vector<std::string> funcs;
+    int nth = 1;
+    int limit = 1;
+    bool json = false;
+};
+
 // All implemented in queries.cpp. Option objects keep call sites explicit as
 // the query surface grows; compatibility overloads remain below for existing
 // libtraceq callers.
@@ -98,6 +105,7 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
                 bool qword = false);
 int q_find_pcs(const std::string& gtb, const FindPcOptions& options);
 // nth (1-based) selects the first call to show, limit the row count
+int q_func_args(const std::string& gtb, const FuncArgsOptions& options);
 int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
                 bool json = false);
 int q_find_value(const std::string& gtb, const FindValueOptions& options);

@@ -1877,14 +1877,31 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     return 0;
 }
 
-// function call sites directly on a gtb: streams the CALL events whose symbol
-// matches --func and prints the arguments (x0..x7) of the --nth (1-based)
-// call onward. A call-stack walk pairs each shown call with its return value.
-int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
-                bool json) {
+// Function call sites directly on a gtb. Repeated selectors share one stream
+// walk; --nth/--limit apply independently to every function. A call-stack walk
+// pairs each shown call with its return value.
+int q_func_args(const std::string& gtb, const FuncArgsOptions& options) {
+    if (options.funcs.empty()) {
+        fprintf(stderr, "func-args: at least one --func is required\n");
+        return 2;
+    }
+    std::vector<std::string> funcs;
+    std::unordered_map<std::string, size_t> selector;
+    for (const auto& func : options.funcs) {
+        if (func.empty() || selector.count(func)) continue;
+        selector.emplace(func, funcs.size());
+        funcs.push_back(func);
+    }
+    if (funcs.empty()) {
+        fprintf(stderr, "func-args: function names must not be empty\n");
+        return 2;
+    }
+
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     struct Row {
+        size_t func_i;
+        uint64_t n;
         uint64_t ev, line;
         std::string at;
         uint64_t target;
@@ -1895,17 +1912,22 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
     };
     std::vector<Row> rows;
     std::vector<int64_t> stack;
-    uint64_t total = 0;
-    size_t base = nth > 1 ? size_t(nth - 1) : 0; // --nth 1-based; --nth 0/negative = from the top
-    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    std::vector<uint64_t> totals(funcs.size(), 0);
+    std::vector<uint64_t> shown_per_func(funcs.size(), 0);
+    size_t base = options.nth > 1 ? size_t(options.nth - 1) : 0;
+    uint64_t lim = options.limit > 0 ? uint64_t(options.limit) : UINT64_MAX;
     Expander(f).for_each([&](uint64_t gi, const Group& g) {
         if (g.is_call) {
             int64_t selected = -1;
             const char* name = g.call_name;
-            if (name && strcmp(name, func.c_str()) == 0) {
-                uint64_t call_index = total++;
-                if (call_index >= base && rows.size() < lim) {
+            auto match = name ? selector.find(name) : selector.end();
+            if (match != selector.end()) {
+                size_t func_i = match->second;
+                uint64_t call_index = totals[func_i]++;
+                if (call_index >= base && shown_per_func[func_i] < lim) {
                     Row r{};
+                    r.func_i = func_i;
+                    r.n = call_index + 1;
                     r.ev = gi;
                     r.line = g.call_source_line ? g.call_source_line : g.source_line;
                     r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
@@ -1914,6 +1936,7 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
                     if (r.nargs > 8) r.nargs = 8;
                     for (int i = 0; i < 8; i++) r.x[i] = g.args[i];
                     rows.push_back(r);
+                    shown_per_func[func_i]++;
                     selected = int64_t(rows.size() - 1);
                 }
             }
@@ -1933,11 +1956,16 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
         return true;
     });
     uint64_t shown = 0;
-    if (json) {
+    bool batched = funcs.size() > 1;
+    if (options.json) {
         for (size_t i = 0; i < rows.size(); i++, shown++) {
             const Row& r = rows[i];
             std::string o = "{";
-            emit::kv_u64(o, "n", base + i + 1);
+            if (batched) {
+                emit::kv_str(o, "func", funcs[r.func_i]);
+                o += ',';
+            }
+            emit::kv_u64(o, "n", r.n);
             o += ',';
             emit::kv_u64(o, "ev", r.ev);
             if (r.line) {
@@ -1970,10 +1998,14 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
             printf("%s\n", o.c_str());
         }
     } else {
-        printf("calls to %s: %llu total\n", func.c_str(), (unsigned long long)total);
+        for (size_t i = 0; i < funcs.size(); i++)
+            printf("calls to %s: %llu total\n", funcs[i].c_str(),
+                   (unsigned long long)totals[i]);
         for (size_t i = 0; i < rows.size(); i++, shown++) {
             const Row& r = rows[i];
-            printf("  #%-8llu ev=%-8llu", (unsigned long long)(base + i + 1),
+            if (batched) printf("  %-20s ", funcs[r.func_i].c_str());
+            else printf("  ");
+            printf("#%-8llu ev=%-8llu", (unsigned long long)r.n,
                    (unsigned long long)r.ev);
             if (r.line) printf(" line=%-8llu", (unsigned long long)r.line);
             for (int k = 0; k < r.nargs; k++)
@@ -1986,21 +2018,35 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth, int li
             }
             printf("  %s\n", r.at.c_str());
         }
-        if (total == 0) printf("  (no call to %s in %s)\n", func.c_str(), gtb.c_str());
+        if (!batched && totals[0] == 0)
+            printf("  (no call to %s in %s)\n", funcs[0].c_str(), gtb.c_str());
     }
     emit::Meta meta;
-    meta.total = total;
+    for (uint64_t total : totals) meta.total += total;
     meta.shown = shown;
-    meta.truncated = base + shown < total;
+    for (size_t i = 0; i < funcs.size(); i++)
+        if (base + shown_per_func[i] < totals[i]) meta.truncated = true;
     if (meta.truncated) {
-        char b[320];
-        snprintf(b, sizeof b, "gt func-args --func %s --nth %llu --limit %llu %s%s",
-                 func.c_str(), (unsigned long long)(base + shown + 1),
-                 (unsigned long long)lim, gtb.c_str(), json ? " --json" : "");
-        meta.next = b;
+        std::string next = "gt func-args";
+        for (const auto& func : funcs) next += " --func " + func;
+        next += " --nth " + std::to_string(base + lim + 1);
+        next += " --limit " + std::to_string(lim);
+        next += ' ' + gtb;
+        if (options.json) next += " --json";
+        meta.next = std::move(next);
     }
-    emit::finish(meta, json);
+    emit::finish(meta, options.json);
     return 0;
+}
+
+int q_func_args(const std::string& gtb, const std::string& func, int nth,
+                int limit, bool json) {
+    FuncArgsOptions options;
+    options.funcs.push_back(func);
+    options.nth = nth;
+    options.limit = limit;
+    options.json = json;
+    return q_func_args(gtb, options);
 }
 
 int q_find_value(const std::string& gtb, const FindValueOptions& options) {
