@@ -57,6 +57,7 @@ struct FindPcOptions {
 };
 
 struct FindValueOptions {
+    // `value` remains the single-selector compatibility field.
     uint64_t value = 0;
     int limit = 20;
     uint64_t offset = 0;
@@ -65,6 +66,8 @@ struct FindValueOptions {
     uint64_t to_ev = UINT64_MAX;
     bool reads_only = false;
     bool writes_only = false;
+    // When non-empty, `values` replaces `value`; duplicates are removed.
+    std::vector<uint64_t> values;
 };
 
 struct MemStateRange {

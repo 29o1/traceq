@@ -2050,7 +2050,15 @@ int q_func_args(const std::string& gtb, const std::string& func, int nth,
 }
 
 int q_find_value(const std::string& gtb, const FindValueOptions& options) {
-    uint64_t val = options.value, offset = options.offset;
+    std::vector<uint64_t> values;
+    std::unordered_set<uint64_t> seen_values;
+    const std::vector<uint64_t> requested = options.values.empty()
+                                                ? std::vector<uint64_t>{options.value}
+                                                : options.values;
+    for (uint64_t value : requested)
+        if (seen_values.insert(value).second) values.push_back(value);
+
+    uint64_t offset = options.offset;
     uint64_t from_ev = options.from_ev, to_ev = options.to_ev;
     int limit = options.limit;
     bool json = options.json, reads_only = options.reads_only;
@@ -2061,28 +2069,34 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     }
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
-    uint64_t total = 0, shown = 0;
+    std::unordered_map<uint64_t, size_t> value_index;
+    for (size_t i = 0; i < values.size(); i++) value_index.emplace(values[i], i);
+    std::vector<uint64_t> totals(values.size(), 0);
+    std::vector<uint64_t> shown_per_value(values.size(), 0);
+    uint64_t shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     // dump-payload scan pattern: minimal-width LE bytes of val. Values that
     // only ever exist as memory bytes (protobuf payloads inside memcpy dumps)
     // have no register/obs lane; the verbatim hexdump rows are the only place
     // they appear. Width < 2 is too noisy for a byte-substring search.
-    uint8_t pat[8];
-    int pat_n = 0;
-    {
-        uint64_t v = val;
+    struct Pattern { uint8_t bytes[8]; int n = 0; };
+    std::vector<Pattern> patterns(values.size());
+    for (size_t i = 0; i < values.size(); i++) {
+        uint64_t v = values[i];
         do {
-            pat[pat_n++] = uint8_t(v & 0xff);
+            patterns[i].bytes[patterns[i].n++] = uint8_t(v & 0xff);
             v >>= 8;
-        } while (v && pat_n < 8);
+        } while (v && patterns[i].n < 8);
     }
-    auto row = [&](uint64_t gi, const std::string& lane, const char* kind,
-                   char rw, const std::string& reg, uint64_t addr,
-                   uint8_t size, const Group& g) {
+    auto row = [&](size_t value_i, uint64_t gi, const std::string& lane,
+                   const char* kind, char rw, const std::string& reg,
+                   uint64_t addr, uint8_t size, const Group& g) {
         if ((reads_only && rw != 'r') || (writes_only && rw != 'w')) return;
-        if (total++ < offset) return;
-        if (shown >= lim) return;
+        uint64_t row_index = totals[value_i]++;
+        if (row_index < offset || shown_per_value[value_i] >= lim) return;
+        shown_per_value[value_i]++;
         shown++;
+        uint64_t val = values[value_i];
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", gi);
@@ -2133,33 +2147,36 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
             // hexdump rows: byte-exact content search at any offset. Qword-
             // aligned full-width matches are already covered by the mem_r
             // lanes the importer synthesized from the same rows.
-            if (pat_n >= 2) {
-                uint64_t raddr = 0;
-                uint8_t bytes[16];
-                int nb = 0;
-                if (parse_hexdump_row(g.verbatim, g.verbatim_len,
-                                      raddr, bytes, nb))
-                    for (int o = 0; o + pat_n <= nb; o++)
-                        if (!memcmp(bytes + o, pat, size_t(pat_n)) &&
-                            !(pat_n == 8 && (o & 7) == 0)) {
+            uint64_t raddr = 0;
+            uint8_t bytes[16];
+            int nb = 0;
+            if (parse_hexdump_row(g.verbatim, g.verbatim_len, raddr, bytes, nb)) {
+                for (size_t value_i = 0; value_i < patterns.size(); value_i++) {
+                    const Pattern& pat = patterns[value_i];
+                    if (pat.n < 2) continue;
+                    for (int o = 0; o + pat.n <= nb; o++)
+                        if (!memcmp(bytes + o, pat.bytes, size_t(pat.n)) &&
+                            !(pat.n == 8 && (o & 7) == 0)) {
                             char lb[48];
                             snprintf(lb, sizeof lb, "dump:0x%llx",
-                                     (unsigned long long)(raddr +
-                                                          uint64_t(o)));
-                            row(gi, lb, "dump", 0, "", raddr + uint64_t(o),
-                                uint8_t(pat_n), g);
+                                     (unsigned long long)(raddr + uint64_t(o)));
+                            row(value_i, gi, lb, "dump", 0, "",
+                                raddr + uint64_t(o), uint8_t(pat.n), g);
                         }
+                }
             }
             // fall through: verbatim groups may carry synthesized mem lanes
         }
         // imported files dual-record writes (REGW + wobs token) — the wr:
         // lanes below already cover them, so skip the bare lane to avoid
         // counting one logical write twice
-        for (int k = 0; k < g.n_wr; k++)
-            if (g.n_wobs == 0 && g.wr_val[k] == val) {
+        for (int k = 0; k < g.n_wr; k++) {
+            auto match = value_index.find(g.wr_val[k]);
+            if (g.n_wobs == 0 && match != value_index.end()) {
                 std::string reg = taint_reg_name(g.wr_id[k] & 31, rb);
-                row(gi, reg, "reg", 'w', reg, 0, 0, g);
+                row(match->second, gi, reg, "reg", 'w', reg, 0, 0, g);
             }
+        }
         for (int k = 0; k < g.n_obs; k++) {
             unsigned __int128 v = g.obs[k].val;
             std::string reg = f.arena.str(g.obs[k].name_id);
@@ -2168,14 +2185,20 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
             if (reg == "mem_r" || reg == "mem_w") continue;
             std::string ln = std::string("rd:") + reg;
             if (v <= UINT64_MAX) {
-                if (uint64_t(v) == val)
-                    row(gi, ln, "reg", 'r', reg, 0, 0, g);
+                auto match = value_index.find(uint64_t(v));
+                if (match != value_index.end())
+                    row(match->second, gi, ln, "reg", 'r', reg, 0, 0, g);
             } else {
                 // 128-bit SIMD observation: match either 64-bit lane exactly
-                if (uint64_t(v) == val)
-                    row(gi, ln + ".lo", "reg", 'r', reg + ".lo", 0, 0, g);
-                else if (uint64_t(v >> 64) == val)
-                    row(gi, ln + ".hi", "reg", 'r', reg + ".hi", 0, 0, g);
+                auto low = value_index.find(uint64_t(v));
+                if (low != value_index.end())
+                    row(low->second, gi, ln + ".lo", "reg", 'r', reg + ".lo",
+                        0, 0, g);
+                auto high = value_index.find(uint64_t(v >> 64));
+                if (high != value_index.end() &&
+                    (low == value_index.end() || high->second != low->second))
+                    row(high->second, gi, ln + ".hi", "reg", 'r', reg + ".hi",
+                        0, 0, g);
             }
         }
         for (int k = 0; k < g.n_wobs; k++) {
@@ -2183,13 +2206,19 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
             std::string reg = f.arena.str(g.wobs[k].name_id);
             std::string ln = std::string("wr:") + reg;
             if (v <= UINT64_MAX) {
-                if (uint64_t(v) == val)
-                    row(gi, ln, "reg", 'w', reg, 0, 0, g);
+                auto match = value_index.find(uint64_t(v));
+                if (match != value_index.end())
+                    row(match->second, gi, ln, "reg", 'w', reg, 0, 0, g);
             } else {
-                if (uint64_t(v) == val)
-                    row(gi, ln + ".lo", "reg", 'w', reg + ".lo", 0, 0, g);
-                else if (uint64_t(v >> 64) == val)
-                    row(gi, ln + ".hi", "reg", 'w', reg + ".hi", 0, 0, g);
+                auto low = value_index.find(uint64_t(v));
+                if (low != value_index.end())
+                    row(low->second, gi, ln + ".lo", "reg", 'w', reg + ".lo",
+                        0, 0, g);
+                auto high = value_index.find(uint64_t(v >> 64));
+                if (high != value_index.end() &&
+                    (low == value_index.end() || high->second != low->second))
+                    row(high->second, gi, ln + ".hi", "reg", 'w', reg + ".hi",
+                        0, 0, g);
             }
         }
         mems.clear();
@@ -2202,31 +2231,41 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
                                       : mems[size_t(k)].known;
             unsigned __int128 mem_val = mems.empty() ? g.mem[k].value
                                                       : mems[size_t(k)].val;
-            if (!known || mem_val != val) continue;
+            if (!known || mem_val > UINT64_MAX) continue;
+            auto match = value_index.find(uint64_t(mem_val));
+            if (match == value_index.end()) continue;
             bool is_write = mems.empty() ? g.mem[k].is_write
                                          : mems[size_t(k)].is_w;
             uint64_t addr = mems.empty() ? g.mem[k].addr
                                          : mems[size_t(k)].addr;
             uint8_t size = mems.empty() ? g.mem[k].size
                                         : mems[size_t(k)].size;
-            row(gi, is_write ? "mem_w" : "mem_r", "mem",
+            row(match->second, gi, is_write ? "mem_w" : "mem_r", "mem",
                 is_write ? 'w' : 'r', "", addr, size, g);
         }
         return true;
     });
     emit::Meta meta;
-    meta.total = total;
+    for (uint64_t total : totals) meta.total += total;
     meta.shown = shown;
-    meta.truncated = offset + shown < total;
+    for (size_t i = 0; i < values.size(); i++) {
+        uint64_t available = totals[i] > offset ? totals[i] - offset : 0;
+        if (shown_per_value[i] < available) meta.truncated = true;
+    }
     if (meta.truncated) {
-        std::string next = "gt find-value " + emit::hex64(val);
+        bool batched = values.size() > 1;
+        std::string next = batched ? "gt find-value " + gtb
+                                   : "gt find-value " + emit::hex64(values[0]);
+        if (batched)
+            for (uint64_t value : values)
+                next += " --value " + emit::hex64(value);
         if (reads_only) next += " --read";
         if (writes_only) next += " --write";
         if (from_ev) next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
         if (limit > 0) next += " --limit " + std::to_string(limit);
-        next += " --offset " + std::to_string(offset + shown);
-        next += ' ' + gtb;
+        next += " --offset " + std::to_string(offset + uint64_t(limit));
+        if (!batched) next += ' ' + gtb;
         if (json) next += " --json";
         meta.next = std::move(next);
     }

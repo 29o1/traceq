@@ -366,15 +366,25 @@ int cmd_func_args(int argc, char** argv) {
 
 int cmd_find_value(int argc, char** argv) {
     std::string gtb;
-    uint64_t val = 0, offset = 0, from_ev = 0, to_ev = UINT64_MAX;
+    std::vector<std::string> positional;
+    std::vector<uint64_t> values;
+    uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
     int limit = 20;
-    bool have_val = false, json = false, reads_only = false, writes_only = false;
+    bool value_option = false, json = false;
+    bool reads_only = false, writes_only = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
             printf("usage: gt find-value V trace.gtb [--read | --write] "
-                   "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
+                   "[--from E] [--to E] [--limit N] [--offset M] [--json]\n"
+                   "       gt find-value trace.gtb --value V... [same options]\n"
+                   "  repeat --value to search multiple values in one trace pass; "
+                   "--limit and --offset apply per value\n");
             return 0;
+        }
+        else if (!strcmp(argv[i], "--value")) {
+            values.push_back(strtoull(next(), nullptr, 0));
+            value_option = true;
         }
         else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
@@ -383,21 +393,25 @@ int cmd_find_value(int argc, char** argv) {
         else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
         else if (!strcmp(argv[i], "--offset")) offset = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--json")) json = true;
-        else if (argv[i][0] != '-') {
-            // fixed positional order: value first, then the gtb path
-            if (!have_val) { val = strtoull(argv[i], nullptr, 0); have_val = true; }
-            else if (gtb.empty()) gtb = argv[i];
-        }
+        else if (argv[i][0] != '-') positional.emplace_back(argv[i]);
         else return unknown_option("find-value", argv[i]);
     }
-    if (gtb.empty() || !have_val || from_ev > to_ev ||
+    if (value_option && positional.size() == 1) {
+        gtb = std::move(positional[0]);
+    } else if (!value_option && positional.size() == 2) {
+        values.push_back(strtoull(positional[0].c_str(), nullptr, 0));
+        gtb = std::move(positional[1]);
+    }
+    if (gtb.empty() || values.empty() || from_ev > to_ev ||
         (reads_only && writes_only)) {
-        fprintf(stderr, "usage: gt find-value V trace.gtb [--read | --write] "
-                        "[--from E] [--to E] [--limit N] [--offset M] [--json]\n");
+        fprintf(stderr,
+                "usage: gt find-value V trace.gtb [--read | --write] "
+                "[--from E] [--to E] [--limit N] [--offset M] [--json]\n"
+                "       gt find-value trace.gtb --value V... [same options]\n");
         return 2;
     }
     FindValueOptions options;
-    options.value = val;
+    options.values = std::move(values);
     options.limit = limit;
     options.offset = offset;
     options.json = json;

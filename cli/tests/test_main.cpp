@@ -541,6 +541,21 @@ static void t_queries() {
     CHECK(addr_hits.find("\"reg\":\"x4\"") != std::string::npos &&
               addr_hits.find("\"reg\":\"mem_r\"") == std::string::npos,
           "find-value does not expose memory address observations as registers");
+    FindValueOptions batched_values;
+    batched_values.values = {0xca, 0x2000, 0xca};
+    batched_values.json = true;
+    std::string fvb = cap_out([&] { q_find_value(gtb, batched_values); });
+    CHECK(fvb.find("\"val\":\"0xca\"") != std::string::npos &&
+              fvb.find("\"val\":\"0x2000\"") != std::string::npos &&
+              fvb.find("\"total\":5,\"shown\":5") != std::string::npos,
+          "find-value batches and deduplicates values in one scan");
+    batched_values.limit = 1;
+    fvb = cap_out([&] { q_find_value(gtb, batched_values); });
+    std::string fv_next = "gt find-value " + gtb +
+                          " --value 0xca --value 0x2000 --limit 1 --offset 1";
+    CHECK(fvb.find("\"total\":5,\"shown\":2") != std::string::npos &&
+              fvb.find(fv_next) != std::string::npos,
+          "find-value pagination applies independently to each value");
     fvj = cap_out([&] {
         q_find_value(gtb, 0xca, 20, 0, true, 1, 1, true, false);
     });
