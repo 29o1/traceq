@@ -429,8 +429,10 @@ int cmd_calltree(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt calltree --func NAME [--depth D] [--limit N] "
-                   "trace.gtb [--json]\n");
+            printf("usage: gt calltree [--func NAME] [--depth D] [--limit N] "
+                   "trace.gtb [--json]\n"
+                   "  omit --func to print the bounded call forest from the "
+                   "trace root\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--func")) func = next();
@@ -440,8 +442,8 @@ int cmd_calltree(int argc, char** argv) {
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("calltree", argv[i]);
     }
-    if (gtb.empty() || func.empty()) {
-        fprintf(stderr, "usage: gt calltree --func NAME [--depth D] [--limit N] "
+    if (gtb.empty()) {
+        fprintf(stderr, "usage: gt calltree [--func NAME] [--depth D] [--limit N] "
                         "trace.gtb [--json]\n");
         return 2;
     }
@@ -497,7 +499,8 @@ int main(int argc, char** argv) {
     if (cmd == "find-pc") return cmd_find_pc(argc - 1, argv + 1);
     if (cmd == "find-value") return cmd_find_value(argc - 1, argv + 1);
     if (cmd == "func-args") return cmd_func_args(argc - 1, argv + 1);
-    if (cmd == "calltree") return cmd_calltree(argc - 1, argv + 1);
+    if (cmd == "calltree" || cmd == "call-tree")
+        return cmd_calltree(argc - 1, argv + 1);
     fprintf(stderr, "gt: unknown command %s\n", cmd.c_str());
     usage();
     return 2;

@@ -2277,7 +2277,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
 // pushes, is_ret pops — call first within a group: imported files carry both
 // in one group). Every call named --func opens a capture window that prints
 // descendant calls (2-space indent per level, --depth levels deep) until the
-// matched frame returns.
+// matched frame returns. An empty selector emits the bounded global forest.
 int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json) {
     GtbFile f;
@@ -2287,6 +2287,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     size_t base = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     uint64_t shown = 0, would_print = 0, matches = 0;
+    bool global = func.empty();
     auto emit_line = [&](uint64_t gi, int lvl, const Group& g, const char* name) {
         if (shown < lim) {
             shown++;
@@ -2340,7 +2341,10 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                 name = tgt;
             }
             size_t d = stack.size();
-            if (capturing) {
+            if (global) {
+                if (d <= size_t(depth < 0 ? 0 : depth))
+                    emit_line(gi, int(d), g, name);
+            } else if (capturing) {
                 if (d - base <= size_t(depth < 0 ? 0 : depth))
                     emit_line(gi, int(d - base), g, name);
             } else if (func == name) {
@@ -2357,7 +2361,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
         }
         return true;
     });
-    if (!capturing && matches == 0) {
+    if (!global && !capturing && matches == 0) {
         // func never called: say so plainly instead of printing nothing
         if (!json) printf("no call to %s in %s\n", func.c_str(), gtb.c_str());
     }
@@ -2366,10 +2370,13 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     meta.shown = shown;
     meta.truncated = would_print > shown;
     if (meta.truncated) {
-        char b[256];
-        snprintf(b, sizeof b, "gt calltree --func %s --depth %d --limit %d %s",
-                 func.c_str(), depth, limit * 5, gtb.c_str());
-        meta.next = b;
+        std::string next = "gt calltree";
+        if (!global) next += " --func " + func;
+        next += " --depth " + std::to_string(depth);
+        next += " --limit " + std::to_string(limit * 5);
+        next += ' ' + gtb;
+        if (json) next += " --json";
+        meta.next = std::move(next);
     }
     emit::finish(meta, json);
     return 0;

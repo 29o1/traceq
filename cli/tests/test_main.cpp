@@ -842,6 +842,9 @@ static void t_queries() {
         [&] { q_calltree_gtb(gtb, "memcpy", 3, 40, false); });
     CHECK(ct.find("memcpy(x0=0x3000, x1=0x2000)") != std::string::npos,
           "calltree prints the matched call with args");
+    ct = cap_out([&] { q_calltree_gtb(gtb, "", 3, 40, false); });
+    CHECK(ct.find("memcpy(x0=0x3000, x1=0x2000)") != std::string::npos,
+          "calltree prints a bounded global forest without --func");
 
     // export windows + cursor, driven at the Expander level
     GtbFile f;
