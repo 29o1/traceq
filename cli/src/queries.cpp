@@ -1514,160 +1514,231 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     return 0;
 }
 
-int q_mem_state(const std::string& gtb, uint64_t range_base,
-                uint64_t range_len, uint64_t at_ev, bool json, bool qword) {
-    if (range_len == 0 || range_len > (1u << 20)) {
-        fprintf(stderr, "mem-state: range length must be 1..0x100000 bytes\n");
+int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
+    if (options.ranges.empty() || options.at_evs.empty()) {
+        fprintf(stderr, "mem-state: at least one range and event are required\n");
         return 2;
     }
-    if (range_base > UINT64_MAX - range_len) {
-        fprintf(stderr, "mem-state: range overflows address space\n");
-        return 2;
+
+    std::vector<MemStateRange> ranges;
+    for (const auto& range : options.ranges) {
+        if (range.len == 0 || range.len > (1u << 20)) {
+            fprintf(stderr, "mem-state: range length must be 1..0x100000 bytes\n");
+            return 2;
+        }
+        if (range.base > UINT64_MAX - range.len) {
+            fprintf(stderr, "mem-state: range overflows address space\n");
+            return 2;
+        }
+        if (options.qword && (range.len & 7)) {
+            fprintf(stderr,
+                    "mem-state: --qword range length must be a multiple of 8\n");
+            return 2;
+        }
+        auto duplicate = std::find_if(
+            ranges.begin(), ranges.end(), [&](const MemStateRange& old) {
+                return old.base == range.base && old.len == range.len;
+            });
+        if (duplicate == ranges.end()) ranges.push_back(range);
     }
-    if (qword && (range_len & 7)) {
-        fprintf(stderr, "mem-state: --qword range length must be a multiple of 8\n");
-        return 2;
-    }
+    std::vector<uint64_t> at_evs = options.at_evs;
+    std::sort(at_evs.begin(), at_evs.end());
+    at_evs.erase(std::unique(at_evs.begin(), at_evs.end()), at_evs.end());
+
     GtbFile f;
     if (!f.load(gtb, false)) {
         fprintf(stderr, "load failed: %s\n", gtb.c_str());
         return 1;
     }
 
-    std::vector<uint8_t> bytes(size_t(range_len), 0);
-    std::vector<uint8_t> known(size_t(range_len), 0);
-    uint64_t last_ev = 0;
+    struct State {
+        MemStateRange range;
+        std::vector<uint8_t> bytes;
+        std::vector<uint8_t> known;
+    };
+    std::vector<State> states;
+    states.reserve(ranges.size());
+    for (const auto& range : ranges)
+        states.push_back({range, std::vector<uint8_t>(size_t(range.len), 0),
+                          std::vector<uint8_t>(size_t(range.len), 0)});
+
+    bool batched = states.size() > 1 || at_evs.size() > 1;
+    uint64_t shown = 0;
+    auto emit_state = [&](const State& state, uint64_t at_ev) {
+        uint64_t range_base = state.range.base;
+        uint64_t range_len = state.range.len;
+        const auto& bytes = state.bytes;
+        const auto& known = state.known;
+        if (options.qword) {
+            if (batched && !options.json)
+                printf("mem-state base=0x%llx len=0x%llx at-ev=%llu\n",
+                       (unsigned long long)range_base,
+                       (unsigned long long)range_len,
+                       (unsigned long long)at_ev);
+            for (size_t i = 0; i < bytes.size(); i += 8) {
+                bool word_known = true;
+                uint64_t val = 0;
+                for (size_t j = 0; j < 8; j++) {
+                    if (!known[i + j]) word_known = false;
+                    val |= uint64_t(bytes[i + j]) << (j * 8);
+                }
+                if (options.json) {
+                    std::string o = "{";
+                    if (batched) {
+                        emit::kv_u64(o, "at_ev", at_ev);
+                        o += ',';
+                        emit::kv_hex(o, "base", range_base);
+                        o += ',';
+                    }
+                    emit::kv_hex(o, "addr", range_base + i);
+                    o += ",\"known\":";
+                    o += word_known ? "true" : "false";
+                    o += ",\"val\":";
+                    if (word_known) emit::esc_append(o, emit::hex64(val).c_str());
+                    else o += "null";
+                    o += '}';
+                    printf("%s\n", o.c_str());
+                } else if (word_known) {
+                    printf("0x%llx =0x%llx\n",
+                           (unsigned long long)(range_base + i),
+                           (unsigned long long)val);
+                } else {
+                    printf("0x%llx =??\n",
+                           (unsigned long long)(range_base + i));
+                }
+                shown++;
+            }
+            return;
+        }
+
+        static const char kHex[] = "0123456789abcdef";
+        std::string hex;
+        hex.reserve(size_t(range_len) * 2);
+        uint64_t known_count = 0;
+        for (size_t i = 0; i < bytes.size(); i++) {
+            if (!known[i]) {
+                hex += "??";
+                continue;
+            }
+            known_count++;
+            hex.push_back(kHex[bytes[i] >> 4]);
+            hex.push_back(kHex[bytes[i] & 15]);
+        }
+
+        if (options.json) {
+            std::string o = "{\"mem_state\":{";
+            emit::kv_hex(o, "base", range_base);
+            o += ',';
+            emit::kv_u64(o, "len", range_len);
+            o += ',';
+            emit::kv_u64(o, "at_ev", at_ev);
+            o += ',';
+            emit::kv_u64(o, "known", known_count);
+            o += ',';
+            emit::kv_str(o, "hex", hex);
+            o += ",\"unknown\":[";
+            bool first = true;
+            for (size_t i = 0; i < known.size();) {
+                if (known[i]) {
+                    i++;
+                    continue;
+                }
+                size_t j = i + 1;
+                while (j < known.size() && !known[j]) j++;
+                if (!first) o += ',';
+                first = false;
+                o += '{';
+                emit::kv_hex(o, "addr", range_base + i);
+                o += ',';
+                emit::kv_u64(o, "len", j - i);
+                o += '}';
+                i = j;
+            }
+            o += "]}}";
+            printf("%s\n", o.c_str());
+        } else {
+            printf("mem-state base=0x%llx len=0x%llx at-ev=%llu known=%llu/%llu\n",
+                   (unsigned long long)range_base,
+                   (unsigned long long)range_len,
+                   (unsigned long long)at_ev,
+                   (unsigned long long)known_count,
+                   (unsigned long long)range_len);
+            for (size_t i = 0; i < known.size(); i += 16) {
+                printf("  0x%llx:", (unsigned long long)(range_base + i));
+                size_t end = std::min(i + 16, known.size());
+                for (size_t j = i; j < end; j++) {
+                    if (known[j]) printf(" %02x", bytes[j]);
+                    else printf(" ??");
+                }
+                putchar('\n');
+            }
+        }
+        shown++;
+    };
+
     bool saw_event = false;
+    size_t next_at = 0;
     Expander ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
-        if (gi > at_ev) return false;
+        if (gi > at_evs.back()) return false;
         saw_event = true;
-        last_ev = gi;
-        if (!g.has_exec || g.n_mem == 0) return true;
-        mems.clear();
-        reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
-                                 ex.regfile(), mems);
-        for (const auto& m : mems) {
-            uint64_t width = m.size ? m.size : 8;
-            if (m.addr >= range_base + range_len ||
-                m.addr > UINT64_MAX - width || m.addr + width <= range_base)
-                continue;
-            uint64_t lo = std::max(m.addr, range_base);
-            uint64_t hi = std::min(m.addr + width, range_base + range_len);
-            for (uint64_t a = lo; a < hi; a++) {
-                size_t out_i = size_t(a - range_base);
-                uint64_t lane_i = a - m.addr;
-                if (m.known && lane_i < sizeof(m.val)) {
-                    bytes[out_i] = uint8_t(m.val >> (lane_i * 8));
-                    known[out_i] = 1;
-                } else if (m.is_w) {
-                    // An unknown write invalidates an older observation.
-                    known[out_i] = 0;
+        if (g.has_exec && g.n_mem != 0) {
+            mems.clear();
+            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
+                                     ex.regfile(), mems);
+            for (const auto& m : mems) {
+                uint64_t width = m.size ? m.size : 8;
+                if (m.addr > UINT64_MAX - width) continue;
+                uint64_t mem_end = m.addr + width;
+                for (auto& state : states) {
+                    uint64_t range_base = state.range.base;
+                    uint64_t range_end = range_base + state.range.len;
+                    if (m.addr >= range_end || mem_end <= range_base) continue;
+                    uint64_t lo = std::max(m.addr, range_base);
+                    uint64_t hi = std::min(mem_end, range_end);
+                    for (uint64_t a = lo; a < hi; a++) {
+                        size_t out_i = size_t(a - range_base);
+                        uint64_t lane_i = a - m.addr;
+                        if (m.known && lane_i < sizeof(m.val)) {
+                            state.bytes[out_i] = uint8_t(m.val >> (lane_i * 8));
+                            state.known[out_i] = 1;
+                        } else if (m.is_w) {
+                            // An unknown write invalidates an older observation.
+                            state.known[out_i] = 0;
+                        }
+                    }
                 }
             }
         }
+        if (next_at < at_evs.size() && gi == at_evs[next_at]) {
+            for (const auto& state : states) emit_state(state, gi);
+            next_at++;
+        }
         return true;
     });
-    if (!saw_event || last_ev < at_ev) {
+    if (!saw_event || next_at != at_evs.size()) {
+        uint64_t missing = next_at < at_evs.size() ? at_evs[next_at] : 0;
         fprintf(stderr, "mem-state: --at-ev %llu is outside the trace\n",
-                (unsigned long long)at_ev);
+                (unsigned long long)missing);
         return 2;
     }
-
-    if (qword) {
-        uint64_t count = range_len / 8;
-        for (size_t i = 0; i < bytes.size(); i += 8) {
-            bool word_known = true;
-            uint64_t val = 0;
-            for (size_t j = 0; j < 8; j++) {
-                if (!known[i + j]) word_known = false;
-                val |= uint64_t(bytes[i + j]) << (j * 8);
-            }
-            if (json) {
-                std::string o = "{";
-                emit::kv_hex(o, "addr", range_base + i);
-                o += ",\"known\":";
-                o += word_known ? "true" : "false";
-                o += ",\"val\":";
-                if (word_known) emit::esc_append(o, emit::hex64(val).c_str());
-                else o += "null";
-                o += '}';
-                printf("%s\n", o.c_str());
-            } else if (word_known) {
-                printf("0x%llx =0x%llx\n",
-                       (unsigned long long)(range_base + i),
-                       (unsigned long long)val);
-            } else {
-                printf("0x%llx =??\n",
-                       (unsigned long long)(range_base + i));
-            }
-        }
-        emit::Meta meta;
-        meta.total = count;
-        meta.shown = count;
-        emit::finish(meta, json);
-        return 0;
-    }
-
-    static const char kHex[] = "0123456789abcdef";
-    std::string hex;
-    hex.reserve(size_t(range_len) * 2);
-    uint64_t known_count = 0;
-    for (size_t i = 0; i < bytes.size(); i++) {
-        if (!known[i]) { hex += "??"; continue; }
-        known_count++;
-        hex.push_back(kHex[bytes[i] >> 4]);
-        hex.push_back(kHex[bytes[i] & 15]);
-    }
-
-    if (json) {
-        std::string o = "{\"mem_state\":{";
-        emit::kv_hex(o, "base", range_base);
-        o += ',';
-        emit::kv_u64(o, "len", range_len);
-        o += ',';
-        emit::kv_u64(o, "at_ev", at_ev);
-        o += ',';
-        emit::kv_u64(o, "known", known_count);
-        o += ',';
-        emit::kv_str(o, "hex", hex);
-        o += ",\"unknown\":[";
-        bool first = true;
-        for (size_t i = 0; i < known.size();) {
-            if (known[i]) { i++; continue; }
-            size_t j = i + 1;
-            while (j < known.size() && !known[j]) j++;
-            if (!first) o += ',';
-            first = false;
-            o += '{';
-            emit::kv_hex(o, "addr", range_base + i);
-            o += ',';
-            emit::kv_u64(o, "len", j - i);
-            o += '}';
-            i = j;
-        }
-        o += "]}}";
-        printf("%s\n", o.c_str());
-    } else {
-        printf("mem-state base=0x%llx len=0x%llx at-ev=%llu known=%llu/%llu\n",
-               (unsigned long long)range_base, (unsigned long long)range_len,
-               (unsigned long long)at_ev, (unsigned long long)known_count,
-               (unsigned long long)range_len);
-        for (size_t i = 0; i < known.size(); i += 16) {
-            printf("  0x%llx:", (unsigned long long)(range_base + i));
-            size_t end = std::min(i + 16, known.size());
-            for (size_t j = i; j < end; j++) {
-                if (known[j]) printf(" %02x", bytes[j]);
-                else printf(" ??");
-            }
-            putchar('\n');
-        }
-    }
     emit::Meta meta;
-    emit::finish(meta, json);
+    meta.total = shown;
+    meta.shown = shown;
+    emit::finish(meta, options.json);
     return 0;
+}
+
+int q_mem_state(const std::string& gtb, uint64_t range_base,
+                uint64_t range_len, uint64_t at_ev, bool json, bool qword) {
+    MemStateOptions options;
+    options.ranges.push_back({range_base, range_len});
+    options.at_evs.push_back(at_ev);
+    options.json = json;
+    options.qword = qword;
+    return q_mem_states(gtb, options);
 }
 
 int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {

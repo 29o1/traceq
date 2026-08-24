@@ -658,6 +658,17 @@ static void t_queries() {
     CHECK(ms.find("\"known\":1") != std::string::npos &&
               ms.find("\"hex\":\"ca??????\"") != std::string::npos,
           "mem-state reconstructs known bytes and marks gaps honestly");
+    MemStateOptions mso;
+    mso.ranges = {{0x3000, 4}, {0x2000, 1}};
+    mso.at_evs = {1, 2};
+    mso.json = true;
+    ms = cap_out([&] { q_mem_states(gtb, mso); });
+    CHECK(ms.find("\"base\":\"0x3000\",\"len\":4,\"at_ev\":1") !=
+                  std::string::npos &&
+              ms.find("\"base\":\"0x2000\",\"len\":1,\"at_ev\":2") !=
+                  std::string::npos &&
+              ms.find("\"total\":4,\"shown\":4") != std::string::npos,
+          "mem-state batches ranges and event snapshots in one pass");
 
     std::string pc = cap_out([&] {
         q_find_pcs(gtb, {}, {0x8}, "libc.so", 20, 0, 0, UINT64_MAX, true);

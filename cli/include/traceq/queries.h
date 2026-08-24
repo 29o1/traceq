@@ -67,6 +67,18 @@ struct FindValueOptions {
     bool writes_only = false;
 };
 
+struct MemStateRange {
+    uint64_t base = 0;
+    uint64_t len = 0;
+};
+
+struct MemStateOptions {
+    std::vector<MemStateRange> ranges;
+    std::vector<uint64_t> at_evs;
+    bool json = false;
+    bool qword = false;
+};
+
 // All implemented in queries.cpp. Option objects keep call sites explicit as
 // the query surface grows; compatibility overloads remain below for existing
 // libtraceq callers.
@@ -80,6 +92,7 @@ int q_diff(const std::string& a_gtb, const std::string& b_gtb, int context,
 int q_fold(const std::string& gtb, int top, bool json = false);
 int q_stat(const std::string& gtb, bool json = false);
 int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options);
+int q_mem_states(const std::string& gtb, const MemStateOptions& options);
 int q_mem_state(const std::string& gtb, uint64_t range_base,
                 uint64_t range_len, uint64_t at_ev, bool json = false,
                 bool qword = false);

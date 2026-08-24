@@ -241,40 +241,48 @@ int cmd_mem_access(int argc, char** argv) {
 
 int cmd_mem_state(int argc, char** argv) {
     std::string gtb;
-    uint64_t range_base = 0, range_len = 0, at_ev = 0;
-    bool have_range = false, have_ev = false, json = false, qword = false;
+    std::vector<MemStateRange> ranges;
+    std::vector<uint64_t> at_evs;
+    bool json = false, qword = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-state trace.gtb --range B,L --at-ev N "
+            printf("usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
                    "[--qword] [--json]\n"
+                   "  repeat --range and/or --at-ev to reconstruct their Cartesian "
+                   "product in one trace pass\n"
                    "  reconstruct known bytes from observed reads/writes up to event N; "
                    "unknown bytes print as ??\n"
                    "  --qword emits 8-byte little-endian cells from the range base\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--range")) {
-            if (!parse_range(next(), range_base, range_len)) {
+            uint64_t base = 0, len = 0;
+            if (!parse_range(next(), base, len)) {
                 fprintf(stderr, "mem-state: --range B,L (hex or dec)\n");
                 return 2;
             }
-            have_range = true;
+            ranges.push_back({base, len});
         }
-        else if (!strcmp(argv[i], "--at-ev")) {
-            at_ev = strtoull(next(), nullptr, 10);
-            have_ev = true;
+        else if (!strcmp(argv[i], "--at-ev") || !strcmp(argv[i], "--at")) {
+            at_evs.push_back(strtoull(next(), nullptr, 10));
         }
         else if (!strcmp(argv[i], "--qword")) qword = true;
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("mem-state", argv[i]);
     }
-    if (gtb.empty() || !have_range || !have_ev) {
-        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L --at-ev N "
+    if (gtb.empty() || ranges.empty() || at_evs.empty()) {
+        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
                         "[--qword] [--json]\n");
         return 2;
     }
-    return q_mem_state(gtb, range_base, range_len, at_ev, json, qword);
+    MemStateOptions options;
+    options.ranges = std::move(ranges);
+    options.at_evs = std::move(at_evs);
+    options.json = json;
+    options.qword = qword;
+    return q_mem_states(gtb, options);
 }
 
 int cmd_find_pc(int argc, char** argv) {
