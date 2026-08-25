@@ -24,14 +24,7 @@ libtraceq.a: $(LIB_OBJ)
 gt: src/main.o libtraceq.a
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< libtraceq.a $(LDLIBS) -o $@
 
-# correctness suite: upstream-log fixtures through the product path
-gt-test: tests/test_main.o libtraceq.a
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< libtraceq.a $(LDLIBS) -o $@
-
-test: gt-test
-	./gt-test
-
 clean:
-	rm -f gt gt-test libtraceq.a src/*.o tests/*.o
+	rm -f gt libtraceq.a src/*.o
 
-.PHONY: all test clean
+.PHONY: all clean

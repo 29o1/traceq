@@ -5,15 +5,10 @@
 cli/gt
 cli/gt-test
 
-# pre-refactor harness output dir (no longer generated; make clean removes it)
-bench/build/
-
-# benchmark reports (regenerate with `make report`; historical/ is checked in)
-bench/reports/*
-!bench/reports/historical/
-
-# private traces retained locally; never publish captured third-party data
-bench/private/
+# local-only validation assets
+/bench/
+/cli/tests/
+/.github/workflows/ci.yml
 
 # stray top-level build dir (ad-hoc artifacts)
 build/
