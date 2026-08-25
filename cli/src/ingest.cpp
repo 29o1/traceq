@@ -12,7 +12,7 @@ namespace gt {
 using namespace format;
 
 // Import-only string-pool marker used to retain the upstream
-// "call jni func:" spelling while keeping the existing CALL2 event layout.
+// "call jni func:" spelling without a separate event tag.
 static constexpr char JNI_CALL_SYM_PREFIX[] = "\x1fJNI:";
 static constexpr size_t JNI_CALL_SYM_PREFIX_LEN = sizeof(JNI_CALL_SYM_PREFIX) - 1;
 
@@ -65,21 +65,24 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
                 if (n) o += n;
                 return n != 0;
             };
-            if (!payload.empty()) stop_reason = payload[o++];
+            if (payload.empty()) break;
+            stop_reason = payload[o++];
             uint64_t v;
-            gv(v); events_seen = v;
-            gv(v); events_recorded = v;
-            gv(v); bytes_written = v;
-            // initial_sp is a later addition: absent in older files, which is
-            // why it is read defensively rather than assumed present
-            if (gv(v)) initial_sp = v;
-            if (o < payload.size()) dialect = payload[o++]; // absent = native
+            if (!gv(v)) break;
+            events_seen = v;
+            if (!gv(v)) break;
+            events_recorded = v;
+            if (!gv(v)) break;
+            bytes_written = v;
+            if (o >= payload.size()) break;
+            crlf = payload[o++] != 0;
             footer_seen = true;
         }
     }
     fclose(f);
     if (meta_payload.empty()) return false;
-    if (!SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena, modules))
+    if (!footer_seen ||
+        !SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena))
         return false;
 
     if (!scan_stats) return true;
@@ -95,9 +98,7 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
             case EV_MEM:
             case EV_MEMW_NV: n_mem++; break;
             case EV_CALL: n_call++; break;
-            case EV_CALL2: n_call++; n_call2++; break;
             case EV_RET: n_ret++; break;
-            case EV_SVC: n_svc++; break;
             case EV_RDVAL: n_rdval++; break;
             case EV_SIMDV: n_simdv++; break;
             case EV_VERBATIM: n_verbatim++; break;
@@ -109,12 +110,8 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
 }
 
 bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
-    // sp comes from the trace itself (recorded in the footer by the event
-    // source), not from any assumption about who produced the file
     memset(regs_, 0, sizeof(regs_));
     memset(known_, 0, sizeof(known_));
-    regs_[31] = f_.initial_sp;
-    known_[31] = f_.initial_sp != 0;
     Group g;
     uint64_t gi = 0;
     uint64_t next_source_line = 1;
@@ -141,9 +138,9 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
         }
     };
     auto flush_group = [&]() -> bool {
-        if (!g.has_exec && !g.is_call && !g.is_svc && !g.is_ret && !g.has_verbatim)
+        if (!g.has_exec && !g.is_call && !g.is_ret && !g.has_verbatim)
             return true;
-        if (f_.dialect & 1) {
+        {
             if (g.has_verbatim) {
                 g.source_line = next_source_line;
                 uint64_t lines = 0;
@@ -199,35 +196,23 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
                         event.value_known};
                 g.mem[g.n_mem++] = m;
             }
-        } else if (event.tag == EV_CALL || event.tag == EV_CALL2) {
+        } else if (event.tag == EV_CALL) {
             // a second call in one group would silently overwrite the first
             // (importer files can emit consecutive call lines with no EXEC
             // between them) — close the group instead
             if (g.is_call && !flush_group()) return false;
             g.is_call = true;
-            g.n_call_args = event.tag == EV_CALL2 ? int(event.nargs) : -1;
-            if (event.symbol_plus_one == 0) {
-                g.call_target = event.target;
-                g.call_name = nullptr;
-            } else if (event.symbol_plus_one - 1 < f_.arena.strings().size()) {
-                const std::string& name =
-                    f_.arena.str(uint32_t(event.symbol_plus_one - 1));
+            g.n_call_args = event.nargs;
+            if (event.symbol_id < f_.arena.strings().size()) {
+                const std::string& name = f_.arena.str(event.symbol_id);
                 g.call_name = decoded_call_name(name, g.is_jni_call);
-                g.call_target = 0;
             } else {
-                // crash-truncated file: symbol interned after the surviving
-                // META was written — degrade to a numeric target
-                g.call_name = nullptr;
-                g.call_target = 0;
+                return false;
             }
             for (uint8_t i = 0; i < event.nargs; i++) g.args[i] = event.args[i];
         } else if (event.tag == EV_RET) {
             g.is_ret = true;
             g.ret_val = event.value;
-        } else if (event.tag == EV_SVC) {
-            g.is_svc = true;
-            g.svc_num = event.svc_num;
-            for (int i = 0; i < 3; i++) g.svc_args[i] = event.args[i];
         } else if (event.tag == EV_RDVAL || event.tag == EV_SIMDV) {
             // observed value token (importer files): RDVAL extends the read
             // list, SIMDV extends the "-> " write list
@@ -270,7 +255,7 @@ const char* agent_reg_name(int ctx_idx) {
 }
 
 static int call_arg_count(const Group& g) {
-    return g.n_call_args >= 0 ? g.n_call_args : 4;
+    return g.n_call_args;
 }
 
 // plan reads (pre-event values) and writes (matched against the group's
@@ -320,7 +305,7 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
     if (stop_gi) *stop_gi = UINT64_MAX;
     const SiteArena& A = f_.arena;
     const char* pool = A.pool_ptr();
-    const char* nl = (f_.dialect & 2) ? "\r\n" : "\n";
+    const char* nl = f_.crlf ? "\r\n" : "\n";
     std::string line;
     uint64_t lines = 0;
 
@@ -433,64 +418,6 @@ static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
     }
 }
 
-// value a memory access moved: a recorded value when the trace has one,
-// otherwise the loaded register's write (loads) / the stored register's
-// pre-event value (stores, first plan read that is not the base/index).
-static uint64_t pair_mem_stride(const SiteArena& arena, const Site& s) {
-    const char* dis = arena.pool_ptr() + s.disasm_off;
-    size_t n = s.disasm_len;
-    size_t mnemonic = 0;
-    while (mnemonic < n && dis[mnemonic] != ' ') mnemonic++;
-    bool ldp = mnemonic == 3 && !memcmp(dis, "ldp", 3);
-    bool stp = mnemonic == 3 && !memcmp(dis, "stp", 3);
-    bool ldpsw = mnemonic == 5 && !memcmp(dis, "ldpsw", 5);
-    if (!ldp && !stp && !ldpsw) return 0;
-    if (ldpsw) return 4;
-    size_t operand = mnemonic;
-    while (operand < n && dis[operand] == ' ') operand++;
-    if (operand >= n) return 0;
-    if (dis[operand] == 'w' || dis[operand] == 's') return 4;
-    if (dis[operand] == 'q') return 16;
-    return 8;
-}
-
-// Imported GumTrace text carries addresses but not access widths. Recover the
-// width from the instruction spelling so mem-state does not turn `strb w7`
-// into an eight-byte observation. Native events keep their recorded m.size.
-static uint8_t disasm_mem_width(const SiteArena& arena, const Site& s) {
-    const char* dis = arena.pool_ptr() + s.disasm_off;
-    size_t n = s.disasm_len, mn = 0;
-    while (mn < n && dis[mn] != ' ') mn++;
-    auto starts = [&](const char* pfx) {
-        size_t l = strlen(pfx);
-        return mn >= l && memcmp(dis, pfx, l) == 0;
-    };
-    if (starts("ldrb") || starts("ldrsb") || starts("ldurb") ||
-        starts("ldursb") || starts("ldtrb") || starts("ldtrsb") ||
-        starts("ldarb") || starts("ldxrb") || starts("ldaxrb") ||
-        starts("strb") || starts("sturb") || starts("sttrb") ||
-        starts("stlrb") || starts("stxrb") || starts("stlxrb")) return 1;
-    if (starts("ldrh") || starts("ldrsh") || starts("ldurh") ||
-        starts("ldursh") || starts("ldtrh") || starts("ldtrsh") ||
-        starts("ldarh") || starts("ldxrh") || starts("ldaxrh") ||
-        starts("strh") || starts("sturh") || starts("sttrh") ||
-        starts("stlrh") || starts("stxrh") || starts("stlxrh")) return 2;
-    if (starts("ldrsw") || starts("ldursw") || starts("ldtrsw")) return 4;
-    uint64_t pair = pair_mem_stride(arena, s);
-    if (pair) return uint8_t(pair);
-    size_t op = mn;
-    while (op < n && dis[op] == ' ') op++;
-    if (op >= n) return 0;
-    switch (dis[op]) {
-    case 'b': case 'B': return 1;
-    case 'h': case 'H': return 2;
-    case 'w': case 'W': case 's': case 'S': return 4;
-    case 'x': case 'X': case 'd': case 'D': return 8;
-    case 'q': case 'Q': return 16;
-    default: return 0;
-    }
-}
-
 static unsigned __int128 mask_mem_value(unsigned __int128 value, uint8_t size) {
     if (size == 0 || size >= 16) return value;
     unsigned bits = unsigned(size) * 8;
@@ -501,7 +428,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
                        const uint64_t* regs,
                        std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
-    uint8_t inferred_size = disasm_mem_width(arena, s);
+    uint8_t inferred_size = s.mem_width;
     unsigned __int128 pair_values[8];
     int n_pair_values = 0;
     int mem_idx = 0;
@@ -509,8 +436,8 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
         const OpPlan& op = s.ops[i];
         if (op.kind != OP_MEM_R && op.kind != OP_MEM_W) continue;
         const MemOp& m = g.mem[mem_idx++];
-        AgentMemVal mv{op.kind == OP_MEM_W, m.addr, 0, false,
-                       m.size ? m.size : (inferred_size ? inferred_size : op.size)};
+        uint8_t size = m.size ? m.size : (inferred_size ? inferred_size : 8);
+        AgentMemVal mv{op.kind == OP_MEM_W, m.addr, 0, false, size};
         if (m.value_known) {
             mv.val = m.value;
             mv.known = true;
@@ -525,9 +452,6 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
             for (uint8_t j = 0; j < s.n_ops; j++) {
                 const OpPlan& r = s.ops[j];
                 if (r.kind != OP_REG_R) continue;
-                if (r.ctx_idx >= 0 &&
-                    (r.ctx_idx == op.base_ctx_idx || r.ctx_idx == op.index_ctx_idx))
-                    continue;
                 if (om.use_obs && om.obs_at[j] >= 0)
                     add_data_value(g.obs[om.obs_at[j]].val);
                 else if (r.ctx_idx >= 0)
@@ -564,7 +488,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
 
     // Upstream GumTrace prints one mem token for ldp/stp. The two register
     // values still carry both lanes, so expose the second adjacent cell too.
-    uint64_t stride = pair_mem_stride(arena, s);
+    uint64_t stride = s.pair_stride;
     if (stride && out.size() == 1) {
         AgentMemVal second = out[0];
         second.addr += stride;
@@ -604,10 +528,7 @@ static void agent_call_text(std::string& line, const Group& g) {
     char b[40];
     line += "+call ";
     if (g.call_name) line += g.call_name;
-    else if (g.call_target) {
-        snprintf(b, sizeof b, "0x%llx", (unsigned long long)g.call_target);
-        line += b;
-    } else line += "<unknown>";
+    else line += "<unknown>";
     line += '(';
     int na = call_arg_count(g);
     for (int i = 0; i < na; i++) {
@@ -617,29 +538,6 @@ static void agent_call_text(std::string& line, const Group& g) {
         line += b;
     }
     line += ")\n";
-}
-
-static void agent_svc_text(std::string& line, const Group& g) {
-    char b[40];
-    const char* nm = svc_name(g.svc_num);
-    if (nm) {
-        line += std::string("+svc ") + nm + "(x0=0x";
-        snprintf(b, sizeof b, "%llx", (unsigned long long)g.svc_args[0]);
-        line += b;
-        line += ", x1=0x";
-        snprintf(b, sizeof b, "%llx", (unsigned long long)g.svc_args[1]);
-        line += b;
-        line += ", x2=0x";
-        snprintf(b, sizeof b, "%llx", (unsigned long long)g.svc_args[2]);
-        line += b;
-        line += ")\n";
-    } else {
-        snprintf(b, sizeof b, "%llu", (unsigned long long)g.svc_num);
-        line += std::string("+svc #") + b + "(x0=0x";
-        snprintf(b, sizeof b, "%llx", (unsigned long long)g.svc_args[0]);
-        line += b;
-        line += ")\n";
-    }
 }
 
 static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool json,
@@ -789,7 +687,6 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
             if (json) {
                 line += ",\"call\":{";
                 if (g.call_name) emit::kv_str(line, "sym", g.call_name);
-                else if (g.call_target) emit::kv_hex(line, "target", g.call_target);
                 std::vector<std::string> args;
                 int na = call_arg_count(g);
                 args.reserve(size_t(na));
@@ -797,23 +694,6 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                 line += ",\"args\":" + emit::str_array(args) + "}";
             } else {
                 agent_call_text(line, g);
-            }
-        }
-        if (g.is_svc) {
-            if (json) {
-                char b[48];
-                snprintf(b, sizeof b, ",\"svc\":{\"num\":%llu", (unsigned long long)g.svc_num);
-                line += b;
-                const char* nm = svc_name(g.svc_num);
-                if (nm) {
-                    line += ',';
-                    emit::kv_str(line, "nm", nm);
-                }
-                std::vector<std::string> args;
-                for (int i = 0; i < 3; i++) args.push_back(emit::hex64(g.svc_args[i]));
-                line += ",\"args\":" + emit::str_array(args) + "}";
-            } else {
-                agent_svc_text(line, g);
             }
         }
         if (g.is_ret) {

@@ -9,7 +9,7 @@
 namespace gt::format {
 
 inline constexpr uint32_t CHUNK_MAGIC = 0x47544348u; // "GTCH"
-inline constexpr uint32_t GTB_MAGIC = 0x47544231u;   // "GTB1"
+inline constexpr uint32_t GTB_MAGIC = 0x47544232u;   // "GTB2"
 
 enum ChunkType : uint32_t {
     CH_META = 1,
@@ -17,20 +17,16 @@ enum ChunkType : uint32_t {
     CH_FOOTER = 3,
 };
 
-// Tags 4, 6 and inline REGW are retained for legacy native-recording files.
-// The current text importer emits the remaining tags.
 enum EventTag : uint8_t {
     EV_EXEC = 1,
     EV_REGW = 2,
     EV_MEM = 3,
-    EV_CALL = 4,
-    EV_RET = 5,
-    EV_SVC = 6,
-    EV_MEMW_NV = 7,
-    EV_RDVAL = 8,
-    EV_SIMDV = 9,
-    EV_VERBATIM = 10,
-    EV_CALL2 = 11,
+    EV_MEMW_NV = 4,
+    EV_RDVAL = 5,
+    EV_SIMDV = 6,
+    EV_CALL = 7,
+    EV_RET = 8,
+    EV_VERBATIM = 9,
 };
 
 } // namespace gt::format

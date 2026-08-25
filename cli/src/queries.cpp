@@ -38,9 +38,9 @@ using namespace gt;
 // the same taint sets as upstream.
 //
 // Register space: mask bits 0..31 = x0..x30/sp, bits 32..63 = q0..q31, plus a
-// separate NZCV flag. Per-site source/destination roles are re-derived from
-// the disassembly text — the same input upstream's TraceParser works from —
-// memoized per site. SIMD/NZCV *values* are never recorded, only dependence.
+// separate NZCV flag. Per-site source/destination roles are compiled from the
+// disassembly during import. SIMD/NZCV *values* are never recorded, only
+// dependence.
 //
 // Memory: forward is a pure stream walk. Backward keeps a sliding ring of
 // compact per-event records (whole-trace Group materialization cost ~200B per
@@ -54,7 +54,7 @@ using namespace gt;
 struct TaintEdge { uint64_t ev, line; std::string what; };
 
 struct TaintRec {  // compact per-group record for backward walks
-    uint32_t site_id;  // 0xFFFFFFFF for non-exec groups (call/svc/ret-only)
+    uint32_t site_id;  // 0xFFFFFFFF for non-exec groups (call/ret-only)
     uint64_t source_line;
     uint8_t n_mem;
     struct { uint64_t addr; bool is_write; } mem[2];
@@ -71,209 +71,7 @@ static const char* taint_reg_name(int slot, char* buf) {
     return "nzcv";
 }
 
-// ---- upstream-compatible per-site taint roles, parsed from the disasm ----
-
-enum TaintCat : uint8_t {
-    TC_OTHER = 0, // data move / arith / logic / shift / bitfield / cond-select
-    TC_IMM_LOAD,  // movz movn adr adrp: dst is killed unconditionally
-    TC_PARTIAL,   // movk: dst taint preserved
-    TC_LOAD,      // dst tainted iff the memory cell is, else killed
-    TC_STORE,     // memory tainted iff the data register is, else cleared
-    TC_COMPARE,   // sets or clears NZCV from its sources
-    TC_BRANCH,    // no data-flow effect
-};
-
-struct TaintSite {
-    uint8_t cat = TC_OTHER;
-    uint64_t src_mask = 0;       // all true sources (store data + base/index)
-    uint64_t index_mask = 0;     // non-base address registers in [...] operands
-    uint64_t dst_mask = 0;       // destination regs
-    uint8_t dsts[2] = {0, 0};    // dst_mask in operand order (pair loads)
-    uint8_t n_dsts = 0;
-    uint8_t st[2] = {0, 0};      // STORE data regs in operand order
-    uint8_t n_st = 0;
-    uint8_t pair = 0;            // stp / ldp-class: second slot at addr+elem
-    uint8_t elem = 8;            // pair slot size: 4 when w-spelled, else 8
-    uint8_t nzcv_r = 0, nzcv_w = 0;
-};
-
-// mnemonic -> taint category; mirrors upstream classify_mnemonic, folded into
-// the seven classes its propagation rules distinguish
-static TaintCat taint_classify(const char* m, size_t n) {
-    auto is = [&](const char* w) {
-        size_t l = strlen(w);
-        return n == l && memcmp(m, w, l) == 0;
-    };
-    if (is("movz") || is("movn") || is("adr") || is("adrp")) return TC_IMM_LOAD;
-    if (is("movk")) return TC_PARTIAL;
-    if (is("cmp") || is("cmn") || is("tst") || is("ccmp") || is("ccmn") ||
-        is("fcmp") || is("fccmp") || is("fcmpe") || is("fccmpe"))
-        return TC_COMPARE;
-    if (is("ldr") || is("ldrb") || is("ldrh") || is("ldrsw") || is("ldrsb") ||
-        is("ldrsh") || is("ldur") || is("ldurb") || is("ldurh") ||
-        is("ldursw") || is("ldursb") || is("ldursh") || is("ldp") ||
-        is("ldpsw") || is("ldar") || is("ldarb") || is("ldarh") || is("ldxr") ||
-        is("ldaxr") || is("ldxrb") || is("ldaxrb") || is("ldxrh") ||
-        is("ldaxrh") || is("ldxp") || is("ldaxp") || is("ldnp") || is("ldtr") ||
-        is("ldtrb") || is("ldtrh") || is("ldtrsw") || is("ldtrsb") ||
-        is("ldtrsh"))
-        return TC_LOAD;
-    if (is("str") || is("strb") || is("strh") || is("stur") || is("sturb") ||
-        is("sturh") || is("stp") || is("stlr") || is("stlrb") || is("stlrh") ||
-        is("stxr") || is("stlxr") || is("stxrb") || is("stlxrb") ||
-        is("stxrh") || is("stlxrh") || is("stxp") || is("stlxp"))
-        return TC_STORE;
-    if (is("nop") || is("cbz") || is("cbnz") || is("svc") || is("dmb") ||
-        is("dsb") || is("dc") || is("isb") || is("ic") || is("b") ||
-        is("bl") || is("br") || is("blr") || is("bti") || is("ret") ||
-        is("retaa") || is("retab") || is("paciasp") || is("pacibsp") ||
-        is("pacia") || is("pacib") || is("pacda") || is("pacdb") ||
-        is("prfm") || is("prfum"))
-        return TC_BRANCH;
-    if (n >= 5 && memcmp(m, "aut", 3) == 0) return TC_BRANCH;  // autiasp ...
-    if (n >= 2 && m[0] == 'b' && m[1] == '.') return TC_BRANCH; // b.eq ...
-    return TC_OTHER;
-}
-
-// register token -> taint slot (0..31 = x0..sp, 32..63 = q0..q31), -1 = not a
-// register (immediates, shift/extend modifiers, condition codes, xzr)
-static int taint_reg_slot(const char* p, size_t n) {
-    int simd = -1;
-    int ctx = text_name_ctx(p, n, &simd);
-    if (ctx >= 0) return ctx & 31; // fp/lr/sp already canonical (29/30/31)
-    if (simd >= 0) return 32 + simd;
-    return -1;
-}
-
-// operand list ("x8, [x25, #0x28]") -> src/dst roles, following upstream
-// parse_operands: split at top-level commas; branch/compare = all sources;
-// store = pre-bracket operands are data sources, bracket regs are sources;
-// everything else = first (pair: first two) non-mem operands are dsts
-static void taint_parse_ops(const char* ops, size_t ops_len, TaintSite& ts) {
-    struct Op { const char* p; size_t n; bool is_mem; };
-    Op o[8];
-    int no = 0;
-    size_t seg = 0;
-    int depth = 0;
-    for (size_t i = 0; i <= ops_len && no < 8; i++) {
-        char c = i < ops_len ? ops[i] : '\0';
-        if (c == '[') depth++;
-        else if (c == ']') depth--;
-        if ((c == ',' && depth == 0) || c == '\0') {
-            size_t s = seg, e = i;
-            while (s < e && (ops[s] == ' ' || ops[s] == '\t')) s++;
-            while (e > s && (ops[e - 1] == ' ' || ops[e - 1] == '\t')) e--;
-            if (e > s) {
-                o[no].p = ops + s;
-                o[no].n = e - s;
-                // a memory operand starts with '['; a SIMD lane reference
-                // ("v2.b[0]") has the bracket mid-token and is NOT memory
-                o[no].is_mem = ops[s] == '[';
-                no++;
-            }
-            seg = i + 1;
-        }
-    }
-    if (!no) return;
-    ts.elem = (o[0].n && (o[0].p[0] == 'w' || o[0].p[0] == 'W')) ? 4 : 8;
-
-    auto alnum = [&](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               (c >= '0' && c <= '9');
-    };
-    // leading alnum token of an operand ('#'-immediates yield nothing)
-    auto lead_tok = [&](const Op& op) -> int {
-        size_t i = 0;
-        while (i < op.n && alnum(op.p[i])) i++;
-        if (!i) return -1;
-        return taint_reg_slot(op.p, i);
-    };
-    auto add_src = [&](int slot) {
-        if (slot >= 0) ts.src_mask |= 1ULL << slot;
-    };
-    auto add_dst = [&](int slot) {
-        if (slot < 0) return;
-        ts.dst_mask |= 1ULL << slot;
-        if (ts.n_dsts < 2) ts.dsts[ts.n_dsts++] = uint8_t(slot);
-    };
-    auto add_st = [&](int slot) {
-        if (slot < 0) return;
-        if (ts.n_st < 2) ts.st[ts.n_st++] = uint8_t(slot);
-        add_src(slot);
-    };
-    // registers inside a [base, index, ...] operand
-    auto bracket_srcs = [&](const Op& op) {
-        bool have_base = false;
-        uint64_t seen = 0;
-        for (size_t j = 0; j < op.n; j++) {
-            char c = op.p[j];
-            if (c != '[' && c != ',' && c != ' ') continue;
-            size_t k = j + 1;
-            while (k < op.n && op.p[k] == ' ') k++;
-            if (k >= op.n || op.p[k] == '#' || op.p[k] == ']' || op.p[k] == '!')
-                continue;
-            size_t t = k;
-            while (t < op.n && alnum(op.p[t])) t++;
-            int slot = taint_reg_slot(op.p + k, t - k);
-            if (slot < 0 || (seen & (1ULL << slot))) continue;
-            seen |= 1ULL << slot;
-            add_src(slot);
-            if (have_base) ts.index_mask |= 1ULL << slot;
-            else have_base = true;
-        }
-    };
-
-    switch (ts.cat) {
-    case TC_BRANCH:
-    case TC_COMPARE:
-        for (int i = 0; i < no; i++) {
-            if (o[i].is_mem) bracket_srcs(o[i]);
-            else add_src(lead_tok(o[i]));
-        }
-        break;
-    case TC_STORE:
-        for (int i = 0; i < no; i++) {
-            if (o[i].is_mem) bracket_srcs(o[i]);
-            else add_st(lead_tok(o[i]));
-        }
-        break;
-    default: { // OTHER / LOAD / IMM_LOAD / PARTIAL
-        bool pair_load = ts.cat == TC_LOAD && ts.pair;
-        for (int i = 0; i < no; i++) {
-            if (o[i].is_mem) { bracket_srcs(o[i]); continue; }
-            int slot = lead_tok(o[i]);
-            if (slot < 0) continue;
-            if (i == 0 || (pair_load && i == 1)) add_dst(slot);
-            else add_src(slot);
-        }
-        break;
-    }
-    }
-}
-
-static TaintSite build_taint_site(const Site& s, const char* pool) {
-    TaintSite ts;
-    const char* dis = pool + s.disasm_off;
-    size_t dn = s.disasm_len;
-    size_t mn = 0;
-    while (mn < dn && dis[mn] != ' ') mn++;
-    ts.cat = taint_classify(dis, mn);
-    // pair ops (upstream infers the second slot from the mnemonic + width)
-    if (s.kind != SK_SVC && mn > 0) {
-        auto is = [&](const char* w) {
-            size_t l = strlen(w);
-            return mn == l && memcmp(dis, w, l) == 0;
-        };
-        ts.pair = is("stp") || is("ldp") || is("ldpsw") || is("ldxp") ||
-                  is("ldaxp") || is("ldnp");
-    }
-    if (mn < dn) taint_parse_ops(dis + mn + 1, dn - mn - 1, ts);
-    for (uint8_t i = 0; i < s.n_ops; i++) {
-        if (s.ops[i].op_flags & OPF_R_NZCV) ts.nzcv_r = 1;
-        if (s.ops[i].op_flags & OPF_W_NZCV) ts.nzcv_w = 1;
-    }
-    return ts;
-}
+// Per-site taint roles are compiled once during import and stored in Site.
 
 // verbatim-hexdump memcpy bridging and dump-payload search use the shared
 // upstream-dialect parsers from traceq/import.h (parse_hexdump_header /
@@ -320,17 +118,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         edges_total++;
         if ((int)edges.size() < limit) edges.push_back({ev, line, std::move(what)});
     };
-    // per-site taint roles, memoized (a handful of unique sites per hot loop)
-    std::vector<TaintSite> ts_cache(f.arena.sites().size());
-    std::vector<uint8_t> ts_done(f.arena.sites().size(), 0);
-    auto taint_site = [&](uint32_t sid) -> const TaintSite& {
-        static const TaintSite kEmpty;
-        if (sid == 0xFFFFFFFFu || sid >= ts_cache.size()) return kEmpty;
-        if (!ts_done[sid]) {
-            ts_cache[sid] = build_taint_site(f.arena.get(sid), f.arena.pool_ptr());
-            ts_done[sid] = 1;
-        }
-        return ts_cache[sid];
+    auto taint_site = [&](uint32_t sid) -> const TaintPlan& {
+        static const TaintPlan kEmpty;
+        if (sid == 0xFFFFFFFFu || sid >= f.arena.sites().size()) return kEmpty;
+        return f.arena.get(sid).taint;
     };
     auto tainted = [&](int slot) -> bool { return reg_t & (1ULL << slot); };
     auto setclr_reg = [&](int slot, bool on) {
@@ -437,7 +228,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 if (pend_copy) { pend_dst = g.args[0]; pend_src = g.args[1]; }
                 return true;
             }
-            const TaintSite& ts = taint_site(g.site_id);
+            const TaintPlan& ts = taint_site(g.site_id);
             uint64_t mr = 0, mw = 0;
             bool has_mr, has_mw;
             group_mem(g, mr, has_mr, mw, has_mw);
@@ -658,7 +449,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                     }
                 }
             }
-            const TaintSite& ts = taint_site(r.site_id);
+            const TaintPlan& ts = taint_site(r.site_id);
             uint64_t mr = 0, mw = 0;
             bool has_mr = false, has_mw = false;
             for (int k = 0; k < r.n_mem; k++) {
@@ -928,9 +719,7 @@ int q_taint(const std::string& gtb, const TaintOptions& o) {
 // Comparison key is (module name, module-relative offset), not the arena site
 // id: site ids are allocation-order artifacts of each run and only align when
 // both runs interned sites in the same order, while (module, offset) is stable
-// across ASLR and load-order differences. (v1 META payloads carry no module
-// base; their offsets degrade to absolute addresses, which still compares
-// correctly for same-base native recordings.)
+// across ASLR and load-order differences.
 // ---------------------------------------------------------------------------
 int q_diff(const std::string& a_p, const std::string& b_p, int context, bool json) {
     GtbFile a, b;
@@ -1203,8 +992,6 @@ static const char* stop_reason_name(uint8_t r) {
         case STOP_MAX_BYTES: return "max_bytes";
         case STOP_MAX_EVENTS: return "max_events";
         case STOP_MAX_MS: return "max_ms";
-        case STOP_CRASH: return "crash";
-        case STOP_TRIGGER: return "trigger";
         default: return "none";
     }
 }
@@ -1233,9 +1020,7 @@ int q_stat(const std::string& gtb, bool json) {
         }
         return true;
     });
-    const char* dialect =
-        f.dialect & 1 ? (f.dialect & 2 ? "upstream+crlf" : "upstream")
-                      : (f.dialect & 2 ? "native+crlf" : "native");
+    const char* dialect = f.crlf ? "upstream+crlf" : "upstream";
     if (json) {
         std::string o;
         emit::kv_str(o, "file", gtb);
@@ -1246,19 +1031,18 @@ int q_stat(const std::string& gtb, bool json) {
         char b[256];
         snprintf(b, sizeof b,
                  ",\"exec\":%llu,\"regw\":%llu,\"mem\":%llu,\"call\":%llu,"
-                 "\"svc\":%llu,\"ret\":%llu,\"rdval\":%llu,\"simdv\":%llu,"
+                 "\"ret\":%llu,\"rdval\":%llu,\"simdv\":%llu,"
                  "\"verbatim\":%llu,\"events_seen\":%llu,\"events_recorded\":%llu,"
-                 "\"bytes_written\":%llu,",
+                 "\"bytes_written\":%llu",
                  (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
                  (unsigned long long)f.n_mem, (unsigned long long)f.n_call,
-                 (unsigned long long)f.n_svc, (unsigned long long)f.n_ret,
+                 (unsigned long long)f.n_ret,
                  (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
                  (unsigned long long)f.n_verbatim,
                  (unsigned long long)f.events_seen,
                  (unsigned long long)f.events_recorded,
                  (unsigned long long)f.bytes_written);
         o += b;
-        emit::kv_hex(o, "initial_sp", f.initial_sp);
         if (saw_exec) {
             o += ',';
             emit::kv_hex(o, "first_addr", first_addr);
@@ -1281,18 +1065,17 @@ int q_stat(const std::string& gtb, bool json) {
     } else {
         printf("file: %s (dialect %s, stop %s)\n", gtb.c_str(), dialect,
                stop_reason_name(f.stop_reason));
-        printf("events: exec=%llu regw=%llu mem=%llu call=%llu svc=%llu ret=%llu "
+        printf("events: exec=%llu regw=%llu mem=%llu call=%llu ret=%llu "
                "rdval=%llu simdv=%llu verbatim=%llu\n",
                (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
                (unsigned long long)f.n_mem, (unsigned long long)f.n_call,
-               (unsigned long long)f.n_svc, (unsigned long long)f.n_ret,
+               (unsigned long long)f.n_ret,
                (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
                (unsigned long long)f.n_verbatim);
-        printf("recorded: seen=%llu recorded=%llu bytes=%llu initial_sp=0x%llx\n",
+        printf("recorded: seen=%llu recorded=%llu bytes=%llu\n",
                (unsigned long long)f.events_seen,
                (unsigned long long)f.events_recorded,
-               (unsigned long long)f.bytes_written,
-               (unsigned long long)f.initial_sp);
+               (unsigned long long)f.bytes_written);
         if (saw_exec)
             printf("first: %s!0x%llx (addr 0x%llx)\n", first_mod.c_str(),
                    (unsigned long long)first_off, (unsigned long long)first_addr);
@@ -1912,60 +1695,6 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     return 0;
 }
 
-static bool executed_call(const GtbFile& f, const Group& g, bool& indirect,
-                          std::string& disasm) {
-    indirect = false;
-    disasm.clear();
-    if (!g.has_exec || g.site_id >= f.arena.sites().size()) return false;
-    const Site& site = f.arena.get(g.site_id);
-    disasm.assign(f.arena.pool_ptr() + site.disasm_off, site.disasm_len);
-    size_t end = disasm.find(' ');
-    std::string mnemonic = disasm.substr(0, end);
-    if (mnemonic == "bl") return true;
-    if (mnemonic == "blr" || mnemonic.rfind("blraa", 0) == 0 ||
-        mnemonic.rfind("blrab", 0) == 0) {
-        indirect = true;
-        return true;
-    }
-    return false;
-}
-
-static uint64_t disasm_hex_operand(const std::string& disasm) {
-    size_t p = disasm.find(' ');
-    if (p == std::string::npos) return 0;
-    while (p < disasm.size() && disasm[p] == ' ') p++;
-    if (p < disasm.size() && disasm[p] == '#') p++;
-    if (p + 2 > disasm.size() || disasm[p] != '0' ||
-        (disasm[p + 1] != 'x' && disasm[p + 1] != 'X'))
-        return 0;
-    p += 2;
-    uint64_t value = 0;
-    bool any = false;
-    for (; p < disasm.size(); p++) {
-        unsigned digit;
-        char c = disasm[p];
-        if (c >= '0' && c <= '9') digit = unsigned(c - '0');
-        else if (c >= 'a' && c <= 'f') digit = unsigned(c - 'a' + 10);
-        else if (c >= 'A' && c <= 'F') digit = unsigned(c - 'A' + 10);
-        else break;
-        if (value > (UINT64_MAX - digit) / 16) return 0;
-        value = value * 16 + digit;
-        any = true;
-    }
-    return any ? value : 0;
-}
-
-static int indirect_target_reg(const std::string& disasm) {
-    size_t p = disasm.find(' ');
-    if (p == std::string::npos) return -1;
-    while (p < disasm.size() && disasm[p] == ' ') p++;
-    size_t end = p;
-    while (end < disasm.size() && disasm[end] != ',' && disasm[end] != ' ')
-        end++;
-    int simd = -1;
-    return text_name_ctx(disasm.data() + p, end - p, &simd);
-}
-
 int q_calls(const std::string& gtb, const CallsOptions& options) {
     if (options.from_ev > options.to_ev || options.top < 0 || options.last < 0 ||
         (options.top > 0 && (options.last > 0 || options.offset != 0)) ||
@@ -2033,9 +1762,17 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > options.to_ev) return false;
         if (gi < options.from_ev) return true;
-        bool indirect = false;
         std::string disasm;
-        bool instruction = executed_call(f, g, indirect, disasm);
+        const Site* call_site = nullptr;
+        if (g.has_exec && g.site_id < f.arena.sites().size()) {
+            const Site& site = f.arena.get(g.site_id);
+            if (site.kind == SK_CALL_IMM || site.kind == SK_CALL_REG) {
+                call_site = &site;
+                disasm.assign(f.arena.pool_ptr() + site.disasm_off,
+                              site.disasm_len);
+            }
+        }
+        bool instruction = call_site != nullptr;
         int64_t selected_annotation = -1;
         if (instruction || g.is_call) {
             Row row;
@@ -2056,22 +1793,16 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
             if (g.call_name) row.name = g.call_name;
 
             if (instruction) {
-                const Site& site = f.arena.get(g.site_id);
-                if (!indirect) {
-                    row.target = site.branch_imm ? site.branch_imm
-                                                  : disasm_hex_operand(disasm);
+                if (call_site->kind == SK_CALL_IMM) {
+                    row.target = call_site->branch_imm;
                     row.target_known = row.target != 0;
                 } else {
-                    int ctx = indirect_target_reg(disasm);
+                    int ctx = call_site->branch_reg;
                     if (ctx >= 0 && ctx < 32 && ex.reg_known()[ctx]) {
                         row.target = ex.regfile()[ctx];
                         row.target_known = true;
                     }
                 }
-            }
-            if (!row.target_known && g.is_call && g.call_target) {
-                row.target = g.call_target;
-                row.target_known = true;
             }
             if (row.target_known &&
                 locate_target(row.target, row.target_mod, row.target_off)) {
@@ -2085,8 +1816,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
                     row.arg_known[i] = ex.reg_known()[i] != 0;
                 }
             if (g.is_call) {
-                int nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
-                nargs = std::min(nargs, 8);
+                int nargs = std::min<int>(g.n_call_args, 8);
                 for (int i = 0; i < nargs; i++) {
                     row.args[i] = g.args[i];
                     row.arg_known[i] = true;
@@ -2564,7 +2294,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     auto emit_line = [&](uint64_t gi, int lvl, const Group& g, const char* name) {
         if (shown < lim) {
             shown++;
-            int na = g.n_call_args >= 0 ? g.n_call_args : 4;
+            int na = std::min<int>(g.n_call_args, 8);
             if (json) {
                 std::string o = "{";
                 emit::kv_u64(o, "ev", gi);
@@ -2607,12 +2337,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     };
     Expander(f).for_each([&](uint64_t gi, const Group& g) {
         if (g.is_call) {
-            char tgt[24];
-            const char* name = g.call_name;
-            if (!name) {
-                snprintf(tgt, sizeof tgt, "0x%llx", (unsigned long long)g.call_target);
-                name = tgt;
-            }
+            const char* name = g.call_name ? g.call_name : "<unknown>";
             size_t d = stack.size();
             if (global) {
                 if (d <= size_t(depth < 0 ? 0 : depth))

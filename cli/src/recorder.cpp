@@ -12,20 +12,6 @@ static constexpr size_t EVENT_CHUNK_SIZE = 256 * 1024;
 
 using namespace format;
 
-const char* svc_name(uint64_t n) {
-    switch (n) {
-        case 29: return "ioctl";
-        case 56: return "openat";
-        case 57: return "close";
-        case 63: return "read";
-        case 64: return "write";
-        case 222: return "mmap";
-        case 226: return "mprotect";
-        case 78: return "readlinkat";
-        default: return nullptr;
-    }
-}
-
 bool GtbRecorder::open(const std::string& path, const RecOptions& opts) {
     opt_ = opts;
     io_ok_ = true;
@@ -85,8 +71,7 @@ void GtbRecorder::write_footer_locked(uint8_t reason) {
     n += put_uvar(f + n, stats_.events_seen);
     n += put_uvar(f + n, stats_.events_recorded);
     n += put_uvar(f + n, stats_.bytes_written);
-    n += put_uvar(f + n, 0); // initial_sp: unavailable for imported text logs
-    f[n++] = dialect_;
+    f[n++] = crlf_ ? 1 : 0;
     if (!write_chunk_to_fd(fd_, f, n, CH_FOOTER)) io_ok_ = false;
 }
 
@@ -261,9 +246,9 @@ void GtbRecorder::imp_wval128(uint32_t name_id, unsigned __int128 v) {
 void GtbRecorder::imp_call(uint32_t sym_id, const uint64_t* args, int nargs) {
     if (!open_ || nargs < 0 || nargs > 8) return;
     uint8_t tmp[16];
-    size_t n0 = put_uvar(tmp, uint64_t(sym_id) + 1);
+    size_t n0 = put_uvar(tmp, sym_id);
     ensure_space(1 + n0 + 1 + size_t(nargs) * 12);
-    push_u8(EV_CALL2);
+    push_u8(EV_CALL);
     memcpy(cur_->buf.data() + cur_->n, tmp, n0);
     cur_->n += n0;
     push_u8(uint8_t(nargs));

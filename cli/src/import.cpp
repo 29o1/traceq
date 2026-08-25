@@ -214,9 +214,9 @@ struct Importer {
 
         TextOp tops[8];
         for (int i = 0; i < n_rd; i++)
-            tops[i] = TextOp{rd[i].name, rd[i].name_len, rd[i].kind, 0};
+            tops[i] = TextOp{rd[i].name, rd[i].name_len, rd[i].kind};
         for (int i = 0; i < n_wr; i++)
-            tops[n_rd + i] = TextOp{wr[i].name, wr[i].name_len, wr[i].kind, 0};
+            tops[n_rd + i] = TextOp{wr[i].name, wr[i].name_len, wr[i].kind};
 
         std::string mod_s(mod, mod_len);
         uint64_t mbase;
@@ -268,9 +268,8 @@ struct Importer {
     }
 
     // call func: / call jni func: name(0x.., 0x..) — bare hex args, 0..8.
-    // JNI calls reuse CALL2. A private string-pool prefix preserves their
-    // original spelling without adding another event tag; the expander strips
-    // it before exposing call_name to queries.
+    // A private string-pool prefix preserves the JNI spelling without adding
+    // another event tag; the expander strips it before exposing call_name.
     bool call_line(const char* b, const char* be) {
         static const char kPre[] = "call func: ";
         static const char kJniPre[] = "call jni func: ";
@@ -337,10 +336,10 @@ struct Importer {
     }
 
     bool run(const std::string& out_path, const RecOptions& opts, ImportResult& res) {
-        // line-ending dialect from the first newline
+        // Preserve the source line ending for byte-exact replay.
         const char* nl0 = (const char*)memchr(base, '\n', len);
         crlf = nl0 && nl0 > base && nl0[-1] == '\r';
-        rec.set_dialect(uint8_t(1 | (crlf ? 2 : 0)));
+        rec.set_crlf(crlf);
         if (!rec.open(out_path, opts)) return false;
         const char* p = base;
         const char* end = base + len;

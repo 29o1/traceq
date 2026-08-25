@@ -6,9 +6,6 @@
 //       EXEC  zigzag delta(site_id)
 //       REGW  reg + zigzag delta(value)      (per-register last-value table)
 //       MEM   flags + zigzag delta(addr) + zigzag delta(value)
-//       CALL  sym + 4 arg deltas
-//       RET   x0 delta
-//       SVC   num + x0..x2 deltas
 //       MEMNV flags + zigzag delta(addr)     (mem access without a value:
 //                                             bit0 of flags = write)
 //       RDVAL uvar name_id + u8 kind + ...   (importer only: observed READ
@@ -23,15 +20,12 @@
 //       VERBATIM uvar len + len raw bytes    (importer only: unstructured line
 //                                             including its line ending,
 //                                             replayed byte-for-byte)
-//       CALL2 sym + u8 nargs + nargs arg deltas (importer only: call with the
-//                                             observed argument count 0..8)
-//   [FOOTER chunk] stop reason + counters + initial_sp + u8 dialect
-//                  (dialect bit0: 1 = upstream text dialect; bit1: CRLF line
-//                  endings. Absent in older files = 0 = native recording.)
+//       CALL  sym + u8 nargs + nargs arg deltas (0..8 observed arguments)
+//       RET   x0 delta
+//   [FOOTER chunk] stop reason + counters + u8 CRLF flag
 //
 // `gt import` grows the arena while parsing, so it writes EVENTS first and META
-// just before the FOOTER. The loader accepts chunks in any order and still
-// reads older native-recording files.
+// just before the FOOTER. The loader accepts chunks in any order.
 //
 // Integer register history is delta-encoded. RDVAL/SIMDV retain values that
 // GumTrace explicitly observed. Memory events retain an address and, when the
@@ -50,8 +44,6 @@ enum StopReason : uint8_t {
     STOP_MAX_BYTES,
     STOP_MAX_EVENTS,
     STOP_MAX_MS,
-    STOP_CRASH,   // retained for reading older native-recording files
-    STOP_TRIGGER, // retained for reading older native-recording files
 };
 
 struct RecOptions {
@@ -92,7 +84,7 @@ public:
     void imp_call(uint32_t sym_id, const uint64_t* args, int nargs);
     void imp_ret(uint64_t v);
     void imp_verbatim(const void* p, size_t n);
-    void set_dialect(uint8_t d) { dialect_ = d; }
+    void set_crlf(bool value) { crlf_ = value; }
 
     const RecStats& stats() const { return stats_; }
     bool ok() const { return io_ok_; }
@@ -129,12 +121,9 @@ private:
     uint64_t last_arg_val_[8] = {0};   // x0..x7 call args
     uint64_t last_ret_val_ = 0;
     // import state: per-name last observed value (RDVAL/SIMDV delta chain) and
-    // the footer dialect byte
+    // the footer line-ending flag
     std::unordered_map<uint32_t, uint64_t> last_obs_;
-    uint8_t dialect_ = 0;
+    bool crlf_ = false;
 };
-
-// svc number -> name (Linux/aarch64 subset; matches the upstream text table)
-const char* svc_name(uint64_t n);
 
 } // namespace gt

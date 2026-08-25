@@ -27,43 +27,55 @@ enum OpKind : uint8_t {
     OP_MEM_W,
 };
 
-enum OpFlags : uint8_t {
-    OPF_R_NZCV = 1,  // instruction reads NZCV (b.cond/csel/cset/ccmp/fcsel/...)
-    OPF_W_NZCV = 2,  // instruction writes NZCV (adds/subs/cmp/fcmp/ccmp/...)
-};
-
 struct OpPlan {
     uint8_t kind = OP_NONE;
-    int8_t ctx_idx = -1;        // index into runtime uint64_t regfile (0..30), -1 = unsupported (SIMD)
-    uint8_t name_id = 0;        // into arena string pool ("x5", "w3", ...)
-    // SIMD/FP register index 0..31 (q/d/s/h/b/vN share one index space by N),
-    // set when ctx_idx == -1 and the operand is a SIMD/FP register.
-    //
-    // Imported GumTrace logs preserve SIMD/NZCV observations separately. The
-    // static register identity here is enough for taint propagation.
-    int8_t simd_idx = -1;
-    uint8_t op_flags = 0;       // OPF_* — NZCV dependence of the whole
-                                // instruction, repeated on every op
-    // memory shape
-    int8_t base_ctx_idx = -1;
-    int8_t index_ctx_idx = -1;
-    uint8_t shift_type = 0;     // serialized shift kind (legacy files)
-    uint8_t shift_amt = 0;
-    int32_t disp = 0;
-    uint8_t size = 0;           // access size in bytes (best effort)
+    // GPR runtime slot (x0..x30/sp), or -1 for memory and SIMD observations.
+    // SIMD identity and data-flow roles live in TaintPlan; observed values keep
+    // their original names in Group::Obs.
+    int8_t ctx_idx = -1;
+};
+
+enum TaintCat : uint8_t {
+    TC_OTHER = 0,
+    TC_IMM_LOAD,
+    TC_PARTIAL,
+    TC_LOAD,
+    TC_STORE,
+    TC_COMPARE,
+    TC_BRANCH,
+};
+
+// Static data-flow facts compiled once from a site's disassembly. Register
+// mask bits 0..31 are x0..x30/sp; bits 32..63 are q0..q31.
+struct TaintPlan {
+    uint8_t cat = TC_OTHER;
+    uint64_t src_mask = 0;
+    uint64_t index_mask = 0;
+    uint64_t dst_mask = 0;
+    uint8_t dsts[2] = {0, 0};
+    uint8_t n_dsts = 0;
+    uint8_t st[2] = {0, 0};
+    uint8_t n_st = 0;
+    uint8_t pair = 0;
+    uint8_t elem = 8;
+    uint8_t nzcv_r = 0;
+    uint8_t nzcv_w = 0;
 };
 
 struct Site {
     uint64_t addr = 0;
     uint8_t kind = SK_NORMAL;
     uint64_t branch_imm = 0;         // absolute target for CALL_IMM / B_IMM
+    int8_t branch_reg = -1;          // runtime GPR slot for CALL_REG / BR
+    uint8_t mem_width = 0;           // inferred access width in bytes
+    uint8_t pair_stride = 0;         // second ldp/stp lane stride, 0 if scalar
     uint32_t module_id = 0;          // into arena modules() (name + base at record time)
     uint32_t prefix_off = 0, prefix_len = 0;   // "[mod] 0xPC!0xOFF mnem ops; "
                                                // verbatim source-log slice
     uint32_t disasm_off = 0, disasm_len = 0;   // "mnem ops" without prefix
     uint8_t n_ops = 0;
     OpPlan ops[8];
-    int32_t func_sym = -1;           // string id of containing function name
+    TaintPlan taint;
 };
 
 struct TextOp; // defined below (text-built sites, gt import)
@@ -84,8 +96,7 @@ public:
     int32_t intern_string(const std::string& s);
     const std::string& str(uint32_t id) const { return strings_[id]; }
     size_t pool_bytes() const { return prefix_pool_.size(); }
-    // base the module was loaded at when the arena was compiled (0 = unknown,
-    // e.g. arenas read from v1 META payloads)
+    // Base the module was loaded at when the arena was compiled.
     uint64_t module_base(uint32_t id) const {
         return id < module_bases_.size() ? module_bases_[id] : 0;
     }
@@ -93,14 +104,10 @@ public:
     int32_t symbol_id(const char* name) { return intern_string(name); }
 
     // ---- serialization (META chunk payload) ----
-    // v2 payload layout (v1 = same but with no magic, no module bases, no
-    // module_id, no simd_idx/op_flags; detected by the absence of the magic):
-    //   u32 META_V2_MAGIC ("GTM2")
-    //   strings, modules (string id + u64 base each), prefix pool — as v1
-    //   sites: v1 fields + uvar module_id; ops: v1 fields + simd_idx + op_flags
+    // GTB2 META payload: strings, modules with bases, prefix/disassembly pool,
+    // then sites with their compact observation plan and compiled semantics.
     void serialize(std::vector<uint8_t>& out) const;
-    static bool deserialize(const uint8_t* p, size_t len, SiteArena& out,
-                            std::vector<std::string>& modules_out);
+    static bool deserialize(const uint8_t* p, size_t len, SiteArena& out);
 
     const std::vector<Site>& sites() const { return sites_; }
     const std::vector<std::string>& strings() const { return strings_; }
@@ -126,7 +133,6 @@ struct TextOp {
     const char* name;
     size_t name_len;
     uint8_t kind;   // OP_REG_R / OP_REG_W / OP_MEM_R / OP_MEM_W
-    uint8_t size;   // access size hint for mem ops (0 = default)
 };
 
 // classify a printed operand name ("x5", "w19", "fp", "lr", "sp", "v0", ...).

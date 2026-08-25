@@ -1,5 +1,5 @@
 #pragma once
-// .gtb parsing and the Expander (upstream/compact/jsonl expansion).
+// .gtb parsing, semantic group scanning, and output expansion.
 #include "recorder.h"
 #include "site.h"
 #include <cstdint>
@@ -19,15 +19,13 @@ struct MemOp {
 
 struct GtbFile {
     SiteArena arena;
-    std::vector<std::string> modules;
     // concatenated EVENTS payload (bounded by guards; loaded once)
     std::vector<uint8_t> events;
     uint8_t stop_reason = 0;
-    uint8_t dialect = 0;       // footer dialect byte: bit0=upstream, bit1=CRLF
+    bool crlf = false;
     uint64_t events_seen = 0, events_recorded = 0, bytes_written = 0;
-    uint64_t initial_sp = 0;   // from footer (0 = not recorded / unknown)
-    uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_svc = 0, n_ret = 0;
-    uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0, n_call2 = 0;
+    uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_ret = 0;
+    uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0;
 
     // scan_stats decodes the event stream to populate n_* counters. Queries
     // that do not expose those counters can skip that otherwise redundant
@@ -35,12 +33,11 @@ struct GtbFile {
     bool load(const std::string& path, bool scan_stats = true);
 };
 
-// One reconstructed execution group: everything that happened at one EXEC
-// (or at a CALL/SVC/RET when detail strips EXECs).
+// One reconstructed execution group: everything that happened at one EXEC,
+// or at a standalone CALL/RET annotation.
 struct Group {
-    // Physical source-log lines reconstructed for imported upstream traces.
-    // Native recordings leave these as zero. A group can print an exec line
-    // followed by call/ret lines, so retain each identity separately.
+    // Physical source-log lines. A group can print an exec line followed by
+    // call/ret lines, so retain each identity separately.
     uint64_t source_line = 0;
     uint64_t call_source_line = 0;
     uint64_t ret_source_line = 0;
@@ -66,16 +63,11 @@ struct Group {
     bool has_verbatim = false;
     const char* verbatim = nullptr;
     uint32_t verbatim_len = 0;
-    // CALL2 (upstream dialect): observed argument count
-    int n_call_args = -1;     // -1 = legacy CALL (always 4)
+    uint8_t n_call_args = 0;
     bool is_call = false;
     bool is_jni_call = false; // imported "call jni func:" spelling
     const char* call_name = nullptr;
-    uint64_t call_target = 0;
     uint64_t args[8] = {0};
-    bool is_svc = false;
-    uint64_t svc_num = 0;
-    uint64_t svc_args[3] = {0};
     bool is_ret = false;
     uint64_t ret_val = 0;
 };
@@ -105,15 +97,15 @@ void reconstruct_agent_values(const SiteArena& arena, const Site& site,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems);
 
-// Streams groups from a GtbFile, reconstructing register values (reads are
-// rebuilt from write history; sp initialized from the footer, 0 = unknown).
+// Streams groups from a GtbFile. Register reads are reconstructed from known
+// writes and explicit observations; unknown state stays unknown.
 class Expander {
 public:
     explicit Expander(const GtbFile& f) : f_(f) {}
     // cb(group_index 0-based, group); returns false to stop
     bool for_each(const std::function<bool(uint64_t, const Group&)>& cb);
-    // upstream dialect (footer dialect bit0): observed read values incl. old
-    // values of written registers, mem_r/mem_w address-only, "-> " write
+    // Original GumTrace text: observed read values incl. old values of
+    // written registers, mem_r/mem_w address-only, "-> " write
     // tails, call with bare hex args, ret with a bare hex value, verbatim
     // lines replayed raw, and the no-newline-after-pure-store quirk.
     uint64_t expand_upstream(FILE* out, uint64_t from_idx = 0,

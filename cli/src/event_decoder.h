@@ -26,15 +26,9 @@ struct RawEvent {
     uint32_t name_id = 0;
     unsigned __int128 observed = 0;
 
-    // CALL/CALL2: symbol_plus_one is zero for a numeric target, otherwise it
-    // is the arena string id plus one. Legacy CALL has nargs == 4; CALL2 has
-    // the observed argument count.
-    uint64_t symbol_plus_one = 0;
-    uint64_t target = 0;
+    uint32_t symbol_id = 0;
     uint8_t nargs = 0;
     uint64_t args[8] = {0};
-
-    uint64_t svc_num = 0;
 
     const uint8_t* verbatim = nullptr;
     uint32_t verbatim_len = 0;

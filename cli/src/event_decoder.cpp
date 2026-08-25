@@ -28,6 +28,7 @@ bool EventCursor::take_var(int64_t& out) {
 
 bool EventCursor::next(RawEvent& out) {
     using namespace format;
+    out = RawEvent{};
     if (!take_u8(out.tag)) return false;
 
     if (out.tag == EV_EXEC) {
@@ -38,16 +39,9 @@ bool EventCursor::next(RawEvent& out) {
         return true;
     }
 
-    if (out.tag == EV_REGW || (out.tag & 0x80)) {
+    if (out.tag == EV_REGW) {
         int64_t delta;
-        if (out.tag & 0x80) {
-            out.reg = (out.tag >> 3) & 15;
-            uint8_t code = out.tag & 7;
-            delta = code == 7 ? 0 : zigzag_dec(code); // 7 was never emitted
-            out.tag = EV_REGW;
-        } else {
-            if (!take_u8(out.reg) || !take_var(delta)) return false;
-        }
+        if (!take_u8(out.reg) || !take_var(delta)) return false;
         uint8_t slot = out.reg & 31;
         last_reg_[slot] = uint64_t(int64_t(last_reg_[slot]) + delta);
         out.value = last_reg_[slot];
@@ -74,18 +68,12 @@ bool EventCursor::next(RawEvent& out) {
         return true;
     }
 
-    if (out.tag == EV_CALL || out.tag == EV_CALL2) {
-        if (!take_uvar(out.symbol_plus_one)) return false;
-        if (out.symbol_plus_one == 0) {
-            int64_t target;
-            if (!take_var(target)) return false;
-            out.target = uint64_t(target);
-        }
-        if (out.tag == EV_CALL2) {
-            if (!take_u8(out.nargs) || out.nargs > 8) return false;
-        } else {
-            out.nargs = 4;
-        }
+    if (out.tag == EV_CALL) {
+        uint64_t symbol_id;
+        if (!take_uvar(symbol_id) || symbol_id > UINT32_MAX ||
+            !take_u8(out.nargs) || out.nargs > 8)
+            return false;
+        out.symbol_id = uint32_t(symbol_id);
         for (uint8_t i = 0; i < out.nargs; i++) {
             int64_t delta;
             if (!take_var(delta)) return false;
@@ -100,18 +88,6 @@ bool EventCursor::next(RawEvent& out) {
         if (!take_var(delta)) return false;
         last_ret_ = uint64_t(int64_t(last_ret_) + delta);
         out.value = last_ret_;
-        return true;
-    }
-
-    if (out.tag == EV_SVC) {
-        if (!take_uvar(out.svc_num)) return false;
-        for (uint8_t i = 0; i < 3; i++) {
-            int64_t delta;
-            if (!take_var(delta)) return false;
-            size_t slot = 4 + i; // legacy SVC delta lanes
-            last_arg_[slot] = uint64_t(int64_t(last_arg_[slot]) + delta);
-            out.args[i] = last_arg_[slot];
-        }
         return true;
     }
 
