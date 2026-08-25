@@ -457,6 +457,12 @@ static uint8_t disasm_mem_width(const SiteArena& arena, const Site& s) {
     }
 }
 
+static unsigned __int128 mask_mem_value(unsigned __int128 value, uint8_t size) {
+    if (size == 0 || size >= 16) return value;
+    unsigned bits = unsigned(size) * 8;
+    return value & ((static_cast<unsigned __int128>(1) << bits) - 1);
+}
+
 static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
                        const uint64_t* regs,
                        std::vector<AgentMemVal>& out) {
@@ -513,6 +519,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
             mv.val = data_values[0];
             mv.known = true;
         }
+        if (mv.known) mv.val = mask_mem_value(mv.val, mv.size);
         if (n_pair_values == 0) {
             n_pair_values = n_data_values;
             for (int j = 0; j < n_data_values; j++)
@@ -530,7 +537,7 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
         second.size = uint8_t(stride);
         second.known = false;
         if (n_pair_values >= 2) {
-            second.val = pair_values[1];
+            second.val = mask_mem_value(pair_values[1], second.size);
             second.known = true;
         }
         out.push_back(second);
@@ -692,6 +699,7 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                         line += "{\"w\":";
                         line += mems[i].is_w ? '1' : '0';
                         line += ",\"addr\":\"" + emit::hex64(mems[i].addr) + '"';
+                        line += ",\"size\":" + std::to_string(mems[i].size);
                         if (mems[i].known)
                             line += ",\"val\":\"" + emit::hex128(mems[i].val) + '"';
                         line += '}';

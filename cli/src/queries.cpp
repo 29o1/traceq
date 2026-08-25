@@ -1817,7 +1817,8 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
                 for (size_t i = 0; i < mems.size(); i++) {
                     if (i) o += ',';
                     o += "{\"w\":" + std::string(mems[i].is_w ? "1" : "0") +
-                         ",\"addr\":\"" + emit::hex64(mems[i].addr) + "\"";
+                         ",\"addr\":\"" + emit::hex64(mems[i].addr) + "\"" +
+                         ",\"size\":" + std::to_string(mems[i].size);
                     if (mems[i].known)
                         o += ",\"val\":\"" + emit::hex128(mems[i].val) + "\"";
                     o += '}';
