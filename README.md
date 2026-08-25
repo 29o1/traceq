@@ -5,7 +5,8 @@
 traceq converts ARM64 instruction logs produced by
 [GumTrace](https://github.com/lidongyooo/GumTrace) into compact, queryable `.gtb`
 files. It answers questions about PCs, values, memory, calls, loops, run
-differences, and taint through bounded text or JSON Lines output.
+differences, and taint through bounded text or standard JSON output. Streaming
+event export remains available as JSON Lines.
 
 > Let an agent query an execution trace like a database instead of stuffing a
 > multi-gigabyte text log into its context window.
@@ -13,7 +14,7 @@ differences, and taint through bounded text or JSON Lines output.
 ```text
 GumTrace ──capture──> trace.log ──gt import──> trace.gtb
                                                    │
-                         gt find-* / mem-* / taint / diff / fold
+                         gt find-* / mem-* / calls / taint / diff / fold
 ```
 
 GumTrace handles live capture. traceq handles import, compression, queries, and
@@ -58,12 +59,13 @@ gt --help
 | Import a GumTrace log | `gt import trace.log -o trace.gtb` |
 | Inspect trace statistics | `gt stat trace.gtb` |
 | Export an event window | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
-| Find executed PCs | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] trace.gtb` |
-| Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E]` |
+| Find executed PCs | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] [--last N] trace.gtb` |
+| Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E] [--last N]` |
 | Find memory accesses | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
 | List writes in a finite window | `gt mem-access trace.gtb --write --from E --to E --limit N` |
 | Reconstruct known memory | `gt mem-state --range B,L... --at-ev E... [--qword] trace.gtb` |
-| Inspect call arguments | `gt func-args --func F... [--nth N] [--limit L] trace.gtb` |
+| Discover runtime call targets | `gt calls trace.gtb --top N` |
+| Inspect calls and arguments | `gt calls trace.gtb [--name F...] [--target-addr A...] [--target-off O... --mod M] [--last N]` |
 | Rebuild a call tree | `gt calltree [--func F] --depth D trace.gtb` |
 | Run forward/backward taint | `gt taint (--seed-addr A\|--seed-reg R\|--seed-q Q\|--seed-nzcv) [--back] trace.gtb` |
 | Compare two executions | `gt diff a.gtb b.gtb` |
@@ -73,8 +75,9 @@ Every subcommand supports `--help`. `gt` intentionally has no `record`
 subcommand: GumTrace captures live execution, then `gt import` brings the log
 into the query pipeline.
 
-Repeat `find-value --value` or `func-args --func` to inspect several candidates
-in one scan; `find-value` applies `--limit` and `--offset` per value. For
+Repeat `find-value --value`, `find-pc` selectors, or `calls` selectors to inspect
+several candidates in one scan; `find-value` applies `--limit`, `--offset`, and
+`--last` per value. For
 `mem-state`, repeat `--range` and/or `--at-ev`; traceq emits their Cartesian
 product from one scan. The single-selector record shape remains unchanged.
 `mem-state --at E` and `call-tree` are accepted compatibility aliases. Omit
@@ -84,36 +87,40 @@ to writes inside an explicit `--from`/`--to` event window.
 
 ## Agent Output Contract
 
-- Query commands support `--json`; `export` uses `--format jsonl`.
+- Query commands support `--json` and return one standard
+  `{"data":[...],"meta":{...}}` document. `export --format jsonl` remains a
+  streaming sequence with a trailing meta record.
 - Addresses, register values, and SIMD values are hex strings. Event indices
   and counts are decimal numbers.
 - Query output is bounded by default. Pass `--limit` explicitly to bound an
   `export` window.
-- The final line is always a `meta` record. When output is truncated, `next` is
-  a directly executable continuation command.
+- Query metadata contains exact `total`/`shown` counts. When output is truncated,
+  `next` is a directly executable continuation command when pagination applies.
 - Event results include both the `.gtb` event index (`ev`) and the original
   imported log line (`line`).
 
 Example:
 
-```jsonl
-{"ev":0,"line":1,"mod":"libc.so","off":"0x57490","txt":"b.hi #0x77df89c554","rd":[],"wr":[]}
-{"meta":{"truncated":true,"total":517,"shown":1,"next":"gt export --from 1 --limit 1 --format jsonl trace.gtb"}}
+```json
+{"data":[{"ev":0,"line":1,"mod":"libc.so","off":"0x57490","txt":"b.hi #0x77df89c554","rd":[],"wr":[]}],"meta":{"truncated":true,"total":517,"shown":1,"next":"gt find-pc --off 0x57490 --limit 1 --offset 1 trace.gtb --json"}}
 ```
 
 Useful structured fields:
 
 - `export --format jsonl` and `find-pc --json` memory entries include
   `w/addr/size/val`; `val` is limited to the recorded or inferred access width.
-- Agent-facing call exports preserve the recorded 0–8 CALL2 arguments; legacy
-  CALL records retain their fixed `x0`–`x3` shape.
+- `calls` finds executed `BL`, `BLR`, `BLRAA`, and `BLRAB` sites even when no
+  `call func:` annotation exists. Annotations enrich matching rows with names,
+  explicit arguments, and reliably paired returns; unknown `x0`–`x7` values are
+  `null`.
 - `find-value` returns `kind/rw/reg` or `kind/rw/addr/size`, so callers do not
   need to parse a textual lane description.
 - `mem-access` matches accesses that contain a selected address or overlap a
   selected range. It reports access width; reads also include the most recent
   overlapping `prior_write_ev` when one was observed.
-- `mem-state --qword` emits 8-byte little-endian cells; unknown values are
-  `null`.
+- Byte-oriented `mem-state` emits parseable `data_hex` with unknown bytes filled
+  as `00`; the `unknown` intervals are authoritative. `--qword` emits 8-byte
+  little-endian cells and uses `null` for unknown values.
 - `diff` distinguishes execution indices from the real event indices on each
   side. `fold` reports both execution and event ranges.
 - `taint` explicitly reports `partial`, its seed, edges, and final register and
