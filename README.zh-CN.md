@@ -3,15 +3,15 @@
 [English](README.md)
 
 traceq 将 [GumTrace](https://github.com/lidongyooo/GumTrace) 产生的 ARM64 指令日志
-转换为紧凑、可查询的 `.gtb` 文件，并通过有界的文本或 JSON Lines 输出回答
-PC、值、内存、调用、循环、差异和污点问题。
+转换为紧凑、可查询的 `.gtb` 文件，并通过有界文本或标准 JSON 输出回答 PC、值、
+内存、调用、循环、差异和污点问题；流式事件导出仍使用 JSON Lines。
 
 > 让 Agent 像查询数据库一样查询执行轨迹，而不是把整份 GB 级文本塞进上下文。
 
 ```text
 GumTrace ──capture──> trace.log ──gt import──> trace.gtb
                                                    │
-                         gt find-* / mem-* / taint / diff / fold
+                         gt find-* / mem-* / calls / taint / diff / fold
 ```
 
 GumTrace 负责实时抓取，traceq 负责导入、压缩、查询和面向 Agent 输出；两个项目
@@ -51,12 +51,13 @@ gt --help
 | 导入 GumTrace 日志 | `gt import trace.log -o trace.gtb` |
 | 查看概况 | `gt stat trace.gtb` |
 | 导出窗口 | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
-| 查执行位置 | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] trace.gtb` |
-| 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E]` |
+| 查执行位置 | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] [--last N] trace.gtb` |
+| 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E] [--last N]` |
 | 查内存访问 | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
 | 枚举有限窗口内的写入 | `gt mem-access trace.gtb --write --from E --to E --limit N` |
 | 重建已知内存 | `gt mem-state --range B,L... --at-ev E... [--qword] trace.gtb` |
-| 查调用参数 | `gt func-args --func F... [--nth N] [--limit L] trace.gtb` |
+| 发现运行时调用目标 | `gt calls trace.gtb --top N` |
+| 查调用与参数 | `gt calls trace.gtb [--name F...] [--target-addr A...] [--target-off O... --mod M] [--last N]` |
 | 重建调用树 | `gt calltree [--func F] --depth D trace.gtb` |
 | 正向/反向污点 | `gt taint (--seed-addr A\|--seed-reg R\|--seed-q Q\|--seed-nzcv) [--back] trace.gtb` |
 | 比较两次执行 | `gt diff a.gtb b.gtb` |
@@ -65,8 +66,9 @@ gt --help
 每个子命令都支持 `--help`。`gt` 没有 `record` 子命令：实时 trace 始终由
 GumTrace 产生，再通过 `gt import` 进入查询链路。
 
-重复传 `find-value --value` 或 `func-args --func` 可在一次扫描中查询多个候选；
-`find-value` 的 `--limit` 和 `--offset` 按值分别生效。`mem-state` 可重复传
+重复传 `find-value --value`、`find-pc` 或 `calls` 的 selector 可在一次扫描中查询
+多个候选；`find-value` 的 `--limit`、`--offset` 和 `--last` 按值分别生效。
+`mem-state` 可重复传
 `--range` 和/或 `--at-ev`，一次扫描输出两组 selector 的笛卡尔积；单 selector
 记录结构保持兼容。同时兼容 `mem-state --at E` 与 `call-tree` 别名。省略
 `calltree --func` 时会先输出有界的全局调用森林。地址未知时，无 selector 的
@@ -74,29 +76,34 @@ GumTrace 产生，再通过 `gt import` 进入查询链路。
 
 ## Agent 输出契约
 
-- 查询命令支持 `--json`；`export` 使用 `--format jsonl`。
+- 查询命令的 `--json` 返回单个标准
+  `{"data":[...],"meta":{...}}` 文档；`export --format jsonl` 仍是流式记录，
+  末尾带 meta 记录。
 - 地址、寄存器值和 SIMD 值使用 hex 字符串，事件号与计数使用十进制数字。
 - 查询输出默认有界；`export` 需要显式传 `--limit` 才限制输出窗口。
-- 最后一行固定为 `meta`；发生截断时，`next` 是可以直接执行的续页命令。
+- 查询元数据给出精确的 `total`/`shown`；可分页且发生截断时，`next` 是可直接
+  执行的续页命令。
 - 事件类结果同时给出 `.gtb` 事件号 `ev` 和导入日志原始行号 `line`。
 
 例如：
 
-```jsonl
-{"ev":0,"line":1,"mod":"libc.so","off":"0x57490","txt":"b.hi #0x77df89c554","rd":[],"wr":[]}
-{"meta":{"truncated":true,"total":517,"shown":1,"next":"gt export --from 1 --limit 1 --format jsonl trace.gtb"}}
+```json
+{"data":[{"ev":0,"line":1,"mod":"libc.so","off":"0x57490","txt":"b.hi #0x77df89c554","rd":[],"wr":[]}],"meta":{"truncated":true,"total":517,"shown":1,"next":"gt find-pc --off 0x57490 --limit 1 --offset 1 trace.gtb --json"}}
 ```
 
 常用结构化字段：
 
 - `export --format jsonl` 与 `find-pc --json` 的内存项包含
   `w/addr/size/val`；`val` 会按记录或推断出的访问宽度截断。
-- Agent 导出会保留 CALL2 实际记录的 0–8 个参数；旧 CALL 仍保持固定的
-  `x0`–`x3` 形式。
+- `calls` 会发现没有 `call func:` 注释的 `BL`、`BLR`、`BLRAA`、`BLRAB`；
+  匹配的注释会补充名称、显式参数和可靠配对的返回值，未知的 `x0`–`x7` 为
+  `null`。
 - `find-value` 返回 `kind/rw/reg` 或 `kind/rw/addr/size`，无需再解析文本 lane。
 - `mem-access` 会匹配覆盖指定地址或与指定范围重叠的访问，并返回访问宽度；读事件还会
   给出最近一次重叠写入的 `prior_write_ev`。
-- `mem-state --qword` 以 8 字节小端单元输出，未知值为 `null`。
+- 字节模式 `mem-state` 的 `data_hex` 始终可解析，未知字节以 `00` 填充，
+  `unknown` 区间才是未知性的权威信息；`--qword` 以 8 字节小端单元输出，
+  未知值为 `null`。
 - `diff` 区分执行序号和两侧真实事件号；`fold` 同时返回执行范围与事件范围。
 - `taint` 明确报告 `partial`、种子、边、最终寄存器和内存地址集合。
 
