@@ -1,11 +1,10 @@
 #pragma once
 #include "common.h"
 
-// Agent-facing query surface. Design rule: every output is bounded with an
-// explicit truncation marker — the consumer is an agent with a limited
-// context window, so queries must return small structured answers, never raw
-// dumps. W2 contract: every command runs in text or --json mode (one JSON
-// document, integer values as hex strings) and returns data plus cursor
+// Agent-facing query surface. List queries use bounded defaults and explicit
+// truncation metadata; snapshot and aggregate commands are bounded by their
+// selectors or command-specific controls. Every query runs in text or --json
+// mode (one JSON document, integer values as hex strings) and returns data plus
 // metadata (truncated/total/shown/next).
 //
 // Every query sequentially scans the loaded .gtb event buffer (one TraceScan

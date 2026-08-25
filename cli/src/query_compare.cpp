@@ -132,6 +132,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         if (identical) {
             printf("identical execution sequences\n");
             emit::Meta meta;
+            meta.total = meta.shown = 1;
             writer.finish(meta);
             return 0;
         }
@@ -159,6 +160,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         }
     }
     emit::Meta meta;
+    meta.total = meta.shown = 1;
     writer.finish(meta);
     return 0;
 }

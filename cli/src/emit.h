@@ -111,8 +111,8 @@ inline std::string str_array(const std::vector<std::string>& vs) {
 
 struct Meta {
     bool truncated = false;
-    uint64_t total = 0;              // rows existing in the answer
-    uint64_t shown = 0;              // rows actually emitted
+    uint64_t total = 0;              // primary result items in the answer
+    uint64_t shown = 0;              // primary result items represented
     std::string next;                // full continuation command ("" = none)
 };
 
@@ -129,9 +129,10 @@ inline void meta_append(std::string& s, const Meta& m) {
 }
 
 // Query JSON is buffered until finish() so a validation/scan failure never
-// leaves a syntactically incomplete document on stdout. Query results are
-// already bounded by command limits; large unbounded streams use export
-// --format jsonl instead.
+// leaves a syntactically incomplete document on stdout. List results are
+// bounded by command limits; snapshot and aggregate sizes come from their
+// explicit selectors or command-specific controls. Large unbounded streams use
+// export --format jsonl instead.
 class QueryWriter {
 public:
     explicit QueryWriter(bool json, FILE* out = stdout) : json_(json), out_(out) {}
