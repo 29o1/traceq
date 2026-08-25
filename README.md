@@ -67,7 +67,8 @@ gt --help
 |---|---|
 | Import a GumTrace log | `gt import trace.log -o trace.gtb` |
 | Inspect trace statistics | `gt stat trace.gtb` |
-| Export an event window | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
+| Export a bounded event window | `gt export --format compact\|jsonl\|upstream [--from E --to E] [--limit N] trace.gtb` |
+| Replay the complete source log | `gt export --format upstream --all trace.gtb -o trace.log` |
 | Find executed PCs | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] [--last N] trace.gtb` |
 | Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E] [--last N]` |
 | Find memory accesses | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
@@ -101,8 +102,8 @@ to writes inside an explicit `--from`/`--to` event window.
   streaming sequence with a trailing meta record.
 - Addresses, register values, and SIMD values are hex strings. Event indices
   and counts are decimal numbers.
-- Query output is bounded by default. Pass `--limit` explicitly to bound an
-  `export` window.
+- Query and export output defaults to 20 rows or lines. Use `--limit N` to
+  choose another budget; only `export --all` requests unbounded output.
 - Query metadata contains exact `total`/`shown` counts. When output is truncated,
   `next` is a directly executable continuation command when pagination applies.
 - Event results include both the `.gtb` event index (`ev`) and the original
@@ -133,37 +134,56 @@ Useful structured fields:
 - `diff` distinguishes execution indices from the real event indices on each
   side. `fold` reports both execution and event ranges.
 - `taint` explicitly reports `partial`, its seed, edges, and final register and
-  memory-address sets.
+  memory-address sets. `addr_total` and `addrs_truncated` distinguish the full
+  frontier size from the bounded `addrs` evidence included in the response.
 
 ## Design
 
 The core data model separates the **static site table from the dynamic event
-stream**. During import, module names, PCs, offsets, mnemonics, and operand plans
-are deduplicated by address in `SiteArena`. Individual executions and values are
+stream**. During import, `SiteArena` deduplicates instructions by address and
+compiles stable facts such as branch operands, memory width, pair stride, and
+taint data-flow roles once. Individual executions and observed values are then
 stored in a varint/delta event stream.
+
+```text
+trace.log ──parser──> GTB2
+                      ├─ SiteArena: text + compiled instruction semantics
+                      └─ EVENTS: compact dynamic observations
+                                      │
+                                  TraceScan
+                            ┌─────────┴─────────┐
+                      query algorithms     export renderers
+                  find/mem/calls/taint    compact/jsonl/upstream
+```
 
 | Event | Encoding | Purpose |
 |---|---|---|
 | EXEC | zigzag delta(site_id) | Executes a static site; hot loops commonly use one byte |
-| REGW | tag + reg + zigzag delta | Register writes; the reader also accepts the legacy inline encoding |
+| REGW | tag + reg + zigzag delta | Register writes used to reconstruct known state |
 | MEM | flags + address/value delta | Memory reads and writes with observed values |
-| MEMW_NV | no stored value | Reuses a value already present in a register event |
-| CALL/RET/SVC | symbol + argument delta | Calls, returns, and system calls |
+| MEMW_NV | flags + address delta | Memory access whose value was not observed |
+| CALL | symbol + argument count + deltas | Upstream call annotation with 0–8 arguments |
+| RET | return-value delta | Upstream return annotation |
 | RDVAL/SIMDV | name + delta or 16B | Explicitly observed integer and SIMD values |
 | VERBATIM | length + raw bytes | Preserves input lines that cannot be classified |
-| CALL2 | symbol + argument count + delta | Upstream call lines with 0–8 arguments |
 
 Integer register values recoverable from write history are not stored twice;
 values explicitly observed in the source log are retained. The footer records
-counts, the stop reason, and input dialect. Imported LF and CRLF logs can be
-reproduced byte-for-byte with `gt export --format upstream`. Unknown input forms
-become `VERBATIM` events instead of being silently discarded.
+counts, the stop reason, and whether the input used CRLF. Imported LF and CRLF
+logs can be reproduced byte-for-byte with
+`gt export --format upstream --all`. Unknown input forms become `VERBATIM`
+events instead of being silently discarded.
 
-Queries load the `.gtb` event buffer and scan it sequentially. Repeatable
-selectors share that scan, avoiding repeated 100MB+ file loads without adding
-a database or index-building step. In the intended agent workflow, query time
-is normally much smaller than one model-reasoning turn, while an index would
-add build time, storage, and dependencies.
+GTB2 is a derived analysis format rather than an archival source format. The
+0.x CLI reads the current GTB2 layout; after a format upgrade, re-import the
+original GumTrace `.log` instead of treating old `.gtb` files as durable input.
+
+`TraceScan` is the single semantic walk over a loaded event buffer. It preserves
+source-line provenance and reconstructs only known register state. Query
+algorithms are grouped by capability (taint, comparison, lookup/memory, calls),
+while compact, JSONL, and upstream rendering sit behind a separate export
+boundary. Repeatable selectors share one scan without adding a database or an
+index-building step.
 
 ## Testing
 
@@ -233,7 +253,8 @@ this page.
 ```text
 cli/                         libtraceq, the gt CLI, and product tests
   include/traceq/            public C++ headers
-  src/                       import, GTB codec, expansion, queries, and CLI
+  src/                       import, GTB2 codec, semantic scan, exporters,
+                             capability-grouped queries, and CLI
   tests/test_main.cpp        tests through the real product path
 
 bench/                       black-box benchmarks; never links product code

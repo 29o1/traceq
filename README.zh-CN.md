@@ -57,7 +57,8 @@ gt --help
 |---|---|
 | 导入 GumTrace 日志 | `gt import trace.log -o trace.gtb` |
 | 查看概况 | `gt stat trace.gtb` |
-| 导出窗口 | `gt export --format compact\|jsonl\|upstream --from E --to E --limit N trace.gtb` |
+| 导出有界窗口 | `gt export --format compact\|jsonl\|upstream [--from E --to E] [--limit N] trace.gtb` |
+| 完整回放源日志 | `gt export --format upstream --all trace.gtb -o trace.log` |
 | 查执行位置 | `gt find-pc (--addr A... \| --off O... [--mod M]) [--from E --to E] [--last N] trace.gtb` |
 | 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--from E --to E] [--last N]` |
 | 查内存访问 | `gt mem-access (--addr A... \| --range B,L) [--read\|--write] [--last N] trace.gtb` |
@@ -87,7 +88,8 @@ GumTrace 产生，再通过 `gt import` 进入查询链路。
   `{"data":[...],"meta":{...}}` 文档；`export --format jsonl` 仍是流式记录，
   末尾带 meta 记录。
 - 地址、寄存器值和 SIMD 值使用 hex 字符串，事件号与计数使用十进制数字。
-- 查询输出默认有界；`export` 需要显式传 `--limit` 才限制输出窗口。
+- 查询与导出默认最多输出 20 行或 20 项；用 `--limit N` 调整预算，只有显式
+  `export --all` 才请求无界输出。
 - 查询元数据给出精确的 `total`/`shown`；可分页且发生截断时，`next` 是可直接
   执行的续页命令。
 - 事件类结果同时给出 `.gtb` 事件号 `ev` 和导入日志原始行号 `line`。
@@ -112,33 +114,49 @@ GumTrace 产生，再通过 `gt import` 进入查询链路。
   `unknown` 区间才是未知性的权威信息；`--qword` 以 8 字节小端单元输出，
   未知值为 `null`。
 - `diff` 区分执行序号和两侧真实事件号；`fold` 同时返回执行范围与事件范围。
-- `taint` 明确报告 `partial`、种子、边、最终寄存器和内存地址集合。
+- `taint` 明确报告 `partial`、种子、边、最终寄存器和内存地址集合；
+  `addr_total`/`addrs_truncated` 区分完整前沿大小与响应中有界的 `addrs` 证据。
 
 ## 设计
 
-核心数据模型是**静态站点表与动态执行流分离**。导入时，模块名、PC、偏移、
-助记符和操作数计划在 `SiteArena` 中按地址去重；每次执行和值写入 varint/delta
-事件流。
+核心数据模型是**静态站点表与动态执行流分离**。导入时，`SiteArena` 按地址去重
+指令，并一次性编译分支操作数、内存宽度、pair stride 和污点数据流角色等稳定
+语义；每次执行与实际观测值再写入 varint/delta 事件流。
+
+```text
+trace.log ──parser──> GTB2
+                      ├─ SiteArena：文本 + 已编译指令语义
+                      └─ EVENTS：紧凑动态观测
+                                  │
+                              TraceScan
+                       ┌──────────┴──────────┐
+                    查询算法             导出渲染
+             find/mem/calls/taint    compact/jsonl/upstream
+```
 
 | 事件 | 编码 | 说明 |
 |---|---|---|
 | EXEC | zigzag delta(site_id) | 执行了某个静态站点；热循环通常只需 1 字节 |
-| REGW | tag + reg + zigzag delta | 寄存器写值；reader 兼容旧 inline 编码 |
+| REGW | tag + reg + zigzag delta | 用于重建已知状态的寄存器写值 |
 | MEM | flags + address/value delta | 内存读写及实际值 |
-| MEMW_NV | 无存储值 | 值已存在于寄存器事件中，展开时重建 |
-| CALL/RET/SVC | symbol + argument delta | 调用、返回和系统调用 |
+| MEMW_NV | flags + address delta | 未观测到访问值的内存事件 |
+| CALL | symbol + argument count + deltas | 带 0–8 个参数的上游调用注释 |
+| RET | return-value delta | 上游返回注释 |
 | RDVAL/SIMDV | name + delta 或 16B | 上游明确观测到的整数/SIMD 值 |
 | VERBATIM | length + raw bytes | 无法分类的输入行原样保留 |
-| CALL2 | symbol + argument count + delta | 上游 0..8 参数调用行 |
 
 能从写历史恢复的整数寄存器值不会重复存储；日志中明确出现的观测值仍会保留。
-footer 记录计数、停止原因和输入方言，导入的 LF/CRLF 日志都可以通过
-`gt export --format upstream` 逐字节还原。未知输入形态进入 `VERBATIM`，不会被
-静默丢弃。
+footer 记录计数、停止原因和输入是否为 CRLF；导入的 LF/CRLF 日志都可以通过
+`gt export --format upstream --all` 逐字节还原。未知输入形态进入 `VERBATIM`，
+不会被静默丢弃。
 
-所有查询直接加载 `.gtb` event buffer 并顺序扫描；可重复 selector 共用同一次扫描，
-避免反复加载 100MB 以上的文件，同时不引入数据库或索引步骤。对 Agent 工作流而言，
-查询延迟通常远低于一轮模型推理；索引会额外引入构建时间、存储和依赖。
+GTB2 是派生分析格式，不是归档源格式。0.x CLI 读取当前 GTB2 布局；格式升级后，
+应从原始 GumTrace `.log` 重新导入，而不是把旧 `.gtb` 当作长期输入。
+
+`TraceScan` 是加载 event buffer 后唯一的语义扫描路径：它保留源行号，只重建已知
+寄存器状态。查询算法按能力分为污点、对比、查找/内存和调用分析，compact、JSONL
+与 upstream 则走独立导出边界。可重复 selector 共用同一次扫描，不引入数据库或
+索引构建步骤。
 
 ## 测试
 
@@ -195,7 +213,8 @@ trace 不随仓库发布；仅供本地使用的日志应放在已忽略的 `ben
 ```text
 cli/                         libtraceq、gt CLI 与产品测试
   include/traceq/            对外 C++ 头文件
-  src/                       import、GTB 编解码、展开、查询与 CLI
+  src/                       import、GTB2 编解码、语义扫描、导出、
+                             按能力分组的查询与 CLI
   tests/test_main.cpp        真实产品路径测试
 
 bench/                       黑盒 benchmark，不链接产品代码
