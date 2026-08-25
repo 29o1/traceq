@@ -545,6 +545,7 @@ static void usage() {
         "\n"
         "query --json output is one {\"data\":[...],\"meta\":{...}} document;\n"
         "u64 values are hex strings. export --format jsonl remains streaming.\n"
+        "query and export output defaults to 20 rows; export --all is explicit.\n"
         "all queries scan the loaded .gtb event buffer — there is no index step.\n"
         "\n"
         "capture live traces with GumTrace, then convert them with `gt import`.\n"
@@ -587,7 +588,9 @@ int cmd_export(int argc, char** argv) {
         if (is_help(argv[i])) {
             printf("usage: gt export [--format compact|jsonl|upstream] "
                    "[--from E] [--to E] [--limit N | --all] "
-                   "trace.gtb [-o FILE]\n");
+                   "trace.gtb [-o FILE]\n"
+                   "  output defaults to 20 lines; use --all for a complete "
+                   "export\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
