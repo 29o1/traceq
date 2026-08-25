@@ -2,6 +2,7 @@
 #include <traceq/ingest.h>
 #include <traceq/queries.h>
 #include "emit.h"
+#include "export.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -609,11 +610,14 @@ int cmd_export(int argc, char** argv) {
     if (!f.load(in, false)) { fprintf(stderr, "load failed\n"); return 1; }
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
-    gt::Expander ex(f);
     uint64_t stop_gi = UINT64_MAX, n = 0, total_selected = 0;
-    if (fmt == "upstream") n = ex.expand_upstream(o, from, to, limit, &stop_gi);
-    else if (fmt == "compact") n = ex.expand_compact(o, from, to, limit, &stop_gi);
-    else n = ex.expand_jsonl(o, from, to, limit, &stop_gi, &total_selected);
+    if (fmt == "upstream")
+        n = gt::export_upstream(f, o, from, to, limit, &stop_gi);
+    else if (fmt == "compact")
+        n = gt::export_compact(f, o, from, to, limit, &stop_gi);
+    else
+        n = gt::export_jsonl(f, o, from, to, limit, &stop_gi,
+                             &total_selected);
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {

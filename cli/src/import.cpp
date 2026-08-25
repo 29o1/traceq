@@ -9,7 +9,7 @@
 //          -> EV_VERBATIM, replayed byte-for-byte
 //
 // Byte-exactness contract: a line is imported structurally ONLY if the
-// upstream renderer (Expander::expand_upstream) reproduces it byte-for-byte.
+// upstream renderer reproduces it byte-for-byte.
 // Anything off-grammar — non-canonical hex (uppercase, leading zeros), tokens
 // without their trailing space, >8 tokens (plan/obs caps), unclassifiable
 // register names, unterminated last line — goes to VERBATIM instead. The

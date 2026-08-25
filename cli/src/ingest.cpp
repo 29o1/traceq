@@ -1,11 +1,9 @@
 #include <traceq/ingest.h>
 #include <traceq/varint.h>
 #include "event_decoder.h"
-#include "emit.h"
 #include "gtb_format.h"
 #include <cstring>
 #include <cstdio>
-#include <algorithm>
 
 namespace gt {
 
@@ -109,7 +107,7 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
     return true;
 }
 
-bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
+bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     memset(regs_, 0, sizeof(regs_));
     memset(known_, 0, sizeof(known_));
     Group g;
@@ -245,17 +243,13 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
 }
 
 // ---------------------------------------------------------------------------
-// register name table for the expansion engines
+// Register names and value reconstruction shared by queries and exporters.
 // ---------------------------------------------------------------------------
 const char* agent_reg_name(int ctx_idx) {
     static const char* names[32] = {
         "x0","x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15",
         "x16","x17","x18","x19","x20","x21","x22","x23","x24","x25","x26","x27","x28","x29","x30","sp"};
     return names[ctx_idx & 31];
-}
-
-static int call_arg_count(const Group& g) {
-    return g.n_call_args;
 }
 
 // plan reads (pre-event values) and writes (matched against the group's
@@ -266,7 +260,7 @@ static int call_arg_count(const Group& g) {
 // (incl. mem tokens) in plan order, wobs = "-> " write tokens. When the counts
 // pair up exactly, those are the true values — register reconstruction cannot
 // know a register nobody wrote yet (imported logs have no initial context).
-// Native groups have no observations and always reconstruct.
+// Groups without matching observations fall back to reconstructed state.
 struct ObsMap {
     bool use_obs, use_wobs;
     int obs_at[8], wobs_at[8]; // plan op index -> obs/wobs slot, -1 = none
@@ -287,107 +281,6 @@ static ObsMap obs_map(const Site& s, const Group& g) {
     return m;
 }
 
-// ---------------------------------------------------------------------------
-// Upstream-dialect text expansion (gt import round-trip). Every value here is
-// an observed token, not a reconstruction: names print in their original
-// spelling from the arena string pool and hex values re-render through
-// legacy_hex64/128 exactly as upstream trimmed them.
-//
-// Newline model (matches the observed upstream printer): each instruction
-// line ends with its own line ending; the "-> " write tail prints on the same
-// line before it. The merged-line quirk (a writeless pure store swallowing
-// the newline, seen in other upstream logs) is not representable — the
-// importer sends such physical lines to VERBATIM instead, so bytes still
-// round-trip and the quirk never reaches this renderer.
-// ---------------------------------------------------------------------------
-uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx,
-                                   uint64_t max_lines, uint64_t* stop_gi) {
-    if (stop_gi) *stop_gi = UINT64_MAX;
-    const SiteArena& A = f_.arena;
-    const char* pool = A.pool_ptr();
-    const char* nl = f_.crlf ? "\r\n" : "\n";
-    std::string line;
-    uint64_t lines = 0;
-
-    auto emit_obs = [&](const Group::Obs* arr, int cnt) {
-        char tmp[40];
-        for (int i = 0; i < cnt; i++) {
-            line += A.str(arr[i].name_id);
-            line += "=0x";
-            size_t n = legacy_hex128(tmp, arr[i].val);
-            line.append(tmp, n);
-            line += ' ';
-        }
-    };
-
-    for_each([&](uint64_t gi, const Group& g) -> bool {
-        if (gi < from_idx || gi > to_idx) return true;
-        if (max_lines && lines >= max_lines) {
-            if (stop_gi) *stop_gi = gi;
-            return false;
-        }
-        line.clear();
-        if (g.has_verbatim) {
-            line.append(g.verbatim, g.verbatim_len);
-            fwrite(line.data(), 1, line.size(), out);
-            lines++;
-            return true; // verbatim is always its own group
-        }
-        if (g.has_exec) {
-            const Site& s = A.get(g.site_id);
-            line.append(pool + s.prefix_off, s.prefix_len);
-        }
-        emit_obs(g.obs, g.n_obs);
-        if (g.n_wobs > 0) {
-            line += "-> ";
-            emit_obs(g.wobs, g.n_wobs);
-        }
-        if (g.has_exec) {
-            line += nl;
-            fwrite(line.data(), 1, line.size(), out);
-            lines++;
-        }
-        if (g.is_call) {
-            line.clear();
-            line += g.is_jni_call ? "call jni func: " : "call func: ";
-            line += g.call_name ? g.call_name : "<unknown>";
-            line += '(';
-            int na = call_arg_count(g);
-            for (int i = 0; i < na; i++) {
-                if (i) line += ", ";
-                line += "0x";
-                char tmp[24];
-                size_t n = legacy_hex64(tmp, g.args[i]);
-                line.append(tmp, n);
-            }
-            line += ')';
-            line += nl;
-            fwrite(line.data(), 1, line.size(), out);
-            lines++;
-        }
-        if (g.is_ret) {
-            line.clear();
-            line += "ret: 0x";
-            char tmp[24];
-            size_t n = legacy_hex64(tmp, g.ret_val);
-            line.append(tmp, n);
-            line += nl;
-            fwrite(line.data(), 1, line.size(), out);
-            lines++;
-        }
-        return true;
-    });
-    return lines;
-}
-
-// ---------------------------------------------------------------------------
-// Agent-facing expansions (compact text / JSON Lines)
-//
-// Same group reconstruction as expand_upstream, but token-lean: modules ride
-// "== name ==" header lines instead of per-event prefixes, addresses are
-// module-relative (!0xoffset), there is no column padding, and JSON Lines
-// carry u64 values as hex strings.
-// ---------------------------------------------------------------------------
 static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
                        std::vector<AgentRegVal>& rd, std::vector<AgentRegVal>& wr) {
     auto push_unique = [](std::vector<AgentRegVal>& values, int ctx, uint64_t val) {
@@ -522,212 +415,6 @@ void reconstruct_agent_values(const SiteArena& arena, const Site& site,
                               std::vector<AgentMemVal>& mems) {
     reconstruct_agent_registers(site, group, regs, reads, writes);
     reconstruct_agent_memory(arena, site, group, regs, mems);
-}
-
-static void agent_call_text(std::string& line, const Group& g) {
-    char b[40];
-    line += "+call ";
-    if (g.call_name) line += g.call_name;
-    else line += "<unknown>";
-    line += '(';
-    int na = call_arg_count(g);
-    for (int i = 0; i < na; i++) {
-        if (i) line += ", ";
-        snprintf(b, sizeof b, "x%d=0x%llx", i,
-                 (unsigned long long)g.args[i]);
-        line += b;
-    }
-    line += ")\n";
-}
-
-static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool json,
-                             uint64_t from_idx, uint64_t to_idx, uint64_t max_lines,
-                             uint64_t* stop_gi, uint64_t* total_selected) {
-    if (stop_gi) *stop_gi = UINT64_MAX;
-    if (total_selected) *total_selected = 0;
-    const SiteArena& A = f.arena;
-    uint64_t lines = 0, selected = 0;
-    uint32_t cur_mod = 0xFFFFFFFFu;
-    std::string line;
-    std::vector<AgentRegVal> rd, wr;
-    std::vector<AgentMemVal> mems;
-    rd.reserve(8);
-    wr.reserve(8);
-    mems.reserve(2);
-    auto count_line = [&]() {
-        size_t nl = std::count(line.begin(), line.end(), '\n');
-        lines += nl;
-    };
-    ex.for_each([&](uint64_t gi, const Group& g) -> bool {
-        if (gi < from_idx) return true;
-        if (gi > to_idx) return false;
-        selected++;
-        if (max_lines && lines >= max_lines) {
-            if (stop_gi && *stop_gi == UINT64_MAX) *stop_gi = gi;
-            // JSON needs an exact meta.total. Keep decoding the same pass but
-            // stop formatting rows once the output limit is reached.
-            return json && total_selected;
-        }
-        line.clear();
-        if (json && !g.has_exec) {
-            char b[64];
-            snprintf(b, sizeof b, "{\"ev\":%llu", (unsigned long long)gi);
-            line += b;
-            if (g.has_verbatim) line += ",\"verbatim\":true";
-        }
-        const uint64_t* regs = ex.regfile();
-        if (g.has_exec) {
-            const Site& s = A.get(g.site_id);
-            uint32_t mod_id = s.module_id < A.modules().size() ? s.module_id : 0;
-            if (!json && mod_id != cur_mod) {
-                cur_mod = mod_id;
-                line += "== " + (A.modules().empty() ? std::string("?") : A.modules()[mod_id]) +
-                        " ==\n";
-            }
-            uint64_t off = s.addr - A.module_base(mod_id);
-            std::string txt(A.pool_ptr() + s.disasm_off, s.disasm_len);
-            rd.clear();
-            wr.clear();
-            mems.clear();
-            reconstruct_agent_values(A, s, g, regs, rd, wr, mems);
-            if (json) {
-                char b[64];
-                snprintf(b, sizeof b, "{\"ev\":%llu", (unsigned long long)gi);
-                line += b;
-                if (g.source_line) {
-                    line += ',';
-                    emit::kv_u64(line, "line", g.source_line);
-                }
-                line += ',';
-                emit::kv_str(line, "mod",
-                             A.modules().empty() ? "?" : A.modules()[mod_id]);
-                line += ',';
-                emit::kv_hex(line, "off", off);
-                line += ',';
-                emit::kv_str(line, "txt", txt);
-                // rd/wr: [["x1","0x5000"], ...]
-                line += ",\"rd\":[";
-                for (size_t i = 0; i < rd.size(); i++) {
-                    if (i) line += ',';
-                    char rb[96];
-                    snprintf(rb, sizeof rb, "[\"%s\",\"0x%llx\"]",
-                             agent_reg_name(rd[i].ctx), (unsigned long long)rd[i].val);
-                    line += rb;
-                }
-                line += "],\"wr\":[";
-                for (size_t i = 0; i < wr.size(); i++) {
-                    if (i) line += ',';
-                    char rb[96];
-                    snprintf(rb, sizeof rb, "[\"%s\",\"0x%llx\"]",
-                             agent_reg_name(wr[i].ctx), (unsigned long long)wr[i].val);
-                    line += rb;
-                }
-                line += "]";
-                if (!mems.empty()) {
-                    line += ",\"mem\":[";
-                    for (size_t i = 0; i < mems.size(); i++) {
-                        if (i) line += ',';
-                        line += "{\"w\":";
-                        line += mems[i].is_w ? '1' : '0';
-                        line += ",\"addr\":\"" + emit::hex64(mems[i].addr) + '"';
-                        line += ",\"size\":" + std::to_string(mems[i].size);
-                        if (mems[i].known)
-                            line += ",\"val\":\"" + emit::hex128(mems[i].val) + '"';
-                        line += '}';
-                    }
-                    line += ']';
-                }
-            } else {
-                char b[64];
-                if (g.source_line)
-                    snprintf(b, sizeof b, "%llu line=%llu !0x%llx ",
-                             (unsigned long long)gi,
-                             (unsigned long long)g.source_line,
-                             (unsigned long long)off);
-                else
-                    snprintf(b, sizeof b, "%llu !0x%llx ",
-                             (unsigned long long)gi, (unsigned long long)off);
-                line += b;
-                line += txt;
-                if (!rd.empty() || !wr.empty()) {
-                    line += "; ";
-                    for (size_t i = 0; i < rd.size(); i++) {
-                        if (i) line += ' ';
-                        snprintf(b, sizeof b, "%s=0x%llx", agent_reg_name(rd[i].ctx),
-                                 (unsigned long long)rd[i].val);
-                        line += b;
-                    }
-                    if (!rd.empty() && !wr.empty()) line += " -> ";
-                    else if (!wr.empty()) line += "-> ";
-                    for (size_t i = 0; i < wr.size(); i++) {
-                        if (i) line += ' ';
-                        snprintf(b, sizeof b, "%s=0x%llx", agent_reg_name(wr[i].ctx),
-                                 (unsigned long long)wr[i].val);
-                        line += b;
-                    }
-                }
-                if (!mems.empty()) {
-                    line += "; ";
-                    for (size_t i = 0; i < mems.size(); i++) {
-                        if (i) line += ' ';
-                        snprintf(b, sizeof b, "%s=0x%llx", mems[i].is_w ? "mem_w" : "mem_r",
-                                 (unsigned long long)mems[i].addr);
-                        line += b;
-                        if (mems[i].known) {
-                            line += ':';
-                            line += emit::hex128(mems[i].val);
-                        }
-                    }
-                }
-                line += "\n";
-            }
-        }
-        // call/svc/ret ride their own compact lines / JSON fields
-        if (g.is_call) {
-            if (json) {
-                line += ",\"call\":{";
-                if (g.call_name) emit::kv_str(line, "sym", g.call_name);
-                std::vector<std::string> args;
-                int na = call_arg_count(g);
-                args.reserve(size_t(na));
-                for (int i = 0; i < na; i++) args.push_back(emit::hex64(g.args[i]));
-                line += ",\"args\":" + emit::str_array(args) + "}";
-            } else {
-                agent_call_text(line, g);
-            }
-        }
-        if (g.is_ret) {
-            if (json) {
-                line += ',';
-                emit::kv_hex(line, "ret", g.ret_val);
-            } else {
-                char b[32];
-                snprintf(b, sizeof b, "+ret x0=0x%llx\n", (unsigned long long)g.ret_val);
-                line += b;
-            }
-        }
-        if (json && !line.empty()) line += "}\n";
-        if (!line.empty()) {
-            fwrite(line.data(), 1, line.size(), out);
-            count_line();
-        }
-        return true;
-    });
-    if (total_selected) *total_selected = selected;
-    return lines;
-}
-
-uint64_t Expander::expand_compact(FILE* out, uint64_t from_idx, uint64_t to_idx,
-                                  uint64_t max_lines, uint64_t* stop_gi) {
-    return expand_agent(f_, *this, out, false, from_idx, to_idx, max_lines,
-                        stop_gi, nullptr);
-}
-
-uint64_t Expander::expand_jsonl(FILE* out, uint64_t from_idx, uint64_t to_idx,
-                                uint64_t max_lines, uint64_t* stop_gi,
-                                uint64_t* total_selected) {
-    return expand_agent(f_, *this, out, true, from_idx, to_idx, max_lines,
-                        stop_gi, total_selected);
 }
 
 } // namespace gt

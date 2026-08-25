@@ -6,7 +6,7 @@
 // document, integer values as hex strings) and returns data plus cursor
 // metadata (truncated/total/shown/next).
 //
-// Every query sequentially scans the loaded .gtb event buffer (one Expander
+// Every query sequentially scans the loaded .gtb event buffer (one TraceScan
 // pass); there is no index/ingest step.
 #include <cstdint>
 #include <string>

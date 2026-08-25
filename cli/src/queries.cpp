@@ -173,7 +173,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         // the dst range — without it copied buffers look like orphan addresses
         bool pend_copy = false;
         uint64_t pend_dst = 0, pend_src = 0;
-        Expander(f).for_each([&](uint64_t gi, const Group& g) -> bool {
+        TraceScan(f).for_each([&](uint64_t gi, const Group& g) -> bool {
             total = gi + 1;
             if (!seeded) {
                 bool hit = off_sites.empty()
@@ -348,7 +348,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         std::unordered_map<uint64_t, CopyRec> copies;
         bool pend_copy = false;
         uint64_t pend_dst = 0, pend_src = 0;
-        Expander(f).for_each([&](uint64_t gi, const Group& g) -> bool {
+        TraceScan(f).for_each([&](uint64_t gi, const Group& g) -> bool {
             if (at_ev && gi > at_ev) return false;
             if (g.has_verbatim) {
                 if (pend_copy) {
@@ -730,7 +730,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> sa, sb;
     sa.reserve(size_t(std::min<uint64_t>(a.events_seen, a.events.size())));
-    Expander(a).for_each([&](uint64_t ev, const Group& g) {
+    TraceScan(a).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sa.push_back({g.site_id, ev});
         return true;
     });
@@ -744,7 +744,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
     }
     emit::QueryWriter writer(json);
     sb.reserve(size_t(std::min<uint64_t>(b.events_seen, b.events.size())));
-    Expander(b).for_each([&](uint64_t ev, const Group& g) {
+    TraceScan(b).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sb.push_back({g.site_id, ev});
         return true;
     });
@@ -874,7 +874,7 @@ int q_fold(const std::string& gtb, int top, bool json) {
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> s;
     s.reserve(size_t(std::min<uint64_t>(f.events_seen, f.events.size())));
-    Expander(f).for_each([&](uint64_t ev, const Group& g) {
+    TraceScan(f).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) s.push_back({g.site_id, ev});
         return true;
     });
@@ -973,7 +973,7 @@ int q_fold(const std::string& gtb, int top, bool json) {
 // bounded text / single-document JSON contract.
 // ---------------------------------------------------------------------------
 
-// "mod!0xoff" for a site (or "<no-site>" for call/svc/ret-only groups)
+// "mod!0xoff" for a site (or "<event>" for call/ret-only groups)
 static std::string gtb_at(const GtbFile& f, uint32_t site_id) {
     if (site_id == 0xFFFFFFFFu) return "<event>";
     const Site& s = f.arena.get(site_id);
@@ -1004,7 +1004,7 @@ int q_stat(const std::string& gtb, bool json) {
     uint64_t first_addr = 0, first_off = 0;
     std::string first_mod;
     bool saw_exec = false;
-    Expander(f).for_each([&](uint64_t, const Group& g) {
+    TraceScan(f).for_each([&](uint64_t, const Group& g) {
         if (!g.has_exec) return true;
         const Site& s = f.arena.get(g.site_id);
         if (s.module_id < mod_exec.size()) mod_exec[s.module_id]++;
@@ -1182,7 +1182,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
             printf(" %s\n", gtb_at(f, r.has_exec ? r.site_id : 0xFFFFFFFFu).c_str());
         }
     };
-    Expander ex(f);
+    TraceScan ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
     auto selected_byte = [&](uint64_t addr) {
@@ -1466,7 +1466,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
 
     bool saw_event = false;
     size_t next_at = 0;
-    Expander ex(f);
+    TraceScan ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
@@ -1556,7 +1556,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     std::deque<Row> tail;
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
-    Expander ex(f);
+    TraceScan ex(f);
     std::vector<AgentRegVal> rd, wr;
     std::vector<AgentMemVal> mems;
     rd.reserve(8);
@@ -1758,7 +1758,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
         return false;
     };
 
-    Expander ex(f);
+    TraceScan ex(f);
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > options.to_ev) return false;
         if (gi < options.from_ev) return true;
@@ -2129,7 +2129,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         shown_per_value[value_i]++;
         shown++;
     };
-    Expander ex(f);
+    TraceScan ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
     ex.for_each([&](uint64_t gi, const Group& g) {
@@ -2335,7 +2335,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
         }
         would_print++;
     };
-    Expander(f).for_each([&](uint64_t gi, const Group& g) {
+    TraceScan(f).for_each([&](uint64_t gi, const Group& g) {
         if (g.is_call) {
             const char* name = g.call_name ? g.call_name : "<unknown>";
             size_t d = stack.size();

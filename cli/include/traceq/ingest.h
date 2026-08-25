@@ -73,7 +73,7 @@ struct Group {
 };
 
 // Agent-facing values reconstructed for one execution group. The supplied
-// register file is the pre-execution state exposed by Expander::for_each.
+// register file is the pre-execution state exposed by TraceScan::for_each.
 struct AgentRegVal { int ctx; uint64_t val; };
 struct AgentMemVal {
     bool is_w;
@@ -99,30 +99,11 @@ void reconstruct_agent_values(const SiteArena& arena, const Site& site,
 
 // Streams groups from a GtbFile. Register reads are reconstructed from known
 // writes and explicit observations; unknown state stays unknown.
-class Expander {
+class TraceScan {
 public:
-    explicit Expander(const GtbFile& f) : f_(f) {}
+    explicit TraceScan(const GtbFile& f) : f_(f) {}
     // cb(group_index 0-based, group); returns false to stop
     bool for_each(const std::function<bool(uint64_t, const Group&)>& cb);
-    // Original GumTrace text: observed read values incl. old values of
-    // written registers, mem_r/mem_w address-only, "-> " write
-    // tails, call with bare hex args, ret with a bare hex value, verbatim
-    // lines replayed raw, and the no-newline-after-pure-store quirk.
-    uint64_t expand_upstream(FILE* out, uint64_t from_idx = 0,
-                             uint64_t to_idx = UINT64_MAX, uint64_t max_lines = 0,
-                             uint64_t* stop_gi = nullptr);
-    // agent-facing expansions over the same groups: compact text (module
-    // header lines + !0xoffset addressing, no column padding) and JSON Lines
-    // (one object per event, u64 values as hex strings). Same window/limit/
-    // stop semantics as expand_upstream; max_lines counts emitted lines.
-    uint64_t expand_compact(FILE* out, uint64_t from_idx = 0,
-                            uint64_t to_idx = UINT64_MAX, uint64_t max_lines = 0,
-                            uint64_t* stop_gi = nullptr);
-    uint64_t expand_jsonl(FILE* out, uint64_t from_idx = 0,
-                          uint64_t to_idx = UINT64_MAX, uint64_t max_lines = 0,
-                          uint64_t* stop_gi = nullptr,
-                          uint64_t* total_selected = nullptr);
-
     const uint64_t* regfile() const { return regs_; }
     const uint8_t* reg_known() const { return known_; }
 
