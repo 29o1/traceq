@@ -46,14 +46,11 @@ git clone https://github.com/29o1/traceq.git
 cd traceq
 make
 
-# Try the complete workflow with an included, reviewed real-device trace.
-./cli/gt import bench/traces/memcpy_device.log -o /tmp/memcpy.gtb
-./cli/gt stat /tmp/memcpy.gtb
-./cli/gt export --format jsonl --limit 5 /tmp/memcpy.gtb
+# Convert a GumTrace log, inspect it, and request a bounded event window.
+./cli/gt import trace.log -o trace.gtb
+./cli/gt stat trace.gtb --json
+./cli/gt export --format jsonl --limit 5 trace.gtb
 ```
-
-The fixture's provenance and review scope are documented in
-[`bench/traces/README.md`](bench/traces/README.md).
 
 Optionally install `gt` for the current user:
 

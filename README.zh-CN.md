@@ -36,14 +36,11 @@ git clone https://github.com/29o1/traceq.git
 cd traceq
 make
 
-# 用仓库自带、经过审查的真机 trace 体验完整工作流
-./cli/gt import bench/traces/memcpy_device.log -o /tmp/memcpy.gtb
-./cli/gt stat /tmp/memcpy.gtb
-./cli/gt export --format jsonl --limit 5 /tmp/memcpy.gtb
+# 转换一份 GumTrace 日志，查看概况并导出有界事件窗口
+./cli/gt import trace.log -o trace.gtb
+./cli/gt stat trace.gtb --json
+./cli/gt export --format jsonl --limit 5 trace.gtb
 ```
-
-该 trace 的来源和审查范围见
-[`bench/traces/README.md`](bench/traces/README.md)。
 
 可选安装到当前用户目录：
 
