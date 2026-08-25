@@ -287,6 +287,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      const std::string& mod, bool json, bool index_deps) {
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
 
     // --off resolves to the set of sites at that module-relative offset
     std::unordered_set<uint32_t> off_sites;
@@ -867,7 +868,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             o += '"' + emit::hex64(addrs[i]) + '"';
         }
         o += ']';
-        printf("{%s}\n", o.c_str());
+        writer.row("{" + o + "}");
     } else {
         if (partial)
             printf("PARTIAL: window limited — walked %llu of %llu events; widen with "
@@ -909,7 +910,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     meta.truncated = edges_trunc;
     if (edges_trunc)
         meta.next = taint_cmd(limit > 0 ? limit * 5 : 100); // raise --limit; rerun from seed
-    emit::finish(meta, json);
+    writer.finish(meta);
     if (edges_trunc && !json)
         printf("note: taint is not resumable — the next command reruns from the seed with a raised --limit\n");
     return 0;
@@ -952,6 +953,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         fprintf(stderr, "load failed\n");
         return 1;
     }
+    emit::QueryWriter writer(json);
     sb.reserve(size_t(std::min<uint64_t>(b.events_seen, b.events.size())));
     Expander(b).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sb.push_back({g.site_id, ev});
@@ -1036,13 +1038,13 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
             }
             o += ']';
         }
-        printf("{\"diff\":{%s}}\n", o.c_str());
+        writer.row("{\"diff\":{" + o + "}}");
     } else {
         printf("exec counts: A=%zu B=%zu\n", sa.size(), sb.size());
         if (identical) {
             printf("identical execution sequences\n");
             emit::Meta meta;
-            emit::finish(meta, json);
+            writer.finish(meta);
             return 0;
         }
         printf("first divergence at exec index %zu (0-based)", div);
@@ -1069,7 +1071,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         }
     }
     emit::Meta meta;
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
@@ -1079,6 +1081,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
 int q_fold(const std::string& gtb, int top, bool json) {
     GtbFile f;
     if (!f.load(gtb, false)) return 1;
+    emit::QueryWriter writer(json);
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> s;
     s.reserve(size_t(std::min<uint64_t>(f.events_seen, f.events.size())));
@@ -1140,16 +1143,15 @@ int q_fold(const std::string& gtb, int top, bool json) {
             o += ",\"body\":[";
             for (size_t j = 0; j < L.period && j < 8; j++) {
                 if (j) o += ',';
-                o.push_back('"');
-                o.append(f.arena.pool_ptr() +
-                             f.arena.get(s[L.start + j].site).disasm_off,
-                         f.arena.get(s[L.start + j].site).disasm_len);
-                o.push_back('"');
+                const Site& body_site = f.arena.get(s[L.start + j].site);
+                std::string body(f.arena.pool_ptr() + body_site.disasm_off,
+                                 body_site.disasm_len);
+                emit::esc_append(o, body.c_str());
             }
             o += "]}";
         }
         o += ']';
-        printf("{\"fold\":{%s}}\n", o.c_str());
+        writer.row("{\"fold\":{" + o + "}}");
     } else {
         printf("detected %zu loop regions (top %d by executed instructions):\n", loops.size(), top);
         for (size_t k = 0; k < shown; k++) {
@@ -1173,13 +1175,13 @@ int q_fold(const std::string& gtb, int top, bool json) {
     meta.total = loops.size();
     meta.shown = shown;
     meta.truncated = loops.size() > shown;
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
 // ---------------------------------------------------------------------------
 // Agent-facing gtb queries. One pass over the loaded event buffer, with the
-// (text / JSON Lines) + meta-footer contract.
+// bounded text / single-document JSON contract.
 // ---------------------------------------------------------------------------
 
 // "mod!0xoff" for a site (or "<no-site>" for call/svc/ret-only groups)
@@ -1210,6 +1212,7 @@ static const char* stop_reason_name(uint8_t r) {
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
     std::vector<uint64_t> mod_exec(f.arena.modules().size(), 0);
     uint64_t first_addr = 0, first_off = 0;
     std::string first_mod;
@@ -1274,7 +1277,7 @@ int q_stat(const std::string& gtb, bool json) {
             o += '}';
         }
         o += ']';
-        printf("{\"stat\":{%s}}\n", o.c_str());
+        writer.row("{\"stat\":{" + o + "}}");
     } else {
         printf("file: %s (dialect %s, stop %s)\n", gtb.c_str(), dialect,
                stop_reason_name(f.stop_reason));
@@ -1301,7 +1304,7 @@ int q_stat(const std::string& gtb, bool json) {
     }
     emit::Meta meta;
     meta.total = meta.shown = 1;
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
@@ -1325,6 +1328,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     }
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
     struct Row {
         uint64_t ev, line, addr;
         unsigned __int128 value;
@@ -1370,7 +1374,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
             o += ',';
             emit::kv_str(o, "at", gtb_at(f, r.has_exec ? r.site_id : 0xFFFFFFFFu));
             o += '}';
-            printf("%s\n", o.c_str());
+            writer.row(std::move(o));
         } else {
             printf("%llu", (unsigned long long)r.ev);
             if (r.line) printf(" line=%llu", (unsigned long long)r.line);
@@ -1510,7 +1514,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
@@ -1550,6 +1554,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
         fprintf(stderr, "load failed: %s\n", gtb.c_str());
         return 1;
     }
+    emit::QueryWriter writer(options.json);
 
     struct State {
         MemStateRange range;
@@ -1597,7 +1602,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
                     if (word_known) emit::esc_append(o, emit::hex64(val).c_str());
                     else o += "null";
                     o += '}';
-                    printf("%s\n", o.c_str());
+                    writer.row(std::move(o));
                 } else if (word_known) {
                     printf("0x%llx =0x%llx\n",
                            (unsigned long long)(range_base + i),
@@ -1612,17 +1617,17 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
         }
 
         static const char kHex[] = "0123456789abcdef";
-        std::string hex;
-        hex.reserve(size_t(range_len) * 2);
+        std::string data_hex;
+        data_hex.reserve(size_t(range_len) * 2);
         uint64_t known_count = 0;
         for (size_t i = 0; i < bytes.size(); i++) {
             if (!known[i]) {
-                hex += "??";
+                data_hex += "00";
                 continue;
             }
             known_count++;
-            hex.push_back(kHex[bytes[i] >> 4]);
-            hex.push_back(kHex[bytes[i] & 15]);
+            data_hex.push_back(kHex[bytes[i] >> 4]);
+            data_hex.push_back(kHex[bytes[i] & 15]);
         }
 
         if (options.json) {
@@ -1635,7 +1640,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
             o += ',';
             emit::kv_u64(o, "known", known_count);
             o += ',';
-            emit::kv_str(o, "hex", hex);
+            emit::kv_str(o, "data_hex", data_hex);
             o += ",\"unknown\":[";
             bool first = true;
             for (size_t i = 0; i < known.size();) {
@@ -1655,7 +1660,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
                 i = j;
             }
             o += "]}}";
-            printf("%s\n", o.c_str());
+            writer.row(std::move(o));
         } else {
             printf("mem-state base=0x%llx len=0x%llx at-ev=%llu known=%llu/%llu\n",
                    (unsigned long long)range_base,
@@ -1727,7 +1732,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
     emit::Meta meta;
     meta.total = shown;
     meta.shown = shown;
-    emit::finish(meta, options.json);
+    writer.finish(meta);
     return 0;
 }
 
@@ -1745,14 +1750,27 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     const auto& addrs = options.addrs;
     const auto& offs = options.offs;
     const auto& mod = options.mod;
-    int limit = options.limit;
+    int limit = options.limit, last = options.last;
     uint64_t offset = options.offset, from_ev = options.from_ev;
     uint64_t to_ev = options.to_ev;
     bool json = options.json;
+    if ((addrs.empty() && offs.empty()) || from_ev > to_ev || last < 0 ||
+        (last > 0 && offset != 0)) {
+        fprintf(stderr, "find-pc: invalid selector, range, or --last combination\n");
+        return 2;
+    }
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
+    struct Row {
+        uint64_t ev = 0, line = 0, off = 0, addr = 0;
+        std::string mod, txt;
+        std::vector<AgentRegVal> rd, wr;
+        std::vector<AgentMemVal> mems;
+    };
+    std::deque<Row> tail;
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     Expander ex(f);
@@ -1761,6 +1779,78 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     rd.reserve(8);
     wr.reserve(8);
     mems.reserve(2);
+    auto emit_row = [&](const Row& r) {
+        if (json) {
+            std::string o = "{";
+            emit::kv_u64(o, "ev", r.ev);
+            if (r.line) {
+                o += ',';
+                emit::kv_u64(o, "line", r.line);
+            }
+            o += ',';
+            emit::kv_str(o, "mod", r.mod);
+            o += ',';
+            emit::kv_hex(o, "off", r.off);
+            o += ',';
+            emit::kv_hex(o, "addr", r.addr);
+            o += ',';
+            emit::kv_str(o, "txt", r.txt);
+            o += ",\"rd\":[";
+            for (size_t i = 0; i < r.rd.size(); i++) {
+                if (i) o += ',';
+                o += "[\"" + std::string(agent_reg_name(r.rd[i].ctx)) +
+                     "\",\"" + emit::hex64(r.rd[i].val) + "\"]";
+            }
+            o += "],\"wr\":[";
+            for (size_t i = 0; i < r.wr.size(); i++) {
+                if (i) o += ',';
+                o += "[\"" + std::string(agent_reg_name(r.wr[i].ctx)) +
+                     "\",\"" + emit::hex64(r.wr[i].val) + "\"]";
+            }
+            o += ']';
+            if (!r.mems.empty()) {
+                o += ",\"mem\":[";
+                for (size_t i = 0; i < r.mems.size(); i++) {
+                    if (i) o += ',';
+                    o += "{\"w\":" + std::string(r.mems[i].is_w ? "1" : "0") +
+                         ",\"addr\":\"" + emit::hex64(r.mems[i].addr) + "\"" +
+                         ",\"size\":" + std::to_string(r.mems[i].size);
+                    if (r.mems[i].known)
+                        o += ",\"val\":\"" + emit::hex128(r.mems[i].val) + "\"";
+                    o += '}';
+                }
+                o += ']';
+            }
+            o += '}';
+            writer.row(std::move(o));
+            return;
+        }
+        printf("%llu", (unsigned long long)r.ev);
+        if (r.line) printf(" line=%llu", (unsigned long long)r.line);
+        printf(" %s!0x%llx %s", r.mod.c_str(), (unsigned long long)r.off,
+               r.txt.c_str());
+        if (!r.rd.empty() || !r.wr.empty()) {
+            printf(";");
+            for (const auto& value : r.rd)
+                printf(" %s=0x%llx", agent_reg_name(value.ctx),
+                       (unsigned long long)value.val);
+            if (!r.wr.empty()) {
+                printf(" ->");
+                for (const auto& value : r.wr)
+                    printf(" %s=0x%llx", agent_reg_name(value.ctx),
+                           (unsigned long long)value.val);
+            }
+        }
+        for (const auto& mem : r.mems) {
+            printf("; %s=0x%llx", mem.is_w ? "mem_w" : "mem_r",
+                   (unsigned long long)mem.addr);
+            if (mem.known) {
+                std::string value = emit::hex128(mem.val);
+                printf(":%s", value.c_str());
+            }
+        }
+        putchar('\n');
+    };
     ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi < from_ev) return true;
         if (gi > to_ev) return false;
@@ -1776,92 +1866,36 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
                                      : off_set.count(site_off) != 0 &&
                                            (mod.empty() || module == mod);
         if (!hit) return true;
-        if (total++ < offset || shown >= lim) return true;
-        shown++;
+        uint64_t row_index = total++;
+        if (last <= 0 && (row_index < offset || shown >= lim)) return true;
 
         rd.clear();
         wr.clear();
         mems.clear();
         reconstruct_agent_values(f.arena, s, g, ex.regfile(), rd, wr, mems);
         std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
-        if (json) {
-            std::string o = "{";
-            emit::kv_u64(o, "ev", gi);
-            if (g.source_line) {
-                o += ',';
-                emit::kv_u64(o, "line", g.source_line);
-            }
-            o += ',';
-            emit::kv_str(o, "mod", module);
-            o += ',';
-            emit::kv_hex(o, "off", site_off);
-            o += ',';
-            emit::kv_hex(o, "addr", s.addr);
-            o += ',';
-            emit::kv_str(o, "txt", txt);
-            o += ",\"rd\":[";
-            for (size_t i = 0; i < rd.size(); i++) {
-                if (i) o += ',';
-                o += "[\"" + std::string(agent_reg_name(rd[i].ctx)) + "\",\"" +
-                     emit::hex64(rd[i].val) + "\"]";
-            }
-            o += "],\"wr\":[";
-            for (size_t i = 0; i < wr.size(); i++) {
-                if (i) o += ',';
-                o += "[\"" + std::string(agent_reg_name(wr[i].ctx)) + "\",\"" +
-                     emit::hex64(wr[i].val) + "\"]";
-            }
-            o += ']';
-            if (!mems.empty()) {
-                o += ",\"mem\":[";
-                for (size_t i = 0; i < mems.size(); i++) {
-                    if (i) o += ',';
-                    o += "{\"w\":" + std::string(mems[i].is_w ? "1" : "0") +
-                         ",\"addr\":\"" + emit::hex64(mems[i].addr) + "\"" +
-                         ",\"size\":" + std::to_string(mems[i].size);
-                    if (mems[i].known)
-                        o += ",\"val\":\"" + emit::hex128(mems[i].val) + "\"";
-                    o += '}';
-                }
-                o += ']';
-            }
-            o += '}';
-            printf("%s\n", o.c_str());
+        Row row{gi, g.source_line, site_off, s.addr, std::move(module),
+                std::move(txt), rd, wr, mems};
+        if (last > 0) {
+            if (tail.size() == size_t(last)) tail.pop_front();
+            tail.push_back(std::move(row));
         } else {
-            printf("%llu", (unsigned long long)gi);
-            if (g.source_line)
-                printf(" line=%llu", (unsigned long long)g.source_line);
-            printf(" %s %s", gtb_at(f, g.site_id).c_str(), txt.c_str());
-            if (!rd.empty() || !wr.empty()) {
-                printf(";");
-                for (const auto& r : rd)
-                    printf(" %s=0x%llx", agent_reg_name(r.ctx),
-                           (unsigned long long)r.val);
-                if (!wr.empty()) {
-                    printf(" ->");
-                    for (const auto& w : wr)
-                        printf(" %s=0x%llx", agent_reg_name(w.ctx),
-                               (unsigned long long)w.val);
-                }
-            }
-            for (const auto& m : mems) {
-                printf("; %s=0x%llx", m.is_w ? "mem_w" : "mem_r",
-                       (unsigned long long)m.addr);
-                if (m.known) {
-                    std::string value = emit::hex128(m.val);
-                    printf(":%s", value.c_str());
-                }
-            }
-            putchar('\n');
+            emit_row(row);
+            shown++;
         }
         return true;
     });
+    if (last > 0)
+        for (const Row& row : tail) {
+            emit_row(row);
+            shown++;
+        }
 
     emit::Meta meta;
     meta.total = total;
     meta.shown = shown;
-    meta.truncated = offset + shown < total;
-    if (meta.truncated) {
+    meta.truncated = last > 0 ? shown < total : offset + shown < total;
+    if (meta.truncated && last <= 0) {
         std::string next = "gt find-pc";
         for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
         for (uint64_t off : offs) next += " --off " + emit::hex64(off);
@@ -1874,180 +1908,387 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
-// Function call sites directly on a gtb. Repeated selectors share one stream
-// walk; --nth/--limit apply independently to every function. A call-stack walk
-// pairs each shown call with its return value.
-int q_func_args(const std::string& gtb, const FuncArgsOptions& options) {
-    if (options.funcs.empty()) {
-        fprintf(stderr, "func-args: at least one --func is required\n");
+static bool executed_call(const GtbFile& f, const Group& g, bool& indirect,
+                          std::string& disasm) {
+    indirect = false;
+    disasm.clear();
+    if (!g.has_exec || g.site_id >= f.arena.sites().size()) return false;
+    const Site& site = f.arena.get(g.site_id);
+    disasm.assign(f.arena.pool_ptr() + site.disasm_off, site.disasm_len);
+    size_t end = disasm.find(' ');
+    std::string mnemonic = disasm.substr(0, end);
+    if (mnemonic == "bl") return true;
+    if (mnemonic == "blr" || mnemonic.rfind("blraa", 0) == 0 ||
+        mnemonic.rfind("blrab", 0) == 0) {
+        indirect = true;
+        return true;
+    }
+    return false;
+}
+
+static uint64_t disasm_hex_operand(const std::string& disasm) {
+    size_t p = disasm.find(' ');
+    if (p == std::string::npos) return 0;
+    while (p < disasm.size() && disasm[p] == ' ') p++;
+    if (p < disasm.size() && disasm[p] == '#') p++;
+    if (p + 2 > disasm.size() || disasm[p] != '0' ||
+        (disasm[p + 1] != 'x' && disasm[p + 1] != 'X'))
+        return 0;
+    p += 2;
+    uint64_t value = 0;
+    bool any = false;
+    for (; p < disasm.size(); p++) {
+        unsigned digit;
+        char c = disasm[p];
+        if (c >= '0' && c <= '9') digit = unsigned(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = unsigned(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') digit = unsigned(c - 'A' + 10);
+        else break;
+        if (value > (UINT64_MAX - digit) / 16) return 0;
+        value = value * 16 + digit;
+        any = true;
+    }
+    return any ? value : 0;
+}
+
+static int indirect_target_reg(const std::string& disasm) {
+    size_t p = disasm.find(' ');
+    if (p == std::string::npos) return -1;
+    while (p < disasm.size() && disasm[p] == ' ') p++;
+    size_t end = p;
+    while (end < disasm.size() && disasm[end] != ',' && disasm[end] != ' ')
+        end++;
+    int simd = -1;
+    return text_name_ctx(disasm.data() + p, end - p, &simd);
+}
+
+int q_calls(const std::string& gtb, const CallsOptions& options) {
+    if (options.from_ev > options.to_ev || options.top < 0 || options.last < 0 ||
+        (options.top > 0 && (options.last > 0 || options.offset != 0)) ||
+        (options.last > 0 && options.offset != 0) ||
+        (!options.mod.empty() && options.target_offs.empty())) {
+        fprintf(stderr, "calls: invalid range, selector, or output mode\n");
         return 2;
     }
-    std::vector<std::string> funcs;
-    std::unordered_map<std::string, size_t> selector;
-    for (const auto& func : options.funcs) {
-        if (func.empty() || selector.count(func)) continue;
-        selector.emplace(func, funcs.size());
-        funcs.push_back(func);
-    }
-    if (funcs.empty()) {
-        fprintf(stderr, "func-args: function names must not be empty\n");
-        return 2;
-    }
+    std::unordered_set<std::string> names;
+    for (const auto& name : options.names)
+        if (!name.empty()) names.insert(name);
+    std::unordered_set<uint64_t> target_addrs(options.target_addrs.begin(),
+                                              options.target_addrs.end());
+    std::unordered_set<uint64_t> target_offs(options.target_offs.begin(),
+                                             options.target_offs.end());
+    bool has_selector = !names.empty() || !target_addrs.empty() ||
+                        !target_offs.empty();
 
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(options.json);
+
     struct Row {
-        size_t func_i;
-        uint64_t n;
-        uint64_t ev, line;
-        std::string at;
-        uint64_t target;
-        uint64_t x[8];
-        int nargs;
-        bool has_ret;
-        uint64_t ret_ev, ret_line, ret_val;
+        uint64_t n = 0, ev = 0, line = 0;
+        uint64_t callsite_addr = 0, target = 0;
+        std::string at, txt, name, target_at, target_mod, source;
+        uint64_t target_off = 0;
+        bool target_known = false, target_loc_known = false;
+        uint64_t args[8] = {0};
+        bool arg_known[8] = {false};
+        bool has_ret = false;
+        uint64_t ret_ev = 0, ret_line = 0, ret_val = 0;
     };
     std::vector<Row> rows;
-    std::vector<int64_t> stack;
-    std::vector<uint64_t> totals(funcs.size(), 0);
-    std::vector<uint64_t> shown_per_func(funcs.size(), 0);
-    size_t base = options.nth > 1 ? size_t(options.nth - 1) : 0;
-    uint64_t lim = options.limit > 0 ? uint64_t(options.limit) : UINT64_MAX;
-    Expander(f).for_each([&](uint64_t gi, const Group& g) {
-        if (g.is_call) {
-            int64_t selected = -1;
-            const char* name = g.call_name;
-            auto match = name ? selector.find(name) : selector.end();
-            if (match != selector.end()) {
-                size_t func_i = match->second;
-                uint64_t call_index = totals[func_i]++;
-                if (call_index >= base && shown_per_func[func_i] < lim) {
-                    Row r{};
-                    r.func_i = func_i;
-                    r.n = call_index + 1;
-                    r.ev = gi;
-                    r.line = g.call_source_line ? g.call_source_line : g.source_line;
-                    r.at = g.has_exec ? gtb_at(f, g.site_id) : "<event>";
-                    r.target = g.call_target;
-                    r.nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
-                    if (r.nargs > 8) r.nargs = 8;
-                    for (int i = 0; i < 8; i++) r.x[i] = g.args[i];
-                    rows.push_back(r);
-                    shown_per_func[func_i]++;
-                    selected = int64_t(rows.size() - 1);
+    std::vector<int64_t> annotation_stack;
+    std::unordered_map<uint64_t, uint32_t> module_by_site_addr;
+    for (const Site& site : f.arena.sites())
+        module_by_site_addr.emplace(site.addr, site.module_id);
+
+    auto locate_target = [&](uint64_t target, std::string& module,
+                             uint64_t& off) -> bool {
+        auto found = module_by_site_addr.find(target);
+        if (found == module_by_site_addr.end() ||
+            found->second >= f.arena.modules().size())
+            return false;
+        uint32_t module_id = found->second;
+        uint64_t base = f.arena.module_base(module_id);
+        if (target < base) return false;
+        module = f.arena.modules()[module_id];
+        off = target - base;
+        return true;
+    };
+    auto matches_off = [&](uint64_t target) {
+        for (size_t i = 0; i < f.arena.modules().size(); i++) {
+            if (!options.mod.empty() && f.arena.modules()[i] != options.mod)
+                continue;
+            uint64_t base = f.arena.module_base(uint32_t(i));
+            if (target < base) continue;
+            if (target_offs.count(target - base)) return true;
+        }
+        return false;
+    };
+
+    Expander ex(f);
+    ex.for_each([&](uint64_t gi, const Group& g) {
+        if (gi > options.to_ev) return false;
+        if (gi < options.from_ev) return true;
+        bool indirect = false;
+        std::string disasm;
+        bool instruction = executed_call(f, g, indirect, disasm);
+        int64_t selected_annotation = -1;
+        if (instruction || g.is_call) {
+            Row row;
+            row.ev = gi;
+            row.line = g.is_call && g.call_source_line ? g.call_source_line
+                                                       : g.source_line;
+            row.txt = instruction ? disasm : "call annotation";
+            row.source = instruction ? (g.is_call ? "instruction+annotation"
+                                                   : "instruction")
+                                     : "annotation";
+            if (g.has_exec) {
+                const Site& site = f.arena.get(g.site_id);
+                row.callsite_addr = site.addr;
+                row.at = gtb_at(f, g.site_id);
+            } else {
+                row.at = "<event>";
+            }
+            if (g.call_name) row.name = g.call_name;
+
+            if (instruction) {
+                const Site& site = f.arena.get(g.site_id);
+                if (!indirect) {
+                    row.target = site.branch_imm ? site.branch_imm
+                                                  : disasm_hex_operand(disasm);
+                    row.target_known = row.target != 0;
+                } else {
+                    int ctx = indirect_target_reg(disasm);
+                    if (ctx >= 0 && ctx < 32 && ex.reg_known()[ctx]) {
+                        row.target = ex.regfile()[ctx];
+                        row.target_known = true;
+                    }
                 }
             }
-            stack.push_back(selected);
+            if (!row.target_known && g.is_call && g.call_target) {
+                row.target = g.call_target;
+                row.target_known = true;
+            }
+            if (row.target_known &&
+                locate_target(row.target, row.target_mod, row.target_off)) {
+                row.target_loc_known = true;
+                row.target_at = row.target_mod + "!" + emit::hex64(row.target_off);
+            }
+
+            if (instruction)
+                for (int i = 0; i < 8; i++) {
+                    row.args[i] = ex.regfile()[i];
+                    row.arg_known[i] = ex.reg_known()[i] != 0;
+                }
+            if (g.is_call) {
+                int nargs = g.n_call_args >= 0 ? g.n_call_args : 4;
+                nargs = std::min(nargs, 8);
+                for (int i = 0; i < nargs; i++) {
+                    row.args[i] = g.args[i];
+                    row.arg_known[i] = true;
+                }
+            }
+
+            bool selected = !has_selector;
+            if (!row.name.empty() && names.count(row.name)) selected = true;
+            if (row.target_known && target_addrs.count(row.target)) selected = true;
+            if (row.target_known && !target_offs.empty() && matches_off(row.target))
+                selected = true;
+            if (selected) {
+                row.n = rows.size() + 1;
+                rows.push_back(std::move(row));
+                selected_annotation = int64_t(rows.size() - 1);
+            }
         }
-        if (g.is_ret && !stack.empty()) {
-            int64_t selected = stack.back();
-            stack.pop_back();
+        if (g.is_call) annotation_stack.push_back(selected_annotation);
+        if (g.is_ret && !annotation_stack.empty()) {
+            int64_t selected = annotation_stack.back();
+            annotation_stack.pop_back();
             if (selected >= 0) {
-                Row& r = rows[size_t(selected)];
-                r.has_ret = true;
-                r.ret_ev = gi;
-                r.ret_line = g.ret_source_line ? g.ret_source_line : g.source_line;
-                r.ret_val = g.ret_val;
+                Row& row = rows[size_t(selected)];
+                row.has_ret = true;
+                row.ret_ev = gi;
+                row.ret_line = g.ret_source_line ? g.ret_source_line : g.source_line;
+                row.ret_val = g.ret_val;
             }
         }
         return true;
     });
-    uint64_t shown = 0;
-    bool batched = funcs.size() > 1;
-    if (options.json) {
-        for (size_t i = 0; i < rows.size(); i++, shown++) {
-            const Row& r = rows[i];
+
+    auto append_target = [](std::string& o, const Row& row) {
+        o += ",\"target\":";
+        if (row.target_known) emit::esc_append(o, emit::hex64(row.target).c_str());
+        else o += "null";
+        o += ",\"target_at\":";
+        if (row.target_loc_known) emit::esc_append(o, row.target_at.c_str());
+        else o += "null";
+        o += ",\"name\":";
+        if (!row.name.empty()) emit::esc_append(o, row.name.c_str());
+        else o += "null";
+    };
+    auto emit_detail = [&](const Row& row) {
+        if (options.json) {
             std::string o = "{";
-            if (batched) {
-                emit::kv_str(o, "func", funcs[r.func_i]);
-                o += ',';
-            }
-            emit::kv_u64(o, "n", r.n);
+            emit::kv_u64(o, "n", row.n);
             o += ',';
-            emit::kv_u64(o, "ev", r.ev);
-            if (r.line) {
+            emit::kv_u64(o, "ev", row.ev);
+            if (row.line) {
                 o += ',';
-                emit::kv_u64(o, "line", r.line);
+                emit::kv_u64(o, "line", row.line);
             }
             o += ',';
-            emit::kv_str(o, "at", r.at);
+            emit::kv_str(o, "source", row.source);
+            o += ',';
+            emit::kv_str(o, "at", row.at);
+            if (row.callsite_addr) {
+                o += ',';
+                emit::kv_hex(o, "addr", row.callsite_addr);
+            }
+            o += ',';
+            emit::kv_str(o, "txt", row.txt);
+            append_target(o, row);
             o += ",\"args\":[";
-            for (int k = 0; k < r.nargs; k++) {
-                if (k) o += ',';
-                o += '"' + emit::hex64(r.x[k]) + '"';
+            for (int i = 0; i < 8; i++) {
+                if (i) o += ',';
+                if (row.arg_known[i])
+                    emit::esc_append(o, emit::hex64(row.args[i]).c_str());
+                else
+                    o += "null";
             }
             o += ']';
-            if (r.target) {
+            if (row.has_ret) {
                 o += ',';
-                emit::kv_hex(o, "target", r.target);
-            }
-            if (r.has_ret) {
-                o += ',';
-                emit::kv_u64(o, "ret_ev", r.ret_ev);
-                if (r.ret_line) {
+                emit::kv_u64(o, "ret_ev", row.ret_ev);
+                if (row.ret_line) {
                     o += ',';
-                    emit::kv_u64(o, "ret_line", r.ret_line);
+                    emit::kv_u64(o, "ret_line", row.ret_line);
                 }
                 o += ',';
-                emit::kv_hex(o, "ret", r.ret_val);
+                emit::kv_hex(o, "ret", row.ret_val);
             }
             o += '}';
-            printf("%s\n", o.c_str());
+            writer.row(std::move(o));
+            return;
         }
-    } else {
-        for (size_t i = 0; i < funcs.size(); i++)
-            printf("calls to %s: %llu total\n", funcs[i].c_str(),
-                   (unsigned long long)totals[i]);
-        for (size_t i = 0; i < rows.size(); i++, shown++) {
-            const Row& r = rows[i];
-            if (batched) printf("  %-20s ", funcs[r.func_i].c_str());
-            else printf("  ");
-            printf("#%-8llu ev=%-8llu", (unsigned long long)r.n,
-                   (unsigned long long)r.ev);
-            if (r.line) printf(" line=%-8llu", (unsigned long long)r.line);
-            for (int k = 0; k < r.nargs; k++)
-                printf(" x%d=0x%-14llx", k, (unsigned long long)r.x[k]);
-            if (r.has_ret) {
-                printf(" ret=0x%llx ret_ev=%llu", (unsigned long long)r.ret_val,
-                       (unsigned long long)r.ret_ev);
-                if (r.ret_line)
-                    printf(" ret_line=%llu", (unsigned long long)r.ret_line);
-            }
-            printf("  %s\n", r.at.c_str());
+        printf("#%-6llu ev=%-8llu", (unsigned long long)row.n,
+               (unsigned long long)row.ev);
+        if (row.line) printf(" line=%-8llu", (unsigned long long)row.line);
+        printf(" %s %s -> ", row.at.c_str(), row.txt.c_str());
+        if (!row.name.empty()) printf("%s ", row.name.c_str());
+        if (row.target_loc_known) printf("%s", row.target_at.c_str());
+        else if (row.target_known) printf("0x%llx", (unsigned long long)row.target);
+        else printf("?");
+        for (int i = 0; i < 8; i++) {
+            if (row.arg_known[i])
+                printf(" x%d=0x%llx", i, (unsigned long long)row.args[i]);
+            else
+                printf(" x%d=?", i);
         }
-        if (!batched && totals[0] == 0)
-            printf("  (no call to %s in %s)\n", funcs[0].c_str(), gtb.c_str());
-    }
-    emit::Meta meta;
-    for (uint64_t total : totals) meta.total += total;
-    meta.shown = shown;
-    for (size_t i = 0; i < funcs.size(); i++)
-        if (base + shown_per_func[i] < totals[i]) meta.truncated = true;
-    if (meta.truncated) {
-        std::string next = "gt func-args";
-        for (const auto& func : funcs) next += " --func " + func;
-        next += " --nth " + std::to_string(base + lim + 1);
-        next += " --limit " + std::to_string(lim);
-        next += ' ' + gtb;
-        if (options.json) next += " --json";
-        meta.next = std::move(next);
-    }
-    emit::finish(meta, options.json);
-    return 0;
-}
+        if (row.has_ret)
+            printf(" ret=0x%llx ret_ev=%llu", (unsigned long long)row.ret_val,
+                   (unsigned long long)row.ret_ev);
+        putchar('\n');
+    };
 
-int q_func_args(const std::string& gtb, const std::string& func, int nth,
-                int limit, bool json) {
-    FuncArgsOptions options;
-    options.funcs.push_back(func);
-    options.nth = nth;
-    options.limit = limit;
-    options.json = json;
-    return q_func_args(gtb, options);
+    emit::Meta meta;
+    if (options.top > 0) {
+        struct Summary { Row row; uint64_t count = 0, first = 0, last = 0; };
+        std::unordered_map<std::string, Summary> grouped;
+        for (const Row& row : rows) {
+            std::string key = row.target_known
+                                  ? "target:" + std::to_string(row.target)
+                                  : !row.name.empty() ? "name:" + row.name
+                                                      : "unknown";
+            Summary& summary = grouped[key];
+            if (summary.count++ == 0) {
+                summary.row = row;
+                summary.first = row.ev;
+            } else if (summary.row.name.empty() && !row.name.empty()) {
+                summary.row.name = row.name;
+            }
+            summary.last = row.ev;
+        }
+        std::vector<Summary> summaries;
+        summaries.reserve(grouped.size());
+        for (auto& item : grouped) summaries.push_back(std::move(item.second));
+        std::sort(summaries.begin(), summaries.end(), [](const Summary& a,
+                                                          const Summary& b) {
+            if (a.count != b.count) return a.count > b.count;
+            return a.first < b.first;
+        });
+        size_t shown = std::min(summaries.size(), size_t(options.top));
+        if (!options.json)
+            printf("call targets: %zu total (top %d)\n", summaries.size(),
+                   options.top);
+        for (size_t i = 0; i < shown; i++) {
+            const Summary& summary = summaries[i];
+            if (options.json) {
+                std::string o = "{";
+                emit::kv_u64(o, "count", summary.count);
+                o += ',';
+                emit::kv_u64(o, "first_ev", summary.first);
+                o += ',';
+                emit::kv_u64(o, "last_ev", summary.last);
+                append_target(o, summary.row);
+                o += '}';
+                writer.row(std::move(o));
+            } else {
+                printf("%-8llu first=%-8llu last=%-8llu ",
+                       (unsigned long long)summary.count,
+                       (unsigned long long)summary.first,
+                       (unsigned long long)summary.last);
+                if (!summary.row.name.empty()) printf("%s ", summary.row.name.c_str());
+                printf("%s\n", summary.row.target_loc_known
+                                   ? summary.row.target_at.c_str()
+                                   : summary.row.target_known
+                                         ? emit::hex64(summary.row.target).c_str()
+                                         : "?");
+            }
+        }
+        meta.total = summaries.size();
+        meta.shown = shown;
+        meta.truncated = shown < summaries.size();
+    } else {
+        size_t begin = options.last > 0
+                           ? rows.size() > size_t(options.last)
+                                 ? rows.size() - size_t(options.last)
+                                 : 0
+                           : std::min<size_t>(rows.size(), size_t(options.offset));
+        size_t end = rows.size();
+        if (options.last <= 0 && options.limit > 0)
+            end = std::min(end, begin + size_t(options.limit));
+        if (!options.json)
+            printf("calls: %zu total\n", rows.size());
+        for (size_t i = begin; i < end; i++) emit_detail(rows[i]);
+        meta.total = rows.size();
+        meta.shown = end - begin;
+        meta.truncated = options.last > 0 ? meta.shown < meta.total
+                                         : options.offset + meta.shown < meta.total;
+        if (meta.truncated && options.last <= 0) {
+            std::string next = "gt calls";
+            for (const auto& name : names) next += " --name " + name;
+            for (uint64_t target : target_addrs)
+                next += " --target-addr " + emit::hex64(target);
+            for (uint64_t off : target_offs)
+                next += " --target-off " + emit::hex64(off);
+            if (!options.mod.empty()) next += " --mod " + options.mod;
+            if (options.from_ev) next += " --from " + std::to_string(options.from_ev);
+            if (options.to_ev != UINT64_MAX)
+                next += " --to " + std::to_string(options.to_ev);
+            if (options.limit > 0)
+                next += " --limit " + std::to_string(options.limit);
+            next += " --offset " + std::to_string(options.offset + meta.shown);
+            next += ' ' + gtb;
+            if (options.json) next += " --json";
+            meta.next = std::move(next);
+        }
+    }
+    writer.finish(meta);
+    return 0;
 }
 
 int q_find_value(const std::string& gtb, const FindValueOptions& options) {
@@ -2061,21 +2302,31 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
 
     uint64_t offset = options.offset;
     uint64_t from_ev = options.from_ev, to_ev = options.to_ev;
-    int limit = options.limit;
+    int limit = options.limit, last = options.last;
     bool json = options.json, reads_only = options.reads_only;
     bool writes_only = options.writes_only;
-    if (from_ev > to_ev || (reads_only && writes_only)) {
-        fprintf(stderr, "find-value: invalid event range or access filter\n");
+    if (from_ev > to_ev || (reads_only && writes_only) || last < 0 ||
+        (last > 0 && offset != 0)) {
+        fprintf(stderr, "find-value: invalid range, filter, or --last combination\n");
         return 2;
     }
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
     std::unordered_map<uint64_t, size_t> value_index;
     for (size_t i = 0; i < values.size(); i++) value_index.emplace(values[i], i);
     std::vector<uint64_t> totals(values.size(), 0);
     std::vector<uint64_t> shown_per_value(values.size(), 0);
     uint64_t shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    struct ValueRow {
+        size_t value_i = 0;
+        uint64_t ev = 0, line = 0, addr = 0;
+        std::string lane, kind, reg, at;
+        char rw = 0;
+        uint8_t size = 0;
+    };
+    std::vector<std::deque<ValueRow>> tails(values.size());
     // dump-payload scan pattern: minimal-width LE bytes of val. Values that
     // only ever exist as memory bytes (protobuf payloads inside memcpy dumps)
     // have no register/obs lane; the verbatim hexdump rows are the only place
@@ -2089,53 +2340,64 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
             v >>= 8;
         } while (v && patterns[i].n < 8);
     }
+    auto emit_value_row = [&](const ValueRow& row) {
+        uint64_t val = values[row.value_i];
+        if (json) {
+            std::string o = "{";
+            emit::kv_u64(o, "ev", row.ev);
+            if (row.line) {
+                o += ',';
+                emit::kv_u64(o, "line", row.line);
+            }
+            o += ',';
+            emit::kv_str(o, "lane", row.lane);
+            o += ',';
+            emit::kv_str(o, "kind", row.kind);
+            if (row.rw) {
+                o += ',';
+                emit::kv_str(o, "rw", row.rw == 'w' ? "w" : "r");
+            }
+            if (!row.reg.empty()) {
+                o += ',';
+                emit::kv_str(o, "reg", row.reg);
+            }
+            if (row.kind == "mem" || row.kind == "dump") {
+                o += ',';
+                emit::kv_hex(o, "addr", row.addr);
+                o += ',';
+                emit::kv_u64(o, "size", row.size);
+            }
+            o += ',';
+            emit::kv_hex(o, "val", val);
+            o += ',';
+            emit::kv_str(o, "at", row.at);
+            o += '}';
+            writer.row(std::move(o));
+        } else {
+            printf("%llu", (unsigned long long)row.ev);
+            if (row.line) printf(" line=%llu", (unsigned long long)row.line);
+            printf(" %s 0x%llx %s\n", row.lane.c_str(),
+                   (unsigned long long)val, row.at.c_str());
+        }
+    };
     auto row = [&](size_t value_i, uint64_t gi, const std::string& lane,
                    const char* kind, char rw, const std::string& reg,
                    uint64_t addr, uint8_t size, const Group& g) {
         if ((reads_only && rw != 'r') || (writes_only && rw != 'w')) return;
         uint64_t row_index = totals[value_i]++;
+        ValueRow value_row{value_i, gi, g.source_line, addr, lane, kind, reg,
+                           gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu), rw,
+                           size};
+        if (last > 0) {
+            auto& tail = tails[value_i];
+            if (tail.size() == size_t(last)) tail.pop_front();
+            tail.push_back(std::move(value_row));
+            return;
+        }
         if (row_index < offset || shown_per_value[value_i] >= lim) return;
+        emit_value_row(value_row);
         shown_per_value[value_i]++;
         shown++;
-        uint64_t val = values[value_i];
-        if (json) {
-            std::string o = "{";
-            emit::kv_u64(o, "ev", gi);
-            if (g.source_line) {
-                o += ',';
-                emit::kv_u64(o, "line", g.source_line);
-            }
-            o += ',';
-            emit::kv_str(o, "lane", lane);
-            o += ',';
-            emit::kv_str(o, "kind", kind);
-            if (rw) {
-                o += ',';
-                emit::kv_str(o, "rw", rw == 'w' ? "w" : "r");
-            }
-            if (!reg.empty()) {
-                o += ',';
-                emit::kv_str(o, "reg", reg);
-            }
-            if (!strcmp(kind, "mem") || !strcmp(kind, "dump")) {
-                o += ',';
-                emit::kv_hex(o, "addr", addr);
-                o += ',';
-                emit::kv_u64(o, "size", size);
-            }
-            o += ',';
-            emit::kv_hex(o, "val", val);
-            o += ',';
-            emit::kv_str(o, "at", gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu));
-            o += '}';
-            printf("%s\n", o.c_str());
-        } else {
-            printf("%llu", (unsigned long long)gi);
-            if (g.source_line)
-                printf(" line=%llu", (unsigned long long)g.source_line);
-            printf(" %s 0x%llx %s\n", lane.c_str(), (unsigned long long)val,
-                   gtb_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu).c_str());
-        }
     };
     Expander ex(f);
     std::vector<AgentMemVal> mems;
@@ -2246,14 +2508,23 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         }
         return true;
     });
+    if (last > 0)
+        for (size_t value_i = 0; value_i < tails.size(); value_i++)
+            for (const ValueRow& value_row : tails[value_i]) {
+                emit_value_row(value_row);
+                shown_per_value[value_i]++;
+                shown++;
+            }
     emit::Meta meta;
     for (uint64_t total : totals) meta.total += total;
     meta.shown = shown;
     for (size_t i = 0; i < values.size(); i++) {
-        uint64_t available = totals[i] > offset ? totals[i] - offset : 0;
+        uint64_t available = last > 0
+                                 ? totals[i]
+                                 : totals[i] > offset ? totals[i] - offset : 0;
         if (shown_per_value[i] < available) meta.truncated = true;
     }
-    if (meta.truncated) {
+    if (meta.truncated && last <= 0) {
         bool batched = values.size() > 1;
         std::string next = batched ? "gt find-value " + gtb
                                    : "gt find-value " + emit::hex64(values[0]);
@@ -2270,7 +2541,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }
 
@@ -2283,6 +2554,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json) {
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    emit::QueryWriter writer(json);
     std::vector<std::string> stack;
     bool capturing = false;
     size_t base = 0;
@@ -2312,7 +2584,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                     emit::esc_append(o, emit::hex64(g.args[i]).c_str());
                 }
                 o += "]}";
-                printf("%s\n", o.c_str());
+                writer.row(std::move(o));
             } else {
                 std::string line(size_t(lvl) * 2, ' ');
                 uint64_t line_no = g.call_source_line ? g.call_source_line
@@ -2379,6 +2651,6 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
         if (json) next += " --json";
         meta.next = std::move(next);
     }
-    emit::finish(meta, json);
+    writer.finish(meta);
     return 0;
 }

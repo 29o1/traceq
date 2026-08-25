@@ -2,9 +2,9 @@
 // Agent-facing query surface. Design rule: every output is bounded with an
 // explicit truncation marker — the consumer is an agent with a limited
 // context window, so queries must return small structured answers, never raw
-// dumps. W2 contract: every command runs in text or --json mode (JSON Lines,
-// integer values as hex strings) and ends with a meta footer carrying the cursor
-// (truncated/total/shown/next).
+// dumps. W2 contract: every command runs in text or --json mode (one JSON
+// document, integer values as hex strings) and returns data plus cursor
+// metadata (truncated/total/shown/next).
 //
 // Every query sequentially scans the loaded .gtb event buffer (one Expander
 // pass); there is no index/ingest step.
@@ -53,6 +53,7 @@ struct FindPcOptions {
     uint64_t offset = 0;
     uint64_t from_ev = 0;
     uint64_t to_ev = UINT64_MAX;
+    int last = 0;
     bool json = false;
 };
 
@@ -66,6 +67,7 @@ struct FindValueOptions {
     uint64_t to_ev = UINT64_MAX;
     bool reads_only = false;
     bool writes_only = false;
+    int last = 0;
     // When non-empty, `values` replaces `value`; duplicates are removed.
     std::vector<uint64_t> values;
 };
@@ -82,10 +84,17 @@ struct MemStateOptions {
     bool qword = false;
 };
 
-struct FuncArgsOptions {
-    std::vector<std::string> funcs;
-    int nth = 1;
-    int limit = 1;
+struct CallsOptions {
+    std::vector<std::string> names;
+    std::vector<uint64_t> target_addrs;
+    std::vector<uint64_t> target_offs;
+    std::string mod;
+    int top = 0;
+    int limit = 20;
+    uint64_t offset = 0;
+    uint64_t from_ev = 0;
+    uint64_t to_ev = UINT64_MAX;
+    int last = 0;
     bool json = false;
 };
 
@@ -107,10 +116,7 @@ int q_mem_state(const std::string& gtb, uint64_t range_base,
                 uint64_t range_len, uint64_t at_ev, bool json = false,
                 bool qword = false);
 int q_find_pcs(const std::string& gtb, const FindPcOptions& options);
-// nth (1-based) selects the first call to show, limit the row count
-int q_func_args(const std::string& gtb, const FuncArgsOptions& options);
-int q_func_args(const std::string& gtb, const std::string& func, int nth, int limit,
-                bool json = false);
+int q_calls(const std::string& gtb, const CallsOptions& options);
 int q_find_value(const std::string& gtb, const FindValueOptions& options);
 int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json = false);

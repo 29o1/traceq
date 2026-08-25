@@ -1,13 +1,13 @@
 #pragma once
-// Internal dual-mode (text / JSON Lines) output plumbing for the gt CLI.
+// Internal dual-mode (text / JSON) output plumbing for the gt CLI.
 //
 // The consumer of `gt` is an agent with a bounded context window, so every
-// bounded output ends in a machine-parseable trailer: JSON mode gets a
-// {"meta":{...}} line as the last line, text mode keeps the
+// bounded query returns one standard JSON document with `data` and `meta`;
+// text mode keeps the
 // "... [N more rows truncated]" marker plus "next:" (copy-executable
 // continuation).
 //
-// Value convention for JSON Lines: integer values (including u128 SIMD memory
+// Value convention for JSON: integer values (including u128 SIMD memory
 // values) ride in hex strings ("val":"0x1ff") so they survive precision loss;
 // indices and counts
 // (ev, total, shown, ...) stay decimal numbers.
@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace gt {
@@ -115,20 +116,66 @@ struct Meta {
     std::string next;                // full continuation command ("" = none)
 };
 
-// Trailing footer. JSON mode: the {"meta":{...}} line. Text mode: the
+inline void meta_append(std::string& s, const Meta& m) {
+    s += "{\"truncated\":";
+    s += m.truncated ? "true" : "false";
+    char b[96];
+    snprintf(b, sizeof b, ",\"total\":%llu,\"shown\":%llu,\"next\":",
+             (unsigned long long)m.total, (unsigned long long)m.shown);
+    s += b;
+    if (m.next.empty()) s += "null";
+    else esc_append(s, m.next.c_str());
+    s += '}';
+}
+
+// Query JSON is buffered until finish() so a validation/scan failure never
+// leaves a syntactically incomplete document on stdout. Query results are
+// already bounded by command limits; large unbounded streams use export
+// --format jsonl instead.
+class QueryWriter {
+public:
+    explicit QueryWriter(bool json, FILE* out = stdout) : json_(json), out_(out) {}
+
+    bool json() const { return json_; }
+
+    void row(std::string row) {
+        if (json_) rows_.push_back(std::move(row));
+    }
+
+    void finish(const Meta& m) {
+        if (!json_) {
+            if (m.total > m.shown)
+                fprintf(out_, "... [%llu more rows truncated]\n",
+                        (unsigned long long)(m.total - m.shown));
+            if (!m.next.empty()) fprintf(out_, "next: %s\n", m.next.c_str());
+            return;
+        }
+        fputs("{\"data\":[", out_);
+        for (size_t i = 0; i < rows_.size(); i++) {
+            if (i) fputc(',', out_);
+            fwrite(rows_[i].data(), 1, rows_[i].size(), out_);
+        }
+        std::string tail = "],\"meta\":";
+        meta_append(tail, m);
+        tail += "}\n";
+        fwrite(tail.data(), 1, tail.size(), out_);
+    }
+
+private:
+    bool json_;
+    FILE* out_;
+    std::vector<std::string> rows_;
+};
+
+// Trailing footer for JSONL export. Query commands use QueryWriter instead.
+// Text mode: the
 // print_truncated marker ("... [N more rows truncated]") when rows were cut,
 // plus "next: <cmd>" when present.
 inline void finish(const Meta& m, bool json, FILE* out) {
     if (json) {
-        std::string s = "{\"meta\":{\"truncated\":";
-        s += m.truncated ? "true" : "false";
-        char b[96];
-        snprintf(b, sizeof b, ",\"total\":%llu,\"shown\":%llu,\"next\":",
-                 (unsigned long long)m.total, (unsigned long long)m.shown);
-        s += b;
-        if (m.next.empty()) s += "null";
-        else esc_append(s, m.next.c_str());
-        s += "}}\n";
+        std::string s = "{\"meta\":";
+        meta_append(s, m);
+        s += "}\n";
         fwrite(s.data(), 1, s.size(), out);
         return;
     }
