@@ -132,10 +132,12 @@ public:
                           uint64_t* total_selected = nullptr);
 
     const uint64_t* regfile() const { return regs_; }
+    const uint8_t* reg_known() const { return known_; }
 
 private:
     const GtbFile& f_;
     uint64_t regs_[32] = {0};
+    uint8_t known_[32] = {0};
 };
 
 } // namespace gt

@@ -112,7 +112,9 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
     // sp comes from the trace itself (recorded in the footer by the event
     // source), not from any assumption about who produced the file
     memset(regs_, 0, sizeof(regs_));
+    memset(known_, 0, sizeof(known_));
     regs_[31] = f_.initial_sp;
+    known_[31] = f_.initial_sp != 0;
     Group g;
     uint64_t gi = 0;
     uint64_t next_source_line = 1;
@@ -122,6 +124,21 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
         arr[cnt].name_id = name_id;
         arr[cnt].val = val;
         cnt++;
+    };
+    auto apply_observed_regs = [&](const Group::Obs* arr, int cnt) {
+        for (int i = 0; i < cnt; i++) {
+            if (arr[i].name_id >= f_.arena.strings().size() ||
+                arr[i].val > UINT64_MAX)
+                continue;
+            const std::string& name = f_.arena.str(arr[i].name_id);
+            int simd = -1;
+            int ctx = text_name_ctx(name.data(), name.size(), &simd);
+            if (ctx < 0 || ctx >= 32) continue;
+            uint64_t value = uint64_t(arr[i].val);
+            if (!name.empty() && name[0] == 'w') value &= 0xffffffffu;
+            regs_[ctx] = value;
+            known_[ctx] = 1;
+        }
     };
     auto flush_group = [&]() -> bool {
         if (!g.has_exec && !g.is_call && !g.is_svc && !g.is_ret && !g.has_verbatim)
@@ -141,11 +158,24 @@ bool Expander::for_each(const std::function<bool(uint64_t, const Group&)>& cb) {
                 if (g.is_ret) g.ret_source_line = next_source_line++;
             }
         }
+        // Imported read observations are authoritative PRE-execution values.
+        // Fold them into the reconstructed state before exposing the group.
+        apply_observed_regs(g.obs, g.n_obs);
         // callback sees PRE-execution register state (reads print before the
         // writes of this event are applied)
         bool go = cb(gi++, g);
-        for (int i = 0; i < g.n_wr; i++)
-            if (g.wr_id[i] >= 0 && g.wr_id[i] < 32) regs_[g.wr_id[i]] = g.wr_val[i];
+        if (g.has_exec && g.site_id < f_.arena.sites().size()) {
+            const Site& site = f_.arena.get(g.site_id);
+            for (uint8_t i = 0; i < site.n_ops; i++)
+                if (site.ops[i].kind == OP_REG_W && site.ops[i].ctx_idx >= 0)
+                    known_[site.ops[i].ctx_idx & 31] = 0;
+        }
+        for (int i = 0; i < g.n_wr; i++) {
+            if (g.wr_id[i] < 0 || g.wr_id[i] >= 32) continue;
+            regs_[g.wr_id[i]] = g.wr_val[i];
+            known_[g.wr_id[i]] = 1;
+        }
+        apply_observed_regs(g.wobs, g.n_wobs);
         g = Group();
         return go;
     };
