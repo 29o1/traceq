@@ -239,6 +239,10 @@ const char* agent_reg_name(int ctx_idx) {
     return names[ctx_idx & 31];
 }
 
+static int call_arg_count(const Group& g) {
+    return g.n_call_args >= 0 ? g.n_call_args : 4;
+}
+
 // plan reads (pre-event values) and writes (matched against the group's
 // write records), in plan order. SIMD reads have no value lane and are
 // skipped.
@@ -333,7 +337,7 @@ uint64_t Expander::expand_upstream(FILE* out, uint64_t from_idx, uint64_t to_idx
             line += g.is_jni_call ? "call jni func: " : "call func: ";
             line += g.call_name ? g.call_name : "<unknown>";
             line += '(';
-            int na = g.n_call_args >= 0 ? g.n_call_args : 4;
+            int na = call_arg_count(g);
             for (int i = 0; i < na; i++) {
                 if (i) line += ", ";
                 line += "0x";
@@ -574,14 +578,13 @@ static void agent_call_text(std::string& line, const Group& g) {
         snprintf(b, sizeof b, "0x%llx", (unsigned long long)g.call_target);
         line += b;
     } else line += "<unknown>";
-    line += "(x0=0x";
-    for (int i = 0; i < 4; i++) {
-        snprintf(b, sizeof b, "%llx", (unsigned long long)g.args[i]);
+    line += '(';
+    int na = call_arg_count(g);
+    for (int i = 0; i < na; i++) {
+        if (i) line += ", ";
+        snprintf(b, sizeof b, "x%d=0x%llx", i,
+                 (unsigned long long)g.args[i]);
         line += b;
-        if (i < 3) {
-            snprintf(b, sizeof b, ", x%d=0x", i + 1);
-            line += b;
-        }
     }
     line += ")\n";
 }
@@ -758,7 +761,9 @@ static uint64_t expand_agent(const GtbFile& f, Expander& ex, FILE* out, bool jso
                 if (g.call_name) emit::kv_str(line, "sym", g.call_name);
                 else if (g.call_target) emit::kv_hex(line, "target", g.call_target);
                 std::vector<std::string> args;
-                for (int i = 0; i < 4; i++) args.push_back(emit::hex64(g.args[i]));
+                int na = call_arg_count(g);
+                args.reserve(size_t(na));
+                for (int i = 0; i < na; i++) args.push_back(emit::hex64(g.args[i]));
                 line += ",\"args\":" + emit::str_array(args) + "}";
             } else {
                 agent_call_text(line, g);

@@ -105,6 +105,8 @@ Useful structured fields:
 
 - `export --format jsonl` and `find-pc --json` memory entries include
   `w/addr/size/val`; `val` is limited to the recorded or inferred access width.
+- Agent-facing call exports preserve the recorded 0–8 CALL2 arguments; legacy
+  CALL records retain their fixed `x0`–`x3` shape.
 - `find-value` returns `kind/rw/reg` or `kind/rw/addr/size`, so callers do not
   need to parse a textual lane description.
 - `mem-access` matches accesses that contain a selected address or overlap a

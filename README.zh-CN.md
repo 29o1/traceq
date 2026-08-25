@@ -91,6 +91,8 @@ GumTrace 产生，再通过 `gt import` 进入查询链路。
 
 - `export --format jsonl` 与 `find-pc --json` 的内存项包含
   `w/addr/size/val`；`val` 会按记录或推断出的访问宽度截断。
+- Agent 导出会保留 CALL2 实际记录的 0–8 个参数；旧 CALL 仍保持固定的
+  `x0`–`x3` 形式。
 - `find-value` 返回 `kind/rw/reg` 或 `kind/rw/addr/size`，无需再解析文本 lane。
 - `mem-access` 会匹配覆盖指定地址或与指定范围重叠的访问，并返回访问宽度；读事件还会
   给出最近一次重叠写入的 `prior_write_ev`。
