@@ -1,4 +1,6 @@
 #pragma once
+#include "common.h"
+
 // Agent-facing query surface. Design rule: every output is bounded with an
 // explicit truncation marker — the consumer is an agent with a limited
 // context window, so queries must return small structured answers, never raw
@@ -12,13 +14,26 @@
 #include <string>
 #include <vector>
 
+struct QueryWindow {
+    int limit = gt::DEFAULT_OUTPUT_ROWS;
+    uint64_t offset = 0;
+    uint64_t from_ev = 0;
+    uint64_t to_ev = UINT64_MAX;
+    int last = 0;
+
+    bool valid() const {
+        return limit > 0 && last >= 0 && from_ev <= to_ev &&
+               (last == 0 || offset == 0);
+    }
+};
+
 struct TaintOptions {
     uint64_t seed_addr = 0;
     int seed_reg = -1;
     int seed_q = -1;
     bool seed_nzcv = false;
     bool backward = false;
-    int limit = 20;
+    int limit = gt::DEFAULT_OUTPUT_ROWS;
     uint64_t window = 0;
     uint64_t at_ev = 0;
     uint64_t off = 0;
@@ -27,16 +42,11 @@ struct TaintOptions {
     bool index_deps = false;
 };
 
-struct MemAccessOptions {
+struct MemAccessOptions : QueryWindow {
     std::vector<uint64_t> addrs;
     bool use_range = false;
     uint64_t range_base = 0;
     uint64_t range_len = 0;
-    int limit = 20;
-    uint64_t offset = 0;
-    uint64_t from_ev = 0;
-    uint64_t to_ev = UINT64_MAX;
-    int last = 0;
     bool json = false;
     bool writes_only = false;
     bool reads_only = false;
@@ -45,29 +55,19 @@ struct MemAccessOptions {
     bool all_writes = false;
 };
 
-struct FindPcOptions {
+struct FindPcOptions : QueryWindow {
     std::vector<uint64_t> addrs;
     std::vector<uint64_t> offs;
     std::string mod;
-    int limit = 20;
-    uint64_t offset = 0;
-    uint64_t from_ev = 0;
-    uint64_t to_ev = UINT64_MAX;
-    int last = 0;
     bool json = false;
 };
 
-struct FindValueOptions {
+struct FindValueOptions : QueryWindow {
     // `value` remains the single-selector compatibility field.
     uint64_t value = 0;
-    int limit = 20;
-    uint64_t offset = 0;
     bool json = false;
-    uint64_t from_ev = 0;
-    uint64_t to_ev = UINT64_MAX;
     bool reads_only = false;
     bool writes_only = false;
-    int last = 0;
     // When non-empty, `values` replaces `value`; duplicates are removed.
     std::vector<uint64_t> values;
 };
@@ -84,17 +84,12 @@ struct MemStateOptions {
     bool qword = false;
 };
 
-struct CallsOptions {
+struct CallsOptions : QueryWindow {
     std::vector<std::string> names;
     std::vector<uint64_t> target_addrs;
     std::vector<uint64_t> target_offs;
     std::string mod;
     int top = 0;
-    int limit = 20;
-    uint64_t offset = 0;
-    uint64_t from_ev = 0;
-    uint64_t to_ev = UINT64_MAX;
-    int last = 0;
     bool json = false;
 };
 

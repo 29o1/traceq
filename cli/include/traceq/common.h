@@ -9,6 +9,8 @@
 
 namespace gt {
 
+inline constexpr int DEFAULT_OUTPUT_ROWS = 20;
+
 inline uint64_t now_ns() {
     timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

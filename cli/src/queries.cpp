@@ -591,6 +591,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     bool edges_trunc = edges_total > edges.size();
     std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
     std::sort(addrs.begin(), addrs.end());
+    size_t frontier_shown = std::min(addrs.size(), size_t(limit));
 
     if (json) {
         std::string o;
@@ -653,8 +654,11 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             if (!first) o += ',';
             o += "\"nzcv\"";
         }
-        o += "],\"addrs\":[";
-        for (size_t i = 0; i < addrs.size(); i++) {
+        o += "],\"addr_total\":" + std::to_string(addrs.size());
+        o += ",\"addrs_truncated\":";
+        o += frontier_shown < addrs.size() ? "true" : "false";
+        o += ",\"addrs\":[";
+        for (size_t i = 0; i < frontier_shown; i++) {
             if (i) o += ',';
             o += '"' + emit::hex64(addrs[i]) + '"';
         }
@@ -686,8 +690,6 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             }
         if (nzcv_t) printf(" nzcv");
         printf("\nfinal tainted addrs (%zu):", addrs.size());
-        size_t frontier_limit = limit > 0 ? size_t(limit) : 20;
-        size_t frontier_shown = std::min(addrs.size(), frontier_limit);
         for (size_t i = 0; i < frontier_shown; i++)
             printf(" 0x%llx", (unsigned long long)addrs[i]);
         if (frontier_shown < addrs.size())
@@ -708,6 +710,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
 }
 
 int q_taint(const std::string& gtb, const TaintOptions& o) {
+    if (o.limit <= 0) {
+        fprintf(stderr, "taint: --limit must be greater than zero\n");
+        return 2;
+    }
     return run_taint(gtb, o.seed_addr, o.seed_reg, o.seed_q, o.seed_nzcv,
                      o.backward, o.limit, o.window, o.at_ev, o.off, o.mod,
                      o.json, o.index_deps);
@@ -722,6 +728,10 @@ int q_taint(const std::string& gtb, const TaintOptions& o) {
 // across ASLR and load-order differences.
 // ---------------------------------------------------------------------------
 int q_diff(const std::string& a_p, const std::string& b_p, int context, bool json) {
+    if (context < 0) {
+        fprintf(stderr, "diff: --context must not be negative\n");
+        return 2;
+    }
     GtbFile a, b;
     if (!a.load(a_p, false)) {
         fprintf(stderr, "load failed\n");
@@ -868,6 +878,10 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
 // fold (loop detection over the exec stream)
 // ---------------------------------------------------------------------------
 int q_fold(const std::string& gtb, int top, bool json) {
+    if (top <= 0) {
+        fprintf(stderr, "fold: --top must be greater than zero\n");
+        return 2;
+    }
     GtbFile f;
     if (!f.load(gtb, false)) return 1;
     emit::QueryWriter writer(json);
@@ -1102,10 +1116,9 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     bool reads_only = options.reads_only;
     bool all_writes = options.all_writes;
     bool has_selector = use_range || !addrs.empty();
-    if ((!has_selector && !all_writes) ||
+    if (!options.valid() || (!has_selector && !all_writes) ||
         (all_writes && (has_selector || !writes_only || to_ev == UINT64_MAX)) ||
-        (use_range && range_len == 0) || from_ev > to_ev ||
-        (writes_only && reads_only)) {
+        (use_range && range_len == 0) || (writes_only && reads_only)) {
         fprintf(stderr, "mem-access: invalid selector or event range\n");
         return 2;
     }
@@ -1537,8 +1550,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     uint64_t offset = options.offset, from_ev = options.from_ev;
     uint64_t to_ev = options.to_ev;
     bool json = options.json;
-    if ((addrs.empty() && offs.empty()) || from_ev > to_ev || last < 0 ||
-        (last > 0 && offset != 0)) {
+    if (!options.valid() || (addrs.empty() && offs.empty())) {
         fprintf(stderr, "find-pc: invalid selector, range, or --last combination\n");
         return 2;
     }
@@ -1696,9 +1708,8 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
 }
 
 int q_calls(const std::string& gtb, const CallsOptions& options) {
-    if (options.from_ev > options.to_ev || options.top < 0 || options.last < 0 ||
+    if (!options.valid() || options.top < 0 ||
         (options.top > 0 && (options.last > 0 || options.offset != 0)) ||
-        (options.last > 0 && options.offset != 0) ||
         (!options.mod.empty() && options.target_offs.empty())) {
         fprintf(stderr, "calls: invalid range, selector, or output mode\n");
         return 2;
@@ -2035,8 +2046,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     int limit = options.limit, last = options.last;
     bool json = options.json, reads_only = options.reads_only;
     bool writes_only = options.writes_only;
-    if (from_ev > to_ev || (reads_only && writes_only) || last < 0 ||
-        (last > 0 && offset != 0)) {
+    if (!options.valid() || (reads_only && writes_only)) {
         fprintf(stderr, "find-value: invalid range, filter, or --last combination\n");
         return 2;
     }
@@ -2282,6 +2292,10 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
 // matched frame returns. An empty selector emits the bounded global forest.
 int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                    int limit, bool json) {
+    if (limit <= 0) {
+        fprintf(stderr, "calltree: --limit must be greater than zero\n");
+        return 2;
+    }
     GtbFile f;
     if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
     emit::QueryWriter writer(json);

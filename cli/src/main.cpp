@@ -46,7 +46,7 @@ static void usage_taint(FILE* o) {
 
 int cmd_taint(int argc, char** argv) {
     uint64_t seed_addr = 0, window = 0, at_ev = 0, off = 0;
-    int seed_reg = -1, seed_q = -1, limit = 20;
+    int seed_reg = -1, seed_q = -1, limit = gt::DEFAULT_OUTPUT_ROWS;
     bool back = false, seed_nzcv = false, json = false, index_deps = false;
     std::string gtb, mod;
     for (int i = 1; i < argc; i++) {
@@ -159,7 +159,7 @@ int cmd_mem_access(int argc, char** argv) {
     std::vector<uint64_t> addrs;
     uint64_t range_base = 0, range_len = 0, offset = 0;
     uint64_t from_ev = 0, to_ev = UINT64_MAX;
-    int limit = 20, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
     bool use_range = false, json = false, writes_only = false, reads_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
     bool have_from = false, have_to = false;
@@ -290,7 +290,7 @@ int cmd_find_pc(int argc, char** argv) {
     std::string gtb, mod;
     std::vector<uint64_t> addrs, offs;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = 20, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
     bool json = false, have_limit = false, have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -350,7 +350,7 @@ int cmd_calls(int argc, char** argv) {
     std::vector<std::string> names;
     std::vector<uint64_t> target_addrs, target_offs;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int top = 0, limit = 20, last = 0;
+    int top = 0, limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
     bool json = false, have_top = false, have_limit = false;
     bool have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
@@ -422,7 +422,7 @@ int cmd_find_value(int argc, char** argv) {
     std::vector<std::string> positional;
     std::vector<uint64_t> values;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = 20, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
     bool value_option = false, json = false;
     bool reads_only = false, writes_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
@@ -492,7 +492,7 @@ int cmd_find_value(int argc, char** argv) {
 
 int cmd_calltree(int argc, char** argv) {
     std::string gtb, func;
-    int depth = 3, limit = 40;
+    int depth = 3, limit = gt::DEFAULT_OUTPUT_ROWS;
     bool json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
@@ -524,7 +524,7 @@ static void usage() {
         "usage:\n"
         "  gt import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
         "  gt export    [--format compact|jsonl|upstream]\n"
-        "               [--from E --to E --limit N] trace.gtb [-o FILE]\n"
+        "               [--from E --to E] [--limit N | --all] trace.gtb [-o FILE]\n"
         "  gt taint     (--seed-addr A|--seed-reg R|--seed-q Q) [--back]\n"
         "               [--at-ev N] [--off O [--mod M]] [--window N] trace.gtb\n"
         "  gt diff      a.gtb b.gtb\n"
@@ -579,26 +579,34 @@ int main(int argc, char** argv) {
 
 int cmd_export(int argc, char** argv) {
     std::string in, out = "-", fmt = "compact";
-    uint64_t from = 0, to = UINT64_MAX, limit = 0;
-    bool have_to = false;
+    uint64_t from = 0, to = UINT64_MAX;
+    uint64_t limit = gt::DEFAULT_OUTPUT_ROWS;
+    bool have_to = false, have_limit = false, all = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
             printf("usage: gt export [--format compact|jsonl|upstream] "
-                   "[--from E] [--to E] [--limit N] trace.gtb [-o FILE]\n");
+                   "[--from E] [--to E] [--limit N | --all] "
+                   "trace.gtb [-o FILE]\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
         else if (!strcmp(argv[i], "--to")) { to = strtoull(next(), nullptr, 10); have_to = true; }
-        else if (!strcmp(argv[i], "--limit")) limit = strtoull(next(), nullptr, 10);
+        else if (!strcmp(argv[i], "--limit")) {
+            limit = strtoull(next(), nullptr, 10);
+            have_limit = true;
+        }
+        else if (!strcmp(argv[i], "--all")) all = true;
         else if (!strcmp(argv[i], "--format")) fmt = next();
         else if (!strcmp(argv[i], "-o")) out = next();
         else if (argv[i][0] != '-') in = argv[i];
         else return unknown_option("export", argv[i]);
     }
-    if (in.empty() || from > to) {
+    if (in.empty() || from > to || (have_limit && limit == 0) ||
+        (all && have_limit)) {
         fprintf(stderr, "usage: gt export [--format compact|jsonl|upstream] "
-                        "[--from E] [--to E] [--limit N] trace.gtb [-o FILE]\n");
+                        "[--from E] [--to E] [--limit N | --all] "
+                        "trace.gtb [-o FILE]\n");
         return 2;
     }
     if (fmt != "compact" && fmt != "jsonl" && fmt != "upstream") {
@@ -610,6 +618,7 @@ int cmd_export(int argc, char** argv) {
     if (!f.load(in, false)) { fprintf(stderr, "load failed\n"); return 1; }
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
+    if (all) limit = 0;
     uint64_t stop_gi = UINT64_MAX, n = 0, total_selected = 0;
     if (fmt == "upstream")
         n = gt::export_upstream(f, o, from, to, limit, &stop_gi);
