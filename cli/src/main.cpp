@@ -545,12 +545,10 @@ static void usage() {
         "\n"
         "query --json output is one {\"data\":[...],\"meta\":{...}} document;\n"
         "u64 values are hex strings. export --format jsonl remains streaming.\n"
-        "query and export output defaults to 20 rows; export --all is explicit.\n"
+        "limit-based queries and export default to 20 rows; export --all is explicit.\n"
         "all queries scan the loaded .gtb event buffer — there is no index step.\n"
         "\n"
-        "capture live traces with GumTrace, then convert them with `gt import`.\n"
-        "traceq does not capture processes or expose a record command.\n"
-        "benchmarks run on real trace files (see bench/).\n");
+        "capture live traces with GumTrace, then convert them with `gt import`.\n");
 }
 
 int main(int argc, char** argv) {
