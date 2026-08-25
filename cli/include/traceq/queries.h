@@ -93,8 +93,8 @@ struct CallsOptions : QueryWindow {
     bool json = false;
 };
 
-// All implemented in queries.cpp. Option objects keep call sites explicit as
-// the query surface grows; compatibility overloads remain below for existing
+// Implementations are grouped by capability in query_*.cpp. Option objects
+// keep call sites explicit; compatibility overloads remain below for existing
 // libtraceq callers.
 // taint coordinates: seeds are --seed-addr/--seed-reg/--seed-q/--seed-nzcv,
 // placement is --at-ev N (event index) and/or --off O (module offset, --mod M
