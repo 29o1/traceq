@@ -98,14 +98,39 @@ static uint8_t mnem_kind(const char* m, size_t n) {
         return n >= l && memcmp(m, w, l) == 0;
     };
     if (is("bl")) return SK_CALL_IMM;
-    if (is("blr") || pre("braa") || pre("brab") || pre("blraa") || pre("blrab"))
+    if (is("blr") || pre("blraa") || pre("blrab"))
         return SK_CALL_REG;
-    if (is("br") || pre("bra")) return SK_BR;
+    if (is("br") || pre("braa") || pre("brab")) return SK_BR;
     if (is("ret") || pre("retaa") || pre("retab")) return SK_RET;
     if (is("svc")) return SK_SVC;
     if (pre("b.")) return SK_BCOND;
     if (is("b")) return SK_B_IMM;
     return SK_NORMAL;
+}
+
+static uint64_t branch_target(const char* disasm, size_t len, size_t mn_len) {
+    size_t p = mn_len;
+    while (p < len && disasm[p] == ' ') p++;
+    if (p < len && disasm[p] == '#') p++;
+    if (p + 2 > len || disasm[p] != '0' ||
+        (disasm[p + 1] != 'x' && disasm[p + 1] != 'X'))
+        return 0;
+    p += 2;
+    uint64_t value = 0;
+    bool any = false;
+    while (p < len) {
+        unsigned digit;
+        char c = disasm[p];
+        if (c >= '0' && c <= '9') digit = unsigned(c - '0');
+        else if (c >= 'a' && c <= 'f') digit = unsigned(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') digit = unsigned(c - 'A' + 10);
+        else break;
+        if (value > (UINT64_MAX - digit) / 16) return 0;
+        value = value * 16 + digit;
+        any = true;
+        p++;
+    }
+    return any ? value : 0;
 }
 
 uint32_t SiteArena::intern_text(uint64_t addr, const char* prefix, size_t prefix_len,
@@ -155,6 +180,8 @@ uint32_t SiteArena::intern_text(uint64_t addr, const char* prefix, size_t prefix
     s.module_id = module_id;
     s.func_sym = -1;
     s.kind = mnem_kind(prefix + dis_off, mn_len);
+    if (s.kind == SK_CALL_IMM || s.kind == SK_B_IMM)
+        s.branch_imm = branch_target(prefix + dis_off, dis_len, mn_len);
     uint8_t nzcv = mnem_nzcv(prefix + dis_off, mn_len);
 
     // classify every operand first: a failure must not touch arena state
