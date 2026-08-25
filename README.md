@@ -28,6 +28,15 @@ authorized to inspect. Instruction traces may contain addresses, register and
 memory values, and call arguments. Review trace data separately before making
 it public.
 
+## Design Philosophy
+
+traceq distills massive instruction traces locally into the **smallest
+sufficient evidence** needed to reach a conclusion. This lets an agent spend
+fewer tokens, get more useful signal from its context window, and complete an
+analysis faster. The goal is not merely shorter output, but more analytical
+value per token while retaining the provenance, unknown-state, and truncation
+details needed to verify a conclusion.
+
 ## Quick Start
 
 Requirements: make and a C++17 compiler such as clang++ or g++. Python 3 is
