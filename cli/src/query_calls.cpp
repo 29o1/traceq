@@ -29,7 +29,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
                         !target_offs.empty();
 
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(options.json);
 
     struct Row {
@@ -348,7 +348,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     std::vector<std::string> stack;
     bool capturing = false;

@@ -2,6 +2,7 @@
 #include <traceq/varint.h>
 #include "event_decoder.h"
 #include "gtb_format.h"
+#include <cerrno>
 #include <cstring>
 #include <cstdio>
 
@@ -24,11 +25,19 @@ static const char* decoded_call_name(const std::string& sym, bool& is_jni) {
     return sym.c_str();
 }
 
-bool GtbFile::load(const std::string& path, bool scan_stats) {
+bool GtbFile::load(const std::string& path, bool scan_stats,
+                   std::string* err) {
+    auto fail = [&](const char* reason) {
+        if (err) *err = reason;
+        return false;
+    };
     FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return false;
+    if (!f) return fail(strerror(errno));
     uint32_t hdr[2];
-    if (fread(hdr, 4, 2, f) != 2 || hdr[0] != GTB_MAGIC) { fclose(f); return false; }
+    if (fread(hdr, 4, 2, f) != 2 || hdr[0] != GTB_MAGIC) {
+        fclose(f);
+        return fail("not a GTB2 file (bad magic)");
+    }
 
     // CH_EVENTS payloads occupy no more bytes than the file itself. Reserve
     // that upper bound once so repeated chunk appends do not briefly retain
@@ -39,7 +48,7 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
         if (file_size > 0) events.reserve(size_t(file_size));
         if (fseek(f, chunk_start, SEEK_SET) != 0) {
             fclose(f);
-            return false;
+            return fail("cannot seek back after size probe");
         }
     }
 
@@ -78,10 +87,10 @@ bool GtbFile::load(const std::string& path, bool scan_stats) {
         }
     }
     fclose(f);
-    if (meta_payload.empty()) return false;
-    if (!footer_seen ||
-        !SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena))
-        return false;
+    if (meta_payload.empty()) return fail("no META chunk");
+    if (!footer_seen) return fail("truncated file (no footer chunk)");
+    if (!SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena))
+        return fail("corrupt META chunk");
 
     if (!scan_stats) return true;
 

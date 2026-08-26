@@ -2,6 +2,7 @@
 #include <traceq/ingest.h>
 #include <traceq/queries.h>
 #include "emit.h"
+#include "query_common.h"
 #include "export.h"
 #include <cstdio>
 #include <cstring>
@@ -35,6 +36,7 @@ static bool parse_range(const char* s, uint64_t& base, uint64_t& len) {
     len = strtoull(comma + 1, &end, 0);
     return *end == '\0';
 }
+
 
 static void usage_taint(FILE* o) {
     fprintf(o,
@@ -616,7 +618,7 @@ int cmd_export(int argc, char** argv) {
         return 2;
     }
     gt::GtbFile f;
-    if (!f.load(in, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, in)) return 1;
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     if (all) limit = 0;

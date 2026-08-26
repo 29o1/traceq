@@ -3,6 +3,7 @@
 #include <traceq/import.h>
 #include <traceq/site.h>
 #include "emit.h"
+#include "query_common.h"
 #include <algorithm>
 #include <cstdio>
 #include <iterator>
@@ -80,7 +81,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                      uint64_t window, uint64_t at_ev, uint64_t off,
                      const std::string& mod, bool json, bool index_deps) {
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
 
     // --off resolves to the set of sites at that module-relative offset

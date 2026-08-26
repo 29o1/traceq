@@ -16,7 +16,7 @@ using namespace gt;
 
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
-    if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb, true)) return 1;
     emit::QueryWriter writer(json);
     std::vector<uint64_t> mod_exec(f.arena.modules().size(), 0);
     uint64_t first_addr = 0, first_off = 0;
@@ -143,7 +143,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     struct Row {
         uint64_t ev, line, addr;
@@ -366,10 +366,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
     at_evs.erase(std::unique(at_evs.begin(), at_evs.end()), at_evs.end());
 
     GtbFile f;
-    if (!f.load(gtb, false)) {
-        fprintf(stderr, "load failed: %s\n", gtb.c_str());
-        return 1;
-    }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(options.json);
 
     struct State {
@@ -575,7 +572,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
@@ -746,7 +743,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb, false)) { fprintf(stderr, "load failed\n"); return 1; }
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     std::unordered_map<uint64_t, size_t> value_index;
     for (size_t i = 0; i < values.size(); i++) value_index.emplace(values[i], i);

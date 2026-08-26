@@ -31,8 +31,11 @@ struct GtbFile {
 
     // scan_stats decodes the event stream to populate n_* counters. Queries
     // that do not expose those counters can skip that otherwise redundant
-    // pass; true remains the default for library callers.
-    bool load(const std::string& path, bool scan_stats = true);
+    // pass; true remains the default for library callers. On failure, err
+    // (when given) receives a human-readable reason without the path, so
+    // callers can print "<path>: <reason>".
+    bool load(const std::string& path, bool scan_stats = true,
+              std::string* err = nullptr);
 };
 
 // One reconstructed execution group: everything that happened at one EXEC,

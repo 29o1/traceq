@@ -2,6 +2,7 @@
 #include <traceq/ingest.h>
 #include <traceq/site.h>
 #include "emit.h"
+#include "query_common.h"
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -22,10 +23,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
         return 2;
     }
     GtbFile a, b;
-    if (!a.load(a_p, false)) {
-        fprintf(stderr, "load failed\n");
-        return 1;
-    }
+    if (!load_query_file(a, a_p)) return 1;
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> sa, sb;
     sa.reserve(size_t(std::min<uint64_t>(a.events_seen, a.events.size())));
@@ -37,10 +35,7 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
     // this point onward. Release its large event payload before loading B so
     // diff does not hold two full traces plus both derived sequences at once.
     std::vector<uint8_t>().swap(a.events);
-    if (!b.load(b_p, false)) {
-        fprintf(stderr, "load failed\n");
-        return 1;
-    }
+    if (!load_query_file(b, b_p)) return 1;
     emit::QueryWriter writer(json);
     sb.reserve(size_t(std::min<uint64_t>(b.events_seen, b.events.size())));
     TraceScan(b).for_each([&](uint64_t ev, const Group& g) {
@@ -174,7 +169,7 @@ int q_fold(const std::string& gtb, int top, bool json) {
         return 2;
     }
     GtbFile f;
-    if (!f.load(gtb, false)) return 1;
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> s;
