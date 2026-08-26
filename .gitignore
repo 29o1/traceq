@@ -8,7 +8,6 @@ cli/gt-test
 # local-only validation assets
 /bench/
 /cli/tests/
-/.github/workflows/ci.yml
 
 # stray top-level build dir (ad-hoc artifacts)
 build/
