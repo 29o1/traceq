@@ -24,6 +24,8 @@ struct GtbFile {
     uint8_t stop_reason = 0;
     bool crlf = false;
     uint64_t events_seen = 0, events_recorded = 0, bytes_written = 0;
+    // n_call/n_ret count imported CALL/RET annotation events, not executed
+    // ARM64 call/return instructions.
     uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_ret = 0;
     uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0;
 

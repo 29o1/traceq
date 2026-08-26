@@ -46,6 +46,8 @@ enum StopReason : uint8_t {
     STOP_MAX_MS,
 };
 
+const char* stop_reason_name(StopReason reason);
+
 struct RecOptions {
     uint64_t max_events = 0;   // 0 = unlimited
     uint64_t max_bytes = 0;    // 0 = unlimited (encoded event bytes)

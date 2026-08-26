@@ -8,7 +8,13 @@
 namespace gt {
 
 struct ImportCounts {
-    uint64_t lines = 0, exec = 0, call = 0, ret = 0, verbatim = 0;
+    uint64_t lines = 0, exec = 0;
+    uint64_t call_instructions = 0, return_instructions = 0;
+    // Source-level "call func:" / "call jni func:" and "ret:" records.
+    // The short member names remain source-compatible with existing library
+    // callers; CLI output labels them explicitly as annotations.
+    uint64_t call = 0, ret = 0;
+    uint64_t verbatim = 0;
 };
 
 struct ImportResult {

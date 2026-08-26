@@ -240,6 +240,11 @@ struct Importer {
         if (site == 0xFFFFFFFFu) return false;
 
         cnt.exec++;
+        const Site& parsed_site = arena.get(site);
+        if (parsed_site.kind == SK_CALL_IMM || parsed_site.kind == SK_CALL_REG)
+            cnt.call_instructions++;
+        else if (parsed_site.kind == SK_RET)
+            cnt.return_instructions++;
         rec.imp_exec(site);
         for (int i = 0; i < n_rd; i++) {
             const Tok& t = rd[i];
@@ -531,13 +536,18 @@ int cmd_import(int argc, char** argv) {
         return 1;
     }
     double ms = double(gt::now_ns() - t0) / 1e6;
-    printf("{\"import\":{\"lines\":%llu,\"exec\":%llu,\"call\":%llu,\"ret\":%llu,"
+    printf("{\"import\":{\"lines\":%llu,\"exec\":%llu,"
+           "\"call_instructions\":%llu,\"return_instructions\":%llu,"
+           "\"call_annotations\":%llu,\"return_annotations\":%llu,"
            "\"verbatim\":%llu,\"in_bytes\":%llu,\"gtb_bytes\":%llu,\"ms\":%.1f,"
-           "\"stop\":%d%s}}\n",
+           "\"stop\":\"%s\"%s}}\n",
            (unsigned long long)r.cnt.lines, (unsigned long long)r.cnt.exec,
+           (unsigned long long)r.cnt.call_instructions,
+           (unsigned long long)r.cnt.return_instructions,
            (unsigned long long)r.cnt.call, (unsigned long long)r.cnt.ret,
            (unsigned long long)r.cnt.verbatim, (unsigned long long)r.in_bytes,
-           (unsigned long long)r.gtb_bytes, ms, int(r.stats.reason),
+           (unsigned long long)r.gtb_bytes, ms,
+           gt::stop_reason_name(r.stats.reason),
            r.stopped ? ",\"stopped\":true" : "");
     return 0;
 }

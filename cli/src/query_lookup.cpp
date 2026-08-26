@@ -14,28 +14,23 @@
 
 using namespace gt;
 
-static const char* stop_reason_name(uint8_t reason) {
-    switch (reason) {
-    case STOP_NORMAL: return "normal";
-    case STOP_MAX_BYTES: return "max_bytes";
-    case STOP_MAX_EVENTS: return "max_events";
-    case STOP_MAX_MS: return "max_ms";
-    default: return "none";
-    }
-}
-
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
     if (!f.load(gtb)) { fprintf(stderr, "load failed\n"); return 1; }
     emit::QueryWriter writer(json);
     std::vector<uint64_t> mod_exec(f.arena.modules().size(), 0);
     uint64_t first_addr = 0, first_off = 0;
+    uint64_t call_instructions = 0, return_instructions = 0;
     std::string first_mod;
     bool saw_exec = false;
     TraceScan(f).for_each([&](uint64_t, const Group& g) {
         if (!g.has_exec) return true;
         const Site& s = f.arena.get(g.site_id);
         if (s.module_id < mod_exec.size()) mod_exec[s.module_id]++;
+        if (s.kind == SK_CALL_IMM || s.kind == SK_CALL_REG)
+            call_instructions++;
+        else if (s.kind == SK_RET)
+            return_instructions++;
         if (!saw_exec) {
             saw_exec = true;
             first_addr = s.addr;
@@ -55,15 +50,21 @@ int q_stat(const std::string& gtb, bool json) {
         o += ',';
         emit::kv_str(o, "dialect", dialect);
         o += ',';
-        emit::kv_str(o, "stop", stop_reason_name(f.stop_reason));
-        char b[256];
+        emit::kv_str(o, "stop",
+                     stop_reason_name(static_cast<StopReason>(f.stop_reason)));
+        char b[512];
         snprintf(b, sizeof b,
-                 ",\"exec\":%llu,\"regw\":%llu,\"mem\":%llu,\"call\":%llu,"
-                 "\"ret\":%llu,\"rdval\":%llu,\"simdv\":%llu,"
+                 ",\"exec\":%llu,\"regw\":%llu,\"mem\":%llu,"
+                 "\"call_instructions\":%llu,\"return_instructions\":%llu,"
+                 "\"call_annotations\":%llu,\"return_annotations\":%llu,"
+                 "\"rdval\":%llu,\"simdv\":%llu,"
                  "\"verbatim\":%llu,\"events_seen\":%llu,\"events_recorded\":%llu,"
                  "\"bytes_written\":%llu",
                  (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
-                 (unsigned long long)f.n_mem, (unsigned long long)f.n_call,
+                 (unsigned long long)f.n_mem,
+                 (unsigned long long)call_instructions,
+                 (unsigned long long)return_instructions,
+                 (unsigned long long)f.n_call,
                  (unsigned long long)f.n_ret,
                  (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
                  (unsigned long long)f.n_verbatim,
@@ -92,14 +93,19 @@ int q_stat(const std::string& gtb, bool json) {
         writer.row("{\"stat\":{" + o + "}}");
     } else {
         printf("file: %s (dialect %s, stop %s)\n", gtb.c_str(), dialect,
-               stop_reason_name(f.stop_reason));
-        printf("events: exec=%llu regw=%llu mem=%llu call=%llu ret=%llu "
-               "rdval=%llu simdv=%llu verbatim=%llu\n",
+               stop_reason_name(static_cast<StopReason>(f.stop_reason)));
+        printf("events: exec=%llu regw=%llu mem=%llu rdval=%llu simdv=%llu "
+               "verbatim=%llu\n",
                (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
-               (unsigned long long)f.n_mem, (unsigned long long)f.n_call,
-               (unsigned long long)f.n_ret,
+               (unsigned long long)f.n_mem,
                (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
                (unsigned long long)f.n_verbatim);
+        printf("flow: call_instructions=%llu return_instructions=%llu "
+               "call_annotations=%llu return_annotations=%llu\n",
+               (unsigned long long)call_instructions,
+               (unsigned long long)return_instructions,
+               (unsigned long long)f.n_call,
+               (unsigned long long)f.n_ret);
         printf("recorded: seen=%llu recorded=%llu bytes=%llu\n",
                (unsigned long long)f.events_seen,
                (unsigned long long)f.events_recorded,

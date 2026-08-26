@@ -12,6 +12,16 @@ static constexpr size_t EVENT_CHUNK_SIZE = 256 * 1024;
 
 using namespace format;
 
+const char* stop_reason_name(StopReason reason) {
+    switch (reason) {
+    case STOP_NORMAL: return "normal";
+    case STOP_MAX_BYTES: return "max_bytes";
+    case STOP_MAX_EVENTS: return "max_events";
+    case STOP_MAX_MS: return "max_ms";
+    default: return "none";
+    }
+}
+
 bool GtbRecorder::open(const std::string& path, const RecOptions& opts) {
     opt_ = opts;
     io_ok_ = true;
