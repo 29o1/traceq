@@ -19,6 +19,11 @@ struct QueryWindow {
     uint64_t from_ev = 0;
     uint64_t to_ev = UINT64_MAX;
     int last = 0;
+    // --context N: render the compact instruction window [ev-N, ev+N] around
+    // the first shown hit. 0 = off. Parsed by find-pc, mem-access, and
+    // find-value only; the span stays bounded (1..200) to keep the one-round-
+    // trip answer inside the output contract.
+    int context = 0;
 
     bool valid() const {
         return limit > 0 && last >= 0 && from_ev <= to_ev &&

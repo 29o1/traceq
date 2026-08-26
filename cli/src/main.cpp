@@ -37,6 +37,17 @@ static bool parse_range(const char* s, uint64_t& base, uint64_t& len) {
     return *end == '\0';
 }
 
+// --context N on hit queries: bounded instruction span around the first
+// shown hit. The cap keeps the one-round-trip answer inside the output
+// contract even at the maximum.
+static bool parse_context(const char* cmd, const char* s, int& out) {
+    out = atoi(s);
+    if (out <= 0 || out > 200) {
+        fprintf(stderr, "%s: --context N must be 1..200\n", cmd);
+        return false;
+    }
+    return true;
+}
 
 static void usage_taint(FILE* o) {
     fprintf(o,
@@ -161,7 +172,7 @@ int cmd_mem_access(int argc, char** argv) {
     std::vector<uint64_t> addrs;
     uint64_t range_base = 0, range_len = 0, offset = 0;
     uint64_t from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool use_range = false, json = false, writes_only = false, reads_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
     bool have_from = false, have_to = false;
@@ -170,9 +181,9 @@ int cmd_mem_access(int argc, char** argv) {
         if (is_help(argv[i])) {
             printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
                    "[--read | --write] [--from E] [--to E] "
-                   "([--limit N] [--offset M] | --last N) [--json]\n"
+                   "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                    "       gt mem-access trace.gtb --write --from E --to E "
-                   "([--limit N] [--offset M] | --last N) [--json]\n"
+                   "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                    "  the selectorless form lists writes only inside an explicit "
                    "finite event window\n");
             return 0;
@@ -208,6 +219,9 @@ int cmd_mem_access(int argc, char** argv) {
             last = atoi(next());
             have_last = true;
         }
+        else if (!strcmp(argv[i], "--context")) {
+            if (!parse_context("mem-access", next(), context)) return 2;
+        }
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("mem-access", argv[i]);
@@ -220,9 +234,9 @@ int cmd_mem_access(int argc, char** argv) {
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
         fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
                         "[--read | --write] [--from E] [--to E] "
-                        "([--limit N] [--offset M] | --last N) [--json]\n"
+                        "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                         "       gt mem-access trace.gtb --write --from E --to E "
-                        "([--limit N] [--offset M] | --last N) [--json]\n");
+                        "([--limit N] [--offset M] | --last N) [--context N] [--json]\n");
         return 2;
     }
     MemAccessOptions options;
@@ -239,6 +253,7 @@ int cmd_mem_access(int argc, char** argv) {
     options.json = json;
     options.writes_only = writes_only;
     options.reads_only = reads_only;
+    options.context = context;
     return q_mem_accesses(gtb, options);
 }
 
@@ -292,14 +307,14 @@ int cmd_find_pc(int argc, char** argv) {
     std::string gtb, mod;
     std::vector<uint64_t> addrs, offs;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool json = false, have_limit = false, have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
             printf("usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
                    "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
-                   "[--json]\n"
+                   "[--context N] [--json]\n"
                    "  repeat --addr or --off to find several PCs in one trace pass\n");
             return 0;
         }
@@ -322,6 +337,9 @@ int cmd_find_pc(int argc, char** argv) {
             last = atoi(next());
             have_last = true;
         }
+        else if (!strcmp(argv[i], "--context")) {
+            if (!parse_context("find-pc", next(), context)) return 2;
+        }
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("find-pc", argv[i]);
@@ -331,7 +349,7 @@ int cmd_find_pc(int argc, char** argv) {
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
         fprintf(stderr, "usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
                         "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
-                        "[--json]\n");
+                        "[--context N] [--json]\n");
         return 2;
     }
     FindPcOptions options;
@@ -344,6 +362,7 @@ int cmd_find_pc(int argc, char** argv) {
     options.to_ev = to_ev;
     options.last = last;
     options.json = json;
+    options.context = context;
     return q_find_pcs(gtb, options);
 }
 
@@ -424,7 +443,7 @@ int cmd_find_value(int argc, char** argv) {
     std::vector<std::string> positional;
     std::vector<uint64_t> values;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
+    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool value_option = false, json = false;
     bool reads_only = false, writes_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
@@ -433,7 +452,7 @@ int cmd_find_value(int argc, char** argv) {
         if (is_help(argv[i])) {
             printf("usage: gt find-value V trace.gtb [--read | --write] "
                    "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
-                   "[--json]\n"
+                   "[--context N] [--json]\n"
                    "       gt find-value trace.gtb --value V... [same options]\n"
                    "  repeat --value to search multiple values in one trace pass; "
                    "limits, offsets, and --last apply per value\n");
@@ -459,6 +478,9 @@ int cmd_find_value(int argc, char** argv) {
             last = atoi(next());
             have_last = true;
         }
+        else if (!strcmp(argv[i], "--context")) {
+            if (!parse_context("find-value", next(), context)) return 2;
+        }
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') positional.emplace_back(argv[i]);
         else return unknown_option("find-value", argv[i]);
@@ -475,7 +497,7 @@ int cmd_find_value(int argc, char** argv) {
         fprintf(stderr,
                 "usage: gt find-value V trace.gtb [--read | --write] "
                 "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
-                "[--json]\n"
+                "[--context N] [--json]\n"
                 "       gt find-value trace.gtb --value V... [same options]\n");
         return 2;
     }
@@ -489,6 +511,7 @@ int cmd_find_value(int argc, char** argv) {
     options.reads_only = reads_only;
     options.writes_only = writes_only;
     options.last = last;
+    options.context = context;
     return q_find_value(gtb, options);
 }
 
@@ -533,14 +556,17 @@ static void usage() {
         "  gt fold      --top N trace.gtb\n"
         "  gt stat      trace.gtb [--json]\n"
         "  gt mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
-        "               [--from E] [--to E] ([--limit N] | --last N) [--json]\n"
+        "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
+        "               [--json]\n"
         "  gt mem-access trace.gtb --write --from E --to E "
-        "([--limit N] | --last N) [--json]\n"
+        "([--limit N] | --last N) [--context N] [--json]\n"
         "  gt mem-state trace.gtb --range B,L... --at-ev N... [--qword] [--json]\n"
         "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
-        "               [--from E] [--to E] ([--limit N] | --last N) [--json]\n"
+        "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
+        "               [--json]\n"
         "  gt find-value V trace.gtb | trace.gtb --value V... [--read | --write]\n"
-        "               [--from E] [--to E] ([--limit N] | --last N) [--json]\n"
+        "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
+        "               [--json]\n"
         "  gt calls     trace.gtb [--top N | --name NAME | --target-addr A |\n"
         "               --target-off O [--mod M]] [--limit N | --last N] [--json]\n"
         "  gt calltree  [--func NAME] [--depth D] trace.gtb\n"

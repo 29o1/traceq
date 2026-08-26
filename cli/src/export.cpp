@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -307,6 +308,43 @@ uint64_t export_jsonl(const GtbFile& file, FILE* out, uint64_t from_idx,
                       uint64_t* stop_event, uint64_t* total_selected) {
     return export_agent(file, out, true, from_idx, to_idx, max_lines,
                         stop_event, total_selected);
+}
+
+std::string render_context(const GtbFile& file, uint64_t ev, uint64_t span,
+                           bool json) {
+    uint64_t from = ev > span ? ev - span : 0;
+    uint64_t to = ev > UINT64_MAX - span ? UINT64_MAX : ev + span;
+    char* buf = nullptr;
+    size_t len = 0;
+    FILE* ms = open_memstream(&buf, &len);
+    if (!ms) return std::string();
+    if (json)
+        export_jsonl(file, ms, from, to, 0, nullptr, nullptr);
+    else
+        export_compact(file, ms, from, to, 0, nullptr);
+    fclose(ms);
+    std::string out;
+    if (!json) {
+        out.assign(buf ? buf : "", len);
+    } else {
+        const char* p = buf ? buf : "";
+        size_t n = len;
+        while (n && p[n - 1] == '\n') n--;
+        out = "[";
+        size_t i = 0;
+        while (i < n) {
+            size_t j = i;
+            while (j < n && p[j] != '\n') j++;
+            if (j > i) {
+                if (out.size() > 1) out += ',';
+                out.append(p + i, j - i);
+            }
+            i = j + 1;
+        }
+        out += ']';
+    }
+    free(buf);
+    return out;
 }
 
 } // namespace gt

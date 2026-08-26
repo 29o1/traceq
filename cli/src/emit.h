@@ -133,6 +133,11 @@ inline void meta_append(std::string& s, const Meta& m) {
 // bounded by command limits; snapshot and aggregate sizes come from their
 // explicit selectors or command-specific controls. Large unbounded streams use
 // export --format jsonl instead.
+//
+// set_context attaches one bounded instruction window around the first shown
+// hit (--context N). It rides the single query document as an additive
+// "context" key in JSON and a labeled block before the truncation markers in
+// text mode.
 class QueryWriter {
 public:
     explicit QueryWriter(bool json, FILE* out = stdout) : json_(json), out_(out) {}
@@ -143,8 +148,16 @@ public:
         if (json_) rows_.push_back(std::move(row));
     }
 
+    void set_context(uint64_t ev, std::string rendered) {
+        ctx_ev_ = ev;
+        ctx_ = std::move(rendered);
+    }
+
     void finish(const Meta& m) {
         if (!json_) {
+            if (!ctx_.empty())
+                fprintf(out_, "context ev=%llu:\n%s",
+                        (unsigned long long)ctx_ev_, ctx_.c_str());
             if (m.total > m.shown)
                 fprintf(out_, "... [%llu more rows truncated]\n",
                         (unsigned long long)(m.total - m.shown));
@@ -158,6 +171,14 @@ public:
         }
         std::string tail = "],\"meta\":";
         meta_append(tail, m);
+        if (!ctx_.empty()) {
+            char b[48];
+            snprintf(b, sizeof b, ",\"context\":{\"ev\":%llu,\"rows\":",
+                     (unsigned long long)ctx_ev_);
+            tail += b;
+            tail += ctx_;
+            tail += '}';
+        }
         tail += "}\n";
         fwrite(tail.data(), 1, tail.size(), out_);
     }
@@ -166,6 +187,8 @@ private:
     bool json_;
     FILE* out_;
     std::vector<std::string> rows_;
+    uint64_t ctx_ev_ = 0;
+    std::string ctx_;
 };
 
 // Trailing footer for JSONL export. Query commands use QueryWriter instead.

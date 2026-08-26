@@ -3,6 +3,7 @@
 #include <traceq/import.h>
 #include <traceq/site.h>
 #include "emit.h"
+#include "export.h"
 #include "query_common.h"
 #include <algorithm>
 #include <cstdio>
@@ -145,6 +146,8 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
+    uint64_t ctx_first_ev = UINT64_MAX;
+    const int ctx_span = options.context;
     struct Row {
         uint64_t ev, line, addr;
         unsigned __int128 value;
@@ -159,6 +162,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     uint64_t total = 0, shown = 0;
     uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
     auto emit_row = [&](const Row& r) {
+        if (ctx_span > 0 && ctx_first_ev == UINT64_MAX) ctx_first_ev = r.ev;
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", r.ev);
@@ -329,6 +333,11 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         next += ' ' + gtb;
         if (json) next += " --json";
         meta.next = std::move(next);
+    }
+    if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
+        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
+                                          json);
+        if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
     }
     writer.finish(meta);
     return 0;
@@ -574,6 +583,8 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
+    uint64_t ctx_first_ev = UINT64_MAX;
+    const int ctx_span = options.context;
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
     std::unordered_set<uint64_t> off_set(offs.begin(), offs.end());
     struct Row {
@@ -592,6 +603,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     wr.reserve(8);
     mems.reserve(2);
     auto emit_row = [&](const Row& r) {
+        if (ctx_span > 0 && ctx_first_ev == UINT64_MAX) ctx_first_ev = r.ev;
         if (json) {
             std::string o = "{";
             emit::kv_u64(o, "ev", r.ev);
@@ -720,6 +732,11 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         if (json) next += " --json";
         meta.next = std::move(next);
     }
+    if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
+        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
+                                          json);
+        if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
+    }
     writer.finish(meta);
     return 0;
 }
@@ -745,6 +762,8 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
+    uint64_t ctx_first_ev = UINT64_MAX;
+    const int ctx_span = options.context;
     std::unordered_map<uint64_t, size_t> value_index;
     for (size_t i = 0; i < values.size(); i++) value_index.emplace(values[i], i);
     std::vector<uint64_t> totals(values.size(), 0);
@@ -773,6 +792,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         } while (v && patterns[i].n < 8);
     }
     auto emit_value_row = [&](const ValueRow& row) {
+        if (ctx_span > 0 && ctx_first_ev == UINT64_MAX) ctx_first_ev = row.ev;
         uint64_t val = values[row.value_i];
         if (json) {
             std::string o = "{";
@@ -971,6 +991,11 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         if (!batched) next += ' ' + gtb;
         if (json) next += " --json";
         meta.next = std::move(next);
+    }
+    if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
+        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
+                                          json);
+        if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
     }
     writer.finish(meta);
     return 0;
