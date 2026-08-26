@@ -48,9 +48,9 @@ gt --help
 | Inspect trace statistics | `gt stat trace.gtb [--json]` |
 | Export an event window | `gt export --format compact\|jsonl\|upstream [--from E] [--to E] [--limit N] trace.gtb` |
 | Replay a completed import byte-for-byte | `gt export --format upstream --all trace.gtb -o trace.log` |
-| Find executed PCs | `gt find-pc trace.gtb (--addr A... \| --off O... [--mod M]) [--last N]` |
-| Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--last N]` |
-| Find memory accesses | `gt mem-access trace.gtb (--addr A... \| --range B,L) [--read\|--write] [--last N]` |
+| Find executed PCs | `gt find-pc trace.gtb (--addr A... \| --off O... [--mod M]) [--last N] [--context N]` |
+| Find runtime values | `gt find-value trace.gtb --value V... [--read\|--write] [--last N] [--context N]` |
+| Find memory accesses | `gt mem-access trace.gtb (--addr A... \| --range B,L) [--read\|--write] [--last N] [--context N]` |
 | List writes in a window | `gt mem-access trace.gtb --write --from E --to E --limit N` |
 | Reconstruct known memory | `gt mem-state trace.gtb --range B,L... --at-ev E... [--qword]` |
 | Analyze calls | `gt calls trace.gtb [--top N \| --name F... \| --target-addr A... \| --target-off O... [--mod M]]` |
@@ -69,6 +69,10 @@ an explicit event window.
 
 - Query commands with `--json` return one `{"data":[...],"meta":{...}}` document.
   `export --format jsonl` emits JSON Lines followed by a meta record.
+- `find-pc`, `mem-access`, and `find-value` accept `--context N` (1..200) to
+  inline the compact instruction window `[ev-N, ev+N]` around the first shown
+  hit, replacing the hit-then-export round trip. JSON adds a `"context"` key;
+  text prints a `context ev=E:` block after the hit rows.
 - Addresses, register values, and SIMD values are hexadecimal strings. Event
   indices and counts are decimal numbers.
 - Event results include the `.gtb` event index `ev` and original log line `line`.

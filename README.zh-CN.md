@@ -45,9 +45,9 @@ gt --help
 | 查看概况 | `gt stat trace.gtb [--json]` |
 | 导出事件窗口 | `gt export --format compact\|jsonl\|upstream [--from E] [--to E] [--limit N] trace.gtb` |
 | 完整回放正常导入 | `gt export --format upstream --all trace.gtb -o trace.log` |
-| 查执行位置 | `gt find-pc trace.gtb (--addr A... \| --off O... [--mod M]) [--last N]` |
-| 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--last N]` |
-| 查内存访问 | `gt mem-access trace.gtb (--addr A... \| --range B,L) [--read\|--write] [--last N]` |
+| 查执行位置 | `gt find-pc trace.gtb (--addr A... \| --off O... [--mod M]) [--last N] [--context N]` |
+| 查运行时值 | `gt find-value trace.gtb --value V... [--read\|--write] [--last N] [--context N]` |
+| 查内存访问 | `gt mem-access trace.gtb (--addr A... \| --range B,L) [--read\|--write] [--last N] [--context N]` |
 | 枚举窗口内写入 | `gt mem-access trace.gtb --write --from E --to E --limit N` |
 | 重建已知内存 | `gt mem-state trace.gtb --range B,L... --at-ev E... [--qword]` |
 | 分析调用 | `gt calls trace.gtb [--top N \| --name F... \| --target-addr A... \| --target-off O... [--mod M]]` |
@@ -65,6 +65,10 @@ gt --help
 
 - 查询命令的 `--json` 返回单个 `{"data":[...],"meta":{...}}` 文档；
   `export --format jsonl` 输出 JSON Lines，并在末尾附加 meta 记录。
+- `find-pc`、`mem-access` 和 `find-value` 支持 `--context N`（1..200），在首个
+  展示命中旁内联 `[ev-N, ev+N]` 的紧凑指令窗口，替代"命中后再 export"的两跳
+  往返。JSON 增加一个 `"context"` 键；文本模式在命中行后输出
+  `context ev=E:` 块。
 - 地址、寄存器值和 SIMD 值使用十六进制字符串；事件号和计数使用十进制数字。
 - 事件结果包含 `.gtb` 事件号 `ev` 和原始日志行号 `line`。
 - 支持 `--limit` 的列表查询与 `export` 默认输出 20 项。`meta` 提供
