@@ -97,23 +97,24 @@ private:
         size_t n = 0;
     };
     void ensure_space(size_t need);
-    void push_u8(uint8_t b) { cur_->buf[cur_->n++] = b; }
+    void push_u8(uint8_t b) { chunk_.buf[chunk_.n++] = b; }
     void hand_chunk();
-    bool write_chunk_to_fd(int fd, const uint8_t* p, size_t n, uint32_t type);
-    void write_footer_locked(uint8_t reason);
+    bool write_chunk(const uint8_t* p, size_t n, uint32_t type);
+    void write_footer(uint8_t reason);
+    void imp_observed(uint8_t tag, uint32_t name_id, uint64_t value);
+    void imp_observed128(uint8_t tag, uint32_t name_id,
+                         unsigned __int128 value);
 
     SiteArena& arena_;
     RecOptions opt_;
     RecStats stats_;
     bool open_ = false;
-    bool finished_ = false;
     bool io_ok_ = true;
 
     int fd_ = -1;
     uint64_t start_ns_ = 0;
 
     Chunk chunk_;
-    Chunk* cur_ = &chunk_;
 
     // event encoding state
     int64_t last_site_id_ = 0;
