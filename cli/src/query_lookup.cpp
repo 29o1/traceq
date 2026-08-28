@@ -160,7 +160,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     std::unordered_map<uint64_t, uint64_t> last_write;
     std::deque<Row> tail;
     uint64_t total = 0, shown = 0;
-    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    uint64_t lim = uint64_t(limit);
     auto emit_row = [&](const Row& r) {
         if (ctx_span > 0 && ctx_first_ev == UINT64_MAX) ctx_first_ev = r.ev;
         if (json) {
@@ -328,7 +328,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         if (all_writes || from_ev)
             next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
-        if (limit > 0) next += " --limit " + std::to_string(limit);
+        next += " --limit " + std::to_string(limit);
         next += " --offset " + std::to_string(offset + shown);
         next += ' ' + gtb;
         if (json) next += " --json";
@@ -595,7 +595,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     };
     std::deque<Row> tail;
     uint64_t total = 0, shown = 0;
-    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    uint64_t lim = uint64_t(limit);
     TraceScan ex(f);
     std::vector<AgentRegVal> rd, wr;
     std::vector<AgentMemVal> mems;
@@ -769,7 +769,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     std::vector<uint64_t> totals(values.size(), 0);
     std::vector<uint64_t> shown_per_value(values.size(), 0);
     uint64_t shown = 0;
-    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    uint64_t lim = uint64_t(limit);
     struct ValueRow {
         size_t value_i = 0;
         uint64_t ev = 0, line = 0, addr = 0;
@@ -986,7 +986,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         if (writes_only) next += " --write";
         if (from_ev) next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
-        if (limit > 0) next += " --limit " + std::to_string(limit);
+        next += " --limit " + std::to_string(limit);
         next += " --offset " + std::to_string(offset + uint64_t(limit));
         if (!batched) next += ' ' + gtb;
         if (json) next += " --json";

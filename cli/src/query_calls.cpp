@@ -304,7 +304,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
                                  : 0
                            : std::min<size_t>(rows.size(), size_t(options.offset));
         size_t end = rows.size();
-        if (options.last <= 0 && options.limit > 0)
+        if (options.last <= 0)
             end = std::min(end, begin + size_t(options.limit));
         if (!options.json)
             printf("calls: %zu total\n", rows.size());
@@ -324,8 +324,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
             if (options.from_ev) next += " --from " + std::to_string(options.from_ev);
             if (options.to_ev != UINT64_MAX)
                 next += " --to " + std::to_string(options.to_ev);
-            if (options.limit > 0)
-                next += " --limit " + std::to_string(options.limit);
+            next += " --limit " + std::to_string(options.limit);
             next += " --offset " + std::to_string(options.offset + meta.shown);
             next += ' ' + gtb;
             if (options.json) next += " --json";
@@ -353,7 +352,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     std::vector<std::string> stack;
     bool capturing = false;
     size_t base = 0;
-    uint64_t lim = limit > 0 ? uint64_t(limit) : UINT64_MAX;
+    uint64_t lim = uint64_t(limit);
     uint64_t shown = 0, would_print = 0, matches = 0;
     bool global = func.empty();
     auto emit_line = [&](uint64_t gi, int lvl, const Group& g, const char* name) {

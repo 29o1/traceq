@@ -210,7 +210,7 @@ int q_fold(const std::string& gtb, int top, bool json) {
     std::sort(loops.begin(), loops.end(), [](const Loop& a, const Loop& b) {
         return a.reps * a.period > b.reps * b.period;
     });
-    size_t shown = std::min<size_t>(loops.size(), top > 0 ? top : 0);
+    size_t shown = std::min<size_t>(loops.size(), size_t(top));
     if (json) {
         std::string o = "\"loops\":[";
         for (size_t k = 0; k < shown; k++) {
