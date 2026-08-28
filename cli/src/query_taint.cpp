@@ -76,26 +76,31 @@ static const char* taint_reg_name(int slot, char* buf) {
 // (args dst, src) and apply copy semantics, so copied buffers stop looking
 // like orphan addresses.
 
-static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
-                     int seed_q, bool seed_nzcv, bool backward, int limit,
-                     uint64_t window, uint64_t at_ev, uint64_t off,
-                     const std::string& mod, bool json, bool index_deps) {
+int q_taint(const std::string& gtb, const TaintOptions& options) {
+    if (options.limit <= 0) {
+        fprintf(stderr, "taint: --limit must be greater than zero\n");
+        return 2;
+    }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(options.json);
 
     // --off resolves to the set of sites at that module-relative offset
     std::unordered_set<uint32_t> off_sites;
-    if (off) {
+    if (options.off) {
         for (uint32_t i = 0; i < f.arena.sites().size(); i++) {
             const Site& s = f.arena.get(i);
             if (s.module_id >= f.arena.modules().size()) continue;
-            if (!mod.empty() && f.arena.modules()[s.module_id] != mod) continue;
-            if (s.addr - f.arena.module_base(s.module_id) == off) off_sites.insert(i);
+            if (!options.mod.empty() &&
+                f.arena.modules()[s.module_id] != options.mod)
+                continue;
+            if (s.addr - f.arena.module_base(s.module_id) == options.off)
+                off_sites.insert(i);
         }
         if (off_sites.empty()) {
             fprintf(stderr, "taint: no site at %s!0x%llx\n",
-                    mod.empty() ? "*" : mod.c_str(), (unsigned long long)off);
+                    options.mod.empty() ? "*" : options.mod.c_str(),
+                    (unsigned long long)options.off);
             return 1;
         }
     }
@@ -113,7 +118,8 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     uint64_t edges_total = 0;
     auto add_edge = [&](uint64_t ev, uint64_t line, std::string what) {
         edges_total++;
-        if ((int)edges.size() < limit) edges.push_back({ev, line, std::move(what)});
+        if ((int)edges.size() < options.limit)
+            edges.push_back({ev, line, std::move(what)});
     };
     auto taint_site = [&](uint32_t sid) -> const TaintPlan& {
         static const TaintPlan kEmpty;
@@ -149,10 +155,10 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         add_edge(ev, line, site_txt(site_id) + " : mem_w -> tainted");
     };
     auto apply_seed = [&]() {
-        if (seed_reg >= 0) reg_t |= 1ULL << (seed_reg & 31);
-        if (seed_q >= 0) reg_t |= 1ULL << (32 + (seed_q & 31));
-        if (seed_nzcv) nzcv_t = true;
-        if (seed_addr) addr_t.insert(seed_addr);
+        if (options.seed_reg >= 0) reg_t |= 1ULL << (options.seed_reg & 31);
+        if (options.seed_q >= 0) reg_t |= 1ULL << (32 + (options.seed_q & 31));
+        if (options.seed_nzcv) nzcv_t = true;
+        if (options.seed_addr) addr_t.insert(options.seed_addr);
     };
 
     bool partial = false;
@@ -161,7 +167,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     uint64_t matched = 0;          // involved events (upstream "Total matched")
     const char* stop = "end of trace";
 
-    if (!backward) {
+    if (!options.backward) {
         bool seeded = false;
         bool stopped = false;      // early-stop: keep streaming to count total
         uint64_t since_involved = 0;
@@ -174,8 +180,9 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             total = gi + 1;
             if (!seeded) {
                 bool hit = off_sites.empty()
-                               ? (gi >= at_ev)
-                               : (g.has_exec && off_sites.count(g.site_id) && gi >= at_ev);
+                               ? (gi >= options.at_ev)
+                               : (g.has_exec && off_sites.count(g.site_id) &&
+                                  gi >= options.at_ev);
                 if (!hit) return true;
                 apply_seed();
                 seed_ev = gi;
@@ -185,7 +192,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                 return true; // propagation starts after the seed event
             }
             if (stopped) return true; // total keeps counting
-            if (window && walked >= window) {
+            if (options.window && walked >= options.window) {
                 partial = true;
                 stopped = true;
                 stop = "window limit";
@@ -232,7 +239,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             uint64_t mr2 = mr + ts.elem, mw2 = mw + ts.elem;
             bool mr_t = has_mr && addr_t.count(mr);
             bool mr2_t = ts.pair && has_mr && addr_t.count(mr2);
-            bool index_t = index_deps && (ts.index_mask & reg_t) != 0;
+            bool index_t = options.index_deps && (ts.index_mask & reg_t) != 0;
             bool mw_t = has_mw && addr_t.count(mw);
             bool mw2_t = ts.pair && has_mw && addr_t.count(mw2);
             bool src_t = (ts.src_mask & reg_t) != 0 || (ts.nzcv_r && nzcv_t) ||
@@ -334,7 +341,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     } else {
         // stream into a ring of compact records, ending at --at-ev (default:
         // end of stream); window bounds history, default 2M events
-        uint64_t back_window = window ? window : 2000000;
+        uint64_t back_window = options.window ? options.window : 2000000;
         std::vector<TaintRec> ring;
         ring.reserve(size_t(std::min<uint64_t>(back_window, 1u << 22)));
         size_t head = 0;  // ring read position (logical index ring_base = pushed - size)
@@ -346,7 +353,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         bool pend_copy = false;
         uint64_t pend_dst = 0, pend_src = 0;
         TraceScan(f).for_each([&](uint64_t gi, const Group& g) -> bool {
-            if (at_ev && gi > at_ev) return false;
+            if (options.at_ev && gi > options.at_ev) return false;
             if (g.has_verbatim) {
                 if (pend_copy) {
                     pend_copy = false;
@@ -375,7 +382,9 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             return true;
         });
         if (!hit_end) { fprintf(stderr, "taint: empty trace\n"); return 1; }
-        total = at_ev && at_ev < pushed ? at_ev + 1 : pushed;
+        total = options.at_ev && options.at_ev < pushed
+                    ? options.at_ev + 1
+                    : pushed;
         uint64_t ring_base = pushed - ring.size();
         seed_ev = off_sites.empty() ? pushed - 1 : last_match;
         if (seed_ev == UINT64_MAX || seed_ev < ring_base) {
@@ -479,14 +488,14 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                         if (tainted(ts.dsts[0])) {
                             reg_t &= ~(1ULL << ts.dsts[0]);
                             if (has_mr) taint_cell(i, r.source_line, r.site_id, mr);
-                            if (index_deps)
+                            if (options.index_deps)
                                 taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
                                            "source index");
                         }
                         if (tainted(ts.dsts[1])) {
                             reg_t &= ~(1ULL << ts.dsts[1]);
                             if (has_mr) taint_cell(i, r.source_line, r.site_id, mr2);
-                            if (index_deps)
+                            if (options.index_deps)
                                 taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
                                            "source index");
                         }
@@ -495,7 +504,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
                         reg_t &= ~ts.dst_mask;
                         if (any && has_mr)
                             taint_cell(i, r.source_line, r.site_id, mr);
-                        if (any && index_deps)
+                        if (any && options.index_deps)
                             taint_srcs(i, r.source_line, r.site_id, ts.index_mask,
                                        "source index");
                     }
@@ -549,38 +558,42 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     }
 
     // seed renderers + rerun command for the not-resumable cursor
-    auto hex_s = [](uint64_t v) {
-        char hb[24];
-        snprintf(hb, sizeof hb, "0x%llx", (unsigned long long)v);
-        return std::string(hb);
-    };
     auto seed_desc = [&]() -> std::string {
         std::string s;
-        if (seed_addr) s += " addr=" + hex_s(seed_addr);
-        if (seed_reg >= 0) {
+        if (options.seed_addr) s += " addr=" + emit::hex64(options.seed_addr);
+        if (options.seed_reg >= 0) {
             char rb[16];
-            s += " reg=" + std::string(taint_reg_name(seed_reg & 31, rb));
+            s += " reg=" +
+                 std::string(taint_reg_name(options.seed_reg & 31, rb));
         }
-        if (seed_q >= 0) s += " reg=q" + std::to_string(seed_q);
-        if (seed_nzcv) s += " nzcv";
-        if (at_ev) s += " at ev=" + std::to_string(at_ev);
-        if (off) s += " at " + (mod.empty() ? "*" : mod) + "!" + hex_s(off);
+        if (options.seed_q >= 0)
+            s += " reg=q" + std::to_string(options.seed_q);
+        if (options.seed_nzcv) s += " nzcv";
+        if (options.at_ev) s += " at ev=" + std::to_string(options.at_ev);
+        if (options.off)
+            s += " at " + (options.mod.empty() ? "*" : options.mod) + "!" +
+                 emit::hex64(options.off);
         return s.empty() ? " (none)" : s;
     };
     auto taint_cmd = [&](int new_limit) -> std::string {
         std::string s = "gt taint";
-        if (seed_addr) s += " --seed-addr " + hex_s(seed_addr);
-        if (seed_reg >= 0) s += " --seed-reg " + std::to_string(seed_reg);
-        if (seed_q >= 0) s += " --seed-q " + std::to_string(seed_q);
-        if (seed_nzcv) s += " --seed-nzcv";
-        if (backward) s += " --back";
-        if (index_deps) s += " --index-deps";
+        if (options.seed_addr)
+            s += " --seed-addr " + emit::hex64(options.seed_addr);
+        if (options.seed_reg >= 0)
+            s += " --seed-reg " + std::to_string(options.seed_reg);
+        if (options.seed_q >= 0)
+            s += " --seed-q " + std::to_string(options.seed_q);
+        if (options.seed_nzcv) s += " --seed-nzcv";
+        if (options.backward) s += " --back";
+        if (options.index_deps) s += " --index-deps";
         s += " --limit " + std::to_string(new_limit);
-        if (window) s += " --window " + std::to_string(window);
-        if (at_ev) s += " --at-ev " + std::to_string(at_ev);
-        if (off) {
-            s += " --off " + hex_s(off);
-            if (!mod.empty()) s += " --mod " + mod;
+        if (options.window)
+            s += " --window " + std::to_string(options.window);
+        if (options.at_ev)
+            s += " --at-ev " + std::to_string(options.at_ev);
+        if (options.off) {
+            s += " --off " + emit::hex64(options.off);
+            if (!options.mod.empty()) s += " --mod " + options.mod;
         }
         return s + " " + gtb;
     };
@@ -588,16 +601,25 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     bool edges_trunc = edges_total > edges.size();
     std::vector<uint64_t> addrs(addr_t.begin(), addr_t.end());
     std::sort(addrs.begin(), addrs.end());
-    size_t frontier_shown = std::min(addrs.size(), size_t(limit));
+    size_t frontier_shown = std::min(addrs.size(), size_t(options.limit));
 
-    if (json) {
+    if (options.json) {
         std::string o;
         emit::kv_bool(o, "partial", partial);
         o += ",\"seed\":{";
-        if (seed_addr) { emit::kv_hex(o, "addr", seed_addr); o += ','; }
-        if (seed_reg >= 0) { emit::kv_u64(o, "reg", uint64_t(seed_reg)); o += ','; }
-        if (seed_q >= 0) { emit::kv_u64(o, "q", uint64_t(seed_q)); o += ','; }
-        emit::kv_bool(o, "nzcv", seed_nzcv);
+        if (options.seed_addr) {
+            emit::kv_hex(o, "addr", options.seed_addr);
+            o += ',';
+        }
+        if (options.seed_reg >= 0) {
+            emit::kv_u64(o, "reg", uint64_t(options.seed_reg));
+            o += ',';
+        }
+        if (options.seed_q >= 0) {
+            emit::kv_u64(o, "q", uint64_t(options.seed_q));
+            o += ',';
+        }
+        emit::kv_bool(o, "nzcv", options.seed_nzcv);
         o += ',';
         emit::kv_u64(o, "ev", seed_ev);
         if (seed_line) {
@@ -605,7 +627,7 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
             emit::kv_u64(o, "line", seed_line);
         }
         o += "},\"direction\":\"";
-        o += backward ? "backward" : "forward";
+        o += options.backward ? "backward" : "forward";
         o += "\",\"resume\":false,\"walked\":";
         char wb[48];
         snprintf(wb, sizeof wb, "%llu", (unsigned long long)walked);
@@ -671,8 +693,9 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
         if (seed_line) printf(", line %llu", (unsigned long long)seed_line);
         printf(")\n");
         printf("direction: %s | events walked: %llu of %llu | matched: %llu | stop: %s | edges (limit %d): %llu\n",
-               backward ? "backward" : "forward", (unsigned long long)walked,
-               (unsigned long long)total, (unsigned long long)matched, stop, limit,
+               options.backward ? "backward" : "forward",
+               (unsigned long long)walked, (unsigned long long)total,
+               (unsigned long long)matched, stop, options.limit,
                (unsigned long long)edges_total);
         for (auto& e : edges) {
             printf("  ev=%-8llu", (unsigned long long)e.ev);
@@ -699,19 +722,9 @@ static int run_taint(const std::string& gtb, uint64_t seed_addr, int seed_reg,
     meta.shown = edges.size();
     meta.truncated = edges_trunc;
     if (edges_trunc)
-        meta.next = taint_cmd(limit > 0 ? limit * 5 : 100); // raise --limit; rerun from seed
+        meta.next = taint_cmd(options.limit * 5); // raise --limit; rerun from seed
     writer.finish(meta);
-    if (edges_trunc && !json)
+    if (edges_trunc && !options.json)
         printf("note: taint is not resumable — the next command reruns from the seed with a raised --limit\n");
     return 0;
-}
-
-int q_taint(const std::string& gtb, const TaintOptions& o) {
-    if (o.limit <= 0) {
-        fprintf(stderr, "taint: --limit must be greater than zero\n");
-        return 2;
-    }
-    return run_taint(gtb, o.seed_addr, o.seed_reg, o.seed_q, o.seed_nzcv,
-                     o.backward, o.limit, o.window, o.at_ev, o.off, o.mod,
-                     o.json, o.index_deps);
 }
