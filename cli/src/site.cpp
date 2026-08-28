@@ -420,8 +420,7 @@ uint32_t SiteArena::intern_text(uint64_t addr, const char* prefix, size_t prefix
     s.prefix_off = prefix_pool_.size();
     prefix_pool_.append(prefix, prefix_len);
     s.prefix_len = uint32_t(prefix_len);
-    s.disasm_off = prefix_pool_.size();
-    prefix_pool_.append(prefix + dis_off, dis_len);
+    s.disasm_off = s.prefix_off + uint32_t(dis_off);
     s.disasm_len = uint32_t(dis_len);
     for (int i = 0; i < n_tops; i++) s.ops[i] = plans[i];
     s.n_ops = uint8_t(n_tops);
