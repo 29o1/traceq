@@ -157,8 +157,8 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
             reads.clear();
             writes.clear();
             memory.clear();
-            reconstruct_agent_values(arena, site, group, registers, reads,
-                                     writes, memory);
+            reconstruct_agent_values(site, group, registers, reads, writes,
+                                     memory);
 
             if (json) {
                 char value[64];

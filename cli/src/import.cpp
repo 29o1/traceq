@@ -119,7 +119,7 @@ struct Importer {
         char buf[16];
         memcpy(buf, s, n);
         buf[n] = 0;
-        return uint32_t(arena.symbol_id(buf));
+        return uint32_t(arena.intern_string(buf));
     }
 
     void verbatim(const char* ls, const char* le) { // [ls, le) incl. line ending
@@ -323,7 +323,7 @@ struct Importer {
         if (is_jni) sym_name.assign(kJniSym, sizeof(kJniSym) - 1);
         sym_name.append(name, name_len);
         cnt.call++;
-        rec.imp_call(uint32_t(arena.symbol_id(sym_name.c_str())), args, na);
+        rec.imp_call(uint32_t(arena.intern_string(sym_name)), args, na);
         return true;
     }
 

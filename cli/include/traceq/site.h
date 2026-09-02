@@ -92,16 +92,12 @@ public:
                          const TextOp* tops, int n_tops);
 
     const Site& get(uint32_t id) const { return sites_[id]; }
-    size_t size() const { return sites_.size(); }
     int32_t intern_string(const std::string& s);
     const std::string& str(uint32_t id) const { return strings_[id]; }
-    size_t pool_bytes() const { return prefix_pool_.size(); }
     // Base the module was loaded at when the arena was compiled.
     uint64_t module_base(uint32_t id) const {
         return id < module_bases_.size() ? module_bases_[id] : 0;
     }
-
-    int32_t symbol_id(const char* name) { return intern_string(name); }
 
     // ---- serialization (META chunk payload) ----
     // GTB2 META payload: strings, modules with bases, prefix/disassembly pool,

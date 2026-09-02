@@ -24,18 +24,10 @@ struct GtbFile {
     uint8_t stop_reason = 0;
     bool crlf = false;
     uint64_t events_seen = 0, events_recorded = 0, bytes_written = 0;
-    // n_call/n_ret count imported CALL/RET annotation events, not executed
-    // ARM64 call/return instructions.
-    uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_ret = 0;
-    uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0;
 
-    // scan_stats decodes the event stream to populate n_* counters. Queries
-    // that do not expose those counters can skip that otherwise redundant
-    // pass; true remains the default for library callers. On failure, err
-    // (when given) receives a human-readable reason without the path, so
-    // callers can print "<path>: <reason>".
-    bool load(const std::string& path, bool scan_stats = true,
-              std::string* err = nullptr);
+    // On failure, err (when given) receives a human-readable reason without
+    // the path, so callers can print "<path>: <reason>".
+    bool load(const std::string& path, std::string* err = nullptr);
 };
 
 // One reconstructed execution group: everything that happened at one EXEC,
@@ -89,15 +81,11 @@ struct AgentMemVal {
 };
 
 const char* agent_reg_name(int ctx_idx);
-void reconstruct_agent_registers(const Site& site, const Group& group,
-                                 const uint64_t* regs,
-                                 std::vector<AgentRegVal>& reads,
-                                 std::vector<AgentRegVal>& writes);
-void reconstruct_agent_memory(const SiteArena& arena, const Site& site,
-                              const Group& group, const uint64_t* regs,
+void reconstruct_agent_memory(const Site& site, const Group& group,
+                              const uint64_t* regs,
                               std::vector<AgentMemVal>& mems);
-void reconstruct_agent_values(const SiteArena& arena, const Site& site,
-                              const Group& group, const uint64_t* regs,
+void reconstruct_agent_values(const Site& site, const Group& group,
+                              const uint64_t* regs,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems);

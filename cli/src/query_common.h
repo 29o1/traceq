@@ -8,10 +8,9 @@
 // Load with a path-qualified diagnostic: "load failed: <path>: <reason>".
 // Agents wasted multiple retries on the old bare "load failed" when the real
 // cause was a cwd-relative path or a non-GTB2 file.
-inline bool load_query_file(gt::GtbFile& file, const std::string& path,
-                            bool scan_stats = false) {
+inline bool load_query_file(gt::GtbFile& file, const std::string& path) {
     std::string reason;
-    if (file.load(path, scan_stats, &reason)) return true;
+    if (file.load(path, &reason)) return true;
     fprintf(stderr, "load failed: %s: %s\n", path.c_str(), reason.c_str());
     return false;
 }

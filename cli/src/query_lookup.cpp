@@ -3,7 +3,9 @@
 #include <traceq/import.h>
 #include <traceq/site.h>
 #include "emit.h"
+#include "event_decoder.h"
 #include "export.h"
+#include "gtb_format.h"
 #include "query_common.h"
 #include <algorithm>
 #include <cstdio>
@@ -17,33 +19,55 @@ using namespace gt;
 
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
-    if (!load_query_file(f, gtb, true)) return 1;
+    if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
     std::vector<uint64_t> mod_exec(f.arena.modules().size(), 0);
     uint64_t first_addr = 0, first_off = 0;
     uint64_t call_instructions = 0, return_instructions = 0;
+    uint64_t n_exec = 0, n_regw = 0, n_mem = 0, n_call = 0, n_ret = 0;
+    uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0;
     std::string first_mod;
     bool saw_exec = false;
-    TraceScan(f).for_each([&](uint64_t, const Group& g) {
-        if (!g.has_exec) return true;
-        const Site& s = f.arena.get(g.site_id);
-        if (s.module_id < mod_exec.size()) mod_exec[s.module_id]++;
-        if (s.kind == SK_CALL_IMM || s.kind == SK_CALL_REG)
-            call_instructions++;
-        else if (s.kind == SK_RET)
-            return_instructions++;
-        if (!saw_exec) {
-            saw_exec = true;
-            first_addr = s.addr;
-            if (s.module_id < f.arena.modules().size()) {
-                first_mod = f.arena.modules()[s.module_id];
-                first_off = s.addr - f.arena.module_base(s.module_id);
-            } else {
-                first_off = s.addr;
+    EventCursor cursor(f.events);
+    RawEvent batch[64];
+    size_t count;
+    while ((count = cursor.next_batch(batch, 64)) != 0) {
+        for (size_t i = 0; i < count; i++) {
+            const RawEvent& event = batch[i];
+            switch (event.tag) {
+            case gt::format::EV_EXEC: {
+                n_exec++;
+                if (event.site_id >= f.arena.sites().size()) break;
+                const Site& s = f.arena.get(event.site_id);
+                if (s.module_id < mod_exec.size()) mod_exec[s.module_id]++;
+                if (s.kind == SK_CALL_IMM || s.kind == SK_CALL_REG)
+                    call_instructions++;
+                else if (s.kind == SK_RET)
+                    return_instructions++;
+                if (!saw_exec) {
+                    saw_exec = true;
+                    first_addr = s.addr;
+                    if (s.module_id < f.arena.modules().size()) {
+                        first_mod = f.arena.modules()[s.module_id];
+                        first_off = s.addr - f.arena.module_base(s.module_id);
+                    } else {
+                        first_off = s.addr;
+                    }
+                }
+                break;
+            }
+            case gt::format::EV_REGW: n_regw++; break;
+            case gt::format::EV_MEM:
+            case gt::format::EV_MEMW_NV: n_mem++; break;
+            case gt::format::EV_CALL: n_call++; break;
+            case gt::format::EV_RET: n_ret++; break;
+            case gt::format::EV_RDVAL: n_rdval++; break;
+            case gt::format::EV_SIMDV: n_simdv++; break;
+            case gt::format::EV_VERBATIM: n_verbatim++; break;
+            default: break;
             }
         }
-        return true;
-    });
+    }
     const char* dialect = f.crlf ? "upstream+crlf" : "upstream";
     if (json) {
         std::string o;
@@ -61,14 +85,14 @@ int q_stat(const std::string& gtb, bool json) {
                  "\"rdval\":%llu,\"simdv\":%llu,"
                  "\"verbatim\":%llu,\"events_seen\":%llu,\"events_recorded\":%llu,"
                  "\"bytes_written\":%llu",
-                 (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
-                 (unsigned long long)f.n_mem,
+                 (unsigned long long)n_exec, (unsigned long long)n_regw,
+                 (unsigned long long)n_mem,
                  (unsigned long long)call_instructions,
                  (unsigned long long)return_instructions,
-                 (unsigned long long)f.n_call,
-                 (unsigned long long)f.n_ret,
-                 (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
-                 (unsigned long long)f.n_verbatim,
+                 (unsigned long long)n_call,
+                 (unsigned long long)n_ret,
+                 (unsigned long long)n_rdval, (unsigned long long)n_simdv,
+                 (unsigned long long)n_verbatim,
                  (unsigned long long)f.events_seen,
                  (unsigned long long)f.events_recorded,
                  (unsigned long long)f.bytes_written);
@@ -97,16 +121,16 @@ int q_stat(const std::string& gtb, bool json) {
                stop_reason_name(static_cast<StopReason>(f.stop_reason)));
         printf("events: exec=%llu regw=%llu mem=%llu rdval=%llu simdv=%llu "
                "verbatim=%llu\n",
-               (unsigned long long)f.n_exec, (unsigned long long)f.n_regw,
-               (unsigned long long)f.n_mem,
-               (unsigned long long)f.n_rdval, (unsigned long long)f.n_simdv,
-               (unsigned long long)f.n_verbatim);
+               (unsigned long long)n_exec, (unsigned long long)n_regw,
+               (unsigned long long)n_mem,
+               (unsigned long long)n_rdval, (unsigned long long)n_simdv,
+               (unsigned long long)n_verbatim);
         printf("flow: call_instructions=%llu return_instructions=%llu "
                "call_annotations=%llu return_annotations=%llu\n",
                (unsigned long long)call_instructions,
                (unsigned long long)return_instructions,
-               (unsigned long long)f.n_call,
-               (unsigned long long)f.n_ret);
+               (unsigned long long)n_call,
+               (unsigned long long)n_ret);
         printf("recorded: seen=%llu recorded=%llu bytes=%llu\n",
                (unsigned long long)f.events_seen,
                (unsigned long long)f.events_recorded,
@@ -234,8 +258,8 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         if (g.n_mem == 0) return true;
         mems.clear();
         if (g.has_exec)
-            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
-                                     ex.regfile(), mems);
+            reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
+                                     mems);
         int lanes = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < lanes; k++) {
             bool is_write = mems.empty() ? g.mem[k].is_write : mems[size_t(k)].is_w;
@@ -513,8 +537,8 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
         saw_event = true;
         if (g.has_exec && g.n_mem != 0) {
             mems.clear();
-            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
-                                     ex.regfile(), mems);
+            reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
+                                     mems);
             for (const auto& m : mems) {
                 uint64_t width = m.size ? m.size : 8;
                 if (m.addr > UINT64_MAX - width) continue;
@@ -556,16 +580,6 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
     meta.shown = shown;
     writer.finish(meta);
     return 0;
-}
-
-int q_mem_state(const std::string& gtb, uint64_t range_base,
-                uint64_t range_len, uint64_t at_ev, bool json, bool qword) {
-    MemStateOptions options;
-    options.ranges.push_back({range_base, range_len});
-    options.at_evs.push_back(at_ev);
-    options.json = json;
-    options.qword = qword;
-    return q_mem_states(gtb, options);
 }
 
 int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
@@ -696,7 +710,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         rd.clear();
         wr.clear();
         mems.clear();
-        reconstruct_agent_values(f.arena, s, g, ex.regfile(), rd, wr, mems);
+        reconstruct_agent_values(s, g, ex.regfile(), rd, wr, mems);
         std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
         Row row{gi, g.source_line, site_off, s.addr, std::move(module),
                 std::move(txt), rd, wr, mems};
@@ -744,10 +758,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
 int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     std::vector<uint64_t> values;
     std::unordered_set<uint64_t> seen_values;
-    const std::vector<uint64_t> requested = options.values.empty()
-                                                ? std::vector<uint64_t>{options.value}
-                                                : options.values;
-    for (uint64_t value : requested)
+    for (uint64_t value : options.values)
         if (seen_values.insert(value).second) values.push_back(value);
 
     uint64_t offset = options.offset;
@@ -755,7 +766,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     int limit = options.limit, last = options.last;
     bool json = options.json, reads_only = options.reads_only;
     bool writes_only = options.writes_only;
-    if (!options.valid() || (reads_only && writes_only)) {
+    if (!options.valid() || values.empty() || (reads_only && writes_only)) {
         fprintf(stderr, "find-value: invalid range, filter, or --last combination\n");
         return 2;
     }
@@ -937,8 +948,8 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         }
         mems.clear();
         if (g.has_exec && g.n_mem)
-            reconstruct_agent_memory(f.arena, f.arena.get(g.site_id), g,
-                                     ex.regfile(), mems);
+            reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
+                                     mems);
         int mem_count = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < mem_count; k++) {
             bool known = mems.empty() ? g.mem[k].value_known

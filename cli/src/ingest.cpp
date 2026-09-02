@@ -25,8 +25,7 @@ static const char* decoded_call_name(const std::string& sym, bool& is_jni) {
     return sym.c_str();
 }
 
-bool GtbFile::load(const std::string& path, bool scan_stats,
-                   std::string* err) {
+bool GtbFile::load(const std::string& path, std::string* err) {
     auto fail = [&](const char* reason) {
         if (err) *err = reason;
         return false;
@@ -92,27 +91,6 @@ bool GtbFile::load(const std::string& path, bool scan_stats,
     if (!SiteArena::deserialize(meta_payload.data(), meta_payload.size(), arena))
         return fail("corrupt META chunk");
 
-    if (!scan_stats) return true;
-
-    EventCursor cursor(events);
-    RawEvent batch[64];
-    size_t count;
-    while ((count = cursor.next_batch(batch, 64)) != 0) {
-        for (size_t i = 0; i < count; i++) {
-            switch (batch[i].tag) {
-            case EV_EXEC: n_exec++; break;
-            case EV_REGW: n_regw++; break;
-            case EV_MEM:
-            case EV_MEMW_NV: n_mem++; break;
-            case EV_CALL: n_call++; break;
-            case EV_RET: n_ret++; break;
-            case EV_RDVAL: n_rdval++; break;
-            case EV_SIMDV: n_simdv++; break;
-            case EV_VERBATIM: n_verbatim++; break;
-            default: break;
-            }
-        }
-    }
     return true;
 }
 
@@ -326,8 +304,7 @@ static unsigned __int128 mask_mem_value(unsigned __int128 value, uint8_t size) {
     return value & ((static_cast<unsigned __int128>(1) << bits) - 1);
 }
 
-static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
-                       const uint64_t* regs,
+static void agent_mems(const Site& s, const Group& g, const uint64_t* regs,
                        std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
     uint8_t inferred_size = s.mem_width;
@@ -404,26 +381,19 @@ static void agent_mems(const SiteArena& arena, const Site& s, const Group& g,
     }
 }
 
-void reconstruct_agent_registers(const Site& site, const Group& group,
-                                 const uint64_t* regs,
-                                 std::vector<AgentRegVal>& reads,
-                                 std::vector<AgentRegVal>& writes) {
-    agent_regs(site, group, regs, reads, writes);
-}
-
-void reconstruct_agent_memory(const SiteArena& arena, const Site& site,
-                              const Group& group, const uint64_t* regs,
+void reconstruct_agent_memory(const Site& site, const Group& group,
+                              const uint64_t* regs,
                               std::vector<AgentMemVal>& mems) {
-    agent_mems(arena, site, group, regs, mems);
+    agent_mems(site, group, regs, mems);
 }
 
-void reconstruct_agent_values(const SiteArena& arena, const Site& site,
-                              const Group& group, const uint64_t* regs,
+void reconstruct_agent_values(const Site& site, const Group& group,
+                              const uint64_t* regs,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems) {
-    reconstruct_agent_registers(site, group, regs, reads, writes);
-    reconstruct_agent_memory(arena, site, group, regs, mems);
+    agent_regs(site, group, regs, reads, writes);
+    reconstruct_agent_memory(site, group, regs, mems);
 }
 
 } // namespace gt
