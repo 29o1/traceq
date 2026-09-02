@@ -78,7 +78,9 @@ an explicit event window.
 - Event results include the `.gtb` event index `ev` and original log line `line`.
 - List queries that support `--limit`, plus `export`, default to 20 items. `meta`
   provides `total`, `shown`, and `truncated`. For truncated paginated results,
-  `next` contains the continuation command.
+  `next` contains the continuation command. A limited JSONL export stops after
+  proving truncation and reports `total: null` instead of scanning the rest of
+  the trace solely to compute an exact count.
 - Memory entries from `find-pc --json` and `export --format jsonl` expose
   `w/addr/size/val`; `find-value` exposes `kind/rw/reg` or `kind/rw/addr/size`.
 - `mem-state` fills unknown bytes in `data_hex` with `00` and records the actual

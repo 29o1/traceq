@@ -648,14 +648,13 @@ int cmd_export(int argc, char** argv) {
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     if (all) limit = 0;
-    uint64_t stop_gi = UINT64_MAX, n = 0, total_selected = 0;
+    uint64_t stop_gi = UINT64_MAX, n = 0;
     if (fmt == "upstream")
         n = gt::export_upstream(f, o, from, to, limit, &stop_gi);
     else if (fmt == "compact")
         n = gt::export_compact(f, o, from, to, limit, &stop_gi);
     else
-        n = gt::export_jsonl(f, o, from, to, limit, &stop_gi,
-                             &total_selected);
+        n = gt::export_jsonl(f, o, from, to, limit, &stop_gi);
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {
@@ -675,7 +674,8 @@ int cmd_export(int argc, char** argv) {
     if (fmt == "jsonl") {
         gt::emit::Meta meta;
         meta.truncated = truncated;
-        meta.total = total_selected;
+        meta.total_known = !truncated;
+        meta.total = n;
         meta.shown = n;
         meta.next = next_cmd;
         gt::emit::finish(meta, true, o);

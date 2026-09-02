@@ -111,7 +111,8 @@ inline std::string str_array(const std::vector<std::string>& vs) {
 
 struct Meta {
     bool truncated = false;
-    uint64_t total = 0;              // primary result items in the answer
+    bool total_known = true;
+    uint64_t total = 0;              // primary result items, when known
     uint64_t shown = 0;              // primary result items represented
     std::string next;                // full continuation command ("" = none)
 };
@@ -119,9 +120,16 @@ struct Meta {
 inline void meta_append(std::string& s, const Meta& m) {
     s += "{\"truncated\":";
     s += m.truncated ? "true" : "false";
-    char b[96];
-    snprintf(b, sizeof b, ",\"total\":%llu,\"shown\":%llu,\"next\":",
-             (unsigned long long)m.total, (unsigned long long)m.shown);
+    s += ",\"total\":";
+    char b[64];
+    if (m.total_known) {
+        snprintf(b, sizeof b, "%llu", (unsigned long long)m.total);
+        s += b;
+    } else {
+        s += "null";
+    }
+    snprintf(b, sizeof b, ",\"shown\":%llu,\"next\":",
+             (unsigned long long)m.shown);
     s += b;
     if (m.next.empty()) s += "null";
     else esc_append(s, m.next.c_str());
@@ -142,8 +150,6 @@ class QueryWriter {
 public:
     explicit QueryWriter(bool json, FILE* out = stdout) : json_(json), out_(out) {}
 
-    bool json() const { return json_; }
-
     void row(std::string row) {
         if (json_) rows_.push_back(std::move(row));
     }
@@ -158,7 +164,9 @@ public:
             if (!ctx_.empty())
                 fprintf(out_, "context ev=%llu:\n%s",
                         (unsigned long long)ctx_ev_, ctx_.c_str());
-            if (m.total > m.shown)
+            if (!m.total_known && m.truncated)
+                fputs("... [more rows truncated]\n", out_);
+            else if (m.total > m.shown)
                 fprintf(out_, "... [%llu more rows truncated]\n",
                         (unsigned long long)(m.total - m.shown));
             if (!m.next.empty()) fprintf(out_, "next: %s\n", m.next.c_str());
@@ -203,13 +211,13 @@ inline void finish(const Meta& m, bool json, FILE* out) {
         fwrite(s.data(), 1, s.size(), out);
         return;
     }
-    if (m.total > m.shown)
+    if (!m.total_known && m.truncated)
+        fputs("... [more rows truncated]\n", out);
+    else if (m.total > m.shown)
         fprintf(out, "... [%llu more rows truncated]\n",
                 (unsigned long long)(m.total - m.shown));
     if (!m.next.empty()) fprintf(out, "next: %s\n", m.next.c_str());
 }
-
-inline void finish(const Meta& m, bool json) { finish(m, json, stdout); }
 
 } // namespace emit
 } // namespace gt

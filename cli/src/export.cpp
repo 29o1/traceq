@@ -105,12 +105,10 @@ static void append_call(std::string& line, const Group& group) {
 
 static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
                              uint64_t from_idx, uint64_t to_idx,
-                             uint64_t max_lines, uint64_t* stop_event,
-                             uint64_t* total_selected) {
+                             uint64_t max_lines, uint64_t* stop_event) {
     if (stop_event) *stop_event = UINT64_MAX;
-    if (total_selected) *total_selected = 0;
     const SiteArena& arena = file.arena;
-    uint64_t lines = 0, selected = 0;
+    uint64_t lines = 0;
     uint32_t current_module = UINT32_MAX;
     std::string line;
     std::vector<AgentRegVal> reads, writes;
@@ -123,12 +121,9 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
     scan.for_each([&](uint64_t event, const Group& group) {
         if (event < from_idx) return true;
         if (event > to_idx) return false;
-        selected++;
         if (max_lines && lines >= max_lines) {
             if (stop_event && *stop_event == UINT64_MAX) *stop_event = event;
-            // JSON metadata needs the exact number of selected groups. Finish
-            // the scan without formatting more rows.
-            return json && total_selected;
+            return false;
         }
 
         line.clear();
@@ -292,7 +287,6 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
         }
         return true;
     });
-    if (total_selected) *total_selected = selected;
     return lines;
 }
 
@@ -300,14 +294,14 @@ uint64_t export_compact(const GtbFile& file, FILE* out, uint64_t from_idx,
                         uint64_t to_idx, uint64_t max_lines,
                         uint64_t* stop_event) {
     return export_agent(file, out, false, from_idx, to_idx, max_lines,
-                        stop_event, nullptr);
+                        stop_event);
 }
 
 uint64_t export_jsonl(const GtbFile& file, FILE* out, uint64_t from_idx,
                       uint64_t to_idx, uint64_t max_lines,
-                      uint64_t* stop_event, uint64_t* total_selected) {
+                      uint64_t* stop_event) {
     return export_agent(file, out, true, from_idx, to_idx, max_lines,
-                        stop_event, total_selected);
+                        stop_event);
 }
 
 std::string render_context(const GtbFile& file, uint64_t ev, uint64_t span,
@@ -319,7 +313,7 @@ std::string render_context(const GtbFile& file, uint64_t ev, uint64_t span,
     FILE* ms = open_memstream(&buf, &len);
     if (!ms) return std::string();
     if (json)
-        export_jsonl(file, ms, from, to, 0, nullptr, nullptr);
+        export_jsonl(file, ms, from, to, 0, nullptr);
     else
         export_compact(file, ms, from, to, 0, nullptr);
     fclose(ms);

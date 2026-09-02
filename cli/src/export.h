@@ -22,8 +22,7 @@ uint64_t export_jsonl(const GtbFile& file, FILE* out,
                       uint64_t from_idx = 0,
                       uint64_t to_idx = UINT64_MAX,
                       uint64_t max_lines = 0,
-                      uint64_t* stop_event = nullptr,
-                      uint64_t* total_selected = nullptr);
+                      uint64_t* stop_event = nullptr);
 
 // --context support for hit queries: the bounded instruction window
 // [ev - span, ev + span] rendered through the export path (compact text rows
