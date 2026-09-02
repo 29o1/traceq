@@ -5,6 +5,7 @@
 #include "query_common.h"
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -43,8 +44,11 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
         bool has_ret = false;
         uint64_t ret_ev = 0, ret_line = 0, ret_val = 0;
     };
-    std::vector<Row> rows;
-    std::vector<int64_t> annotation_stack;
+    struct Summary { Row row; uint64_t count = 0, first = 0, last = 0; };
+    std::deque<Row> rows;
+    std::vector<uint64_t> annotation_stack;
+    std::unordered_map<std::string, Summary> grouped;
+    uint64_t total_rows = 0;
     std::unordered_map<uint64_t, uint32_t> module_by_site_addr;
     for (const Site& site : f.arena.sites())
         module_by_site_addr.emplace(site.addr, site.module_id);
@@ -88,7 +92,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
             }
         }
         bool instruction = call_site != nullptr;
-        int64_t selected_annotation = -1;
+        uint64_t selected_annotation = 0;
         if (instruction || g.is_call) {
             Row row;
             row.ev = gi;
@@ -144,20 +148,48 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
             if (row.target_known && !target_offs.empty() && matches_off(row.target))
                 selected = true;
             if (selected) {
-                row.n = rows.size() + 1;
-                rows.push_back(std::move(row));
-                selected_annotation = int64_t(rows.size() - 1);
+                row.n = ++total_rows;
+                selected_annotation = row.n;
+                if (options.top > 0) {
+                    std::string key = row.target_known
+                                          ? "target:" + std::to_string(row.target)
+                                          : !row.name.empty()
+                                                ? "name:" + row.name
+                                                : "unknown";
+                    Summary& summary = grouped[key];
+                    if (summary.count++ == 0) {
+                        summary.row = row;
+                        summary.first = row.ev;
+                    } else if (summary.row.name.empty() && !row.name.empty()) {
+                        summary.row.name = row.name;
+                    }
+                    summary.last = row.ev;
+                } else {
+                    uint64_t row_index = row.n - 1;
+                    bool retain = options.last > 0 ||
+                                  (row_index >= options.offset &&
+                                   row_index - options.offset <
+                                       uint64_t(options.limit));
+                    if (retain) {
+                        rows.push_back(std::move(row));
+                        if (options.last > 0 &&
+                            rows.size() > size_t(options.last))
+                            rows.pop_front();
+                    }
+                }
             }
         }
         if (g.is_call) annotation_stack.push_back(selected_annotation);
         if (g.is_ret && !annotation_stack.empty()) {
-            int64_t selected = annotation_stack.back();
+            uint64_t selected = annotation_stack.back();
             annotation_stack.pop_back();
-            if (selected >= 0) {
-                Row& row = rows[size_t(selected)];
+            if (selected && !rows.empty() && selected >= rows.front().n &&
+                selected <= rows.back().n) {
+                Row& row = rows[size_t(selected - rows.front().n)];
                 row.has_ret = true;
                 row.ret_ev = gi;
-                row.ret_line = g.ret_source_line ? g.ret_source_line : g.source_line;
+                row.ret_line =
+                    g.ret_source_line ? g.ret_source_line : g.source_line;
                 row.ret_val = g.ret_val;
             }
         }
@@ -241,22 +273,6 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
 
     emit::Meta meta;
     if (options.top > 0) {
-        struct Summary { Row row; uint64_t count = 0, first = 0, last = 0; };
-        std::unordered_map<std::string, Summary> grouped;
-        for (const Row& row : rows) {
-            std::string key = row.target_known
-                                  ? "target:" + std::to_string(row.target)
-                                  : !row.name.empty() ? "name:" + row.name
-                                                      : "unknown";
-            Summary& summary = grouped[key];
-            if (summary.count++ == 0) {
-                summary.row = row;
-                summary.first = row.ev;
-            } else if (summary.row.name.empty() && !row.name.empty()) {
-                summary.row.name = row.name;
-            }
-            summary.last = row.ev;
-        }
         std::vector<Summary> summaries;
         summaries.reserve(grouped.size());
         for (auto& item : grouped) summaries.push_back(std::move(item.second));
@@ -298,19 +314,11 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
         meta.shown = shown;
         meta.truncated = shown < summaries.size();
     } else {
-        size_t begin = options.last > 0
-                           ? rows.size() > size_t(options.last)
-                                 ? rows.size() - size_t(options.last)
-                                 : 0
-                           : std::min<size_t>(rows.size(), size_t(options.offset));
-        size_t end = rows.size();
-        if (options.last <= 0)
-            end = std::min(end, begin + size_t(options.limit));
         if (!options.json)
-            printf("calls: %zu total\n", rows.size());
-        for (size_t i = begin; i < end; i++) emit_detail(rows[i]);
-        meta.total = rows.size();
-        meta.shown = end - begin;
+            printf("calls: %llu total\n", (unsigned long long)total_rows);
+        for (const Row& row : rows) emit_detail(row);
+        meta.total = total_rows;
+        meta.shown = rows.size();
         meta.truncated = options.last > 0 ? meta.shown < meta.total
                                          : options.offset + meta.shown < meta.total;
         if (meta.truncated && options.last <= 0) {
