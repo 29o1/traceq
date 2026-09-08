@@ -10,6 +10,7 @@
 // Queries scan the loaded .gtb event buffer; --context adds a bounded export
 // scan around the first shown hit. There is no persistent index.
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,15 +33,16 @@ struct QueryWindow {
 };
 
 struct TaintOptions {
-    uint64_t seed_addr = 0;
+    // Presence is distinct from zero for the address and position selectors.
+    std::optional<uint64_t> seed_addr;
     int seed_reg = -1;
     int seed_q = -1;
     bool seed_nzcv = false;
     bool backward = false;
     int limit = gt::DEFAULT_OUTPUT_ROWS;
     uint64_t window = 0;
-    uint64_t at_ev = 0;
-    uint64_t off = 0;
+    std::optional<uint64_t> at_ev;
+    std::optional<uint64_t> off;
     std::string mod;
     bool json = false;
     bool index_deps = false;

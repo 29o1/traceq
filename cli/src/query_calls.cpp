@@ -31,7 +31,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
 
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(options.json);
+    emit::QueryWriter writer(options.json, f);
 
     struct Row {
         uint64_t n = 0, ev = 0, line = 0;
@@ -78,7 +78,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
     };
 
     TraceScan ex(f);
-    ex.for_each([&](uint64_t gi, const Group& g) {
+    if (!ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > options.to_ev) return false;
         if (gi < options.from_ev) return true;
         std::string disasm;
@@ -194,7 +194,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
             }
         }
         return true;
-    });
+    })) return scan_error(gtb);
 
     auto append_target = [](std::string& o, const Row& row) {
         o += ",\"target\":";
@@ -323,18 +323,18 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
                                          : options.offset + meta.shown < meta.total;
         if (meta.truncated && options.last <= 0) {
             std::string next = "gt calls";
-            for (const auto& name : names) next += " --name " + name;
+            for (const auto& name : names) next += " --name " + shell_arg(name);
             for (uint64_t target : target_addrs)
                 next += " --target-addr " + emit::hex64(target);
             for (uint64_t off : target_offs)
                 next += " --target-off " + emit::hex64(off);
-            if (!options.mod.empty()) next += " --mod " + options.mod;
+            if (!options.mod.empty()) next += " --mod " + shell_arg(options.mod);
             if (options.from_ev) next += " --from " + std::to_string(options.from_ev);
             if (options.to_ev != UINT64_MAX)
                 next += " --to " + std::to_string(options.to_ev);
             next += " --limit " + std::to_string(options.limit);
             next += " --offset " + std::to_string(options.offset + meta.shown);
-            next += ' ' + gtb;
+            next += ' ' + shell_arg(gtb);
             if (options.json) next += " --json";
             meta.next = std::move(next);
         }
@@ -356,7 +356,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     size_t stack_depth = 0;
     bool capturing = false;
     size_t base = 0;
@@ -407,7 +407,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
         }
         would_print++;
     };
-    TraceScan(f).for_each([&](uint64_t gi, const Group& g) {
+    if (!TraceScan(f).for_each([&](uint64_t gi, const Group& g) {
         if (g.is_call) {
             const char* name = g.call_name ? g.call_name : "<unknown>";
             size_t d = stack_depth;
@@ -430,7 +430,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
             if (capturing && stack_depth <= base) capturing = false;
         }
         return true;
-    });
+    })) return scan_error(gtb);
     if (!global && !capturing && matches == 0) {
         // func never called: say so plainly instead of printing nothing
         if (!json) printf("no call to %s in %s\n", func.c_str(), gtb.c_str());
@@ -441,10 +441,10 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     meta.truncated = would_print > shown;
     if (meta.truncated) {
         std::string next = "gt calltree";
-        if (!global) next += " --func " + func;
+        if (!global) next += " --func " + shell_arg(func);
         next += " --depth " + std::to_string(depth);
         next += " --limit " + std::to_string(limit * 5);
-        next += ' ' + gtb;
+        next += ' ' + shell_arg(gtb);
         if (json) next += " --json";
         meta.next = std::move(next);
     }

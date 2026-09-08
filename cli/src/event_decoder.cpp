@@ -2,6 +2,7 @@
 #include "gtb_format.h"
 
 #include <traceq/varint.h>
+#include <traceq/site.h>
 #include <cstring>
 
 namespace gt {
@@ -27,6 +28,12 @@ bool EventCursor::take_var(int64_t& out) {
 }
 
 bool EventCursor::next(RawEvent& out) {
+    if (failed_ || off_ == len_) return false;
+    failed_ = !decode(out);
+    return !failed_;
+}
+
+bool EventCursor::decode(RawEvent& out) {
     using namespace format;
     out = RawEvent{};
     if (!take_u8(out.tag)) return false;
@@ -34,16 +41,17 @@ bool EventCursor::next(RawEvent& out) {
     if (out.tag == EV_EXEC) {
         int64_t delta;
         if (!take_var(delta)) return false;
-        last_site_ += delta;
+        last_site_ += uint64_t(delta);
+        if (last_site_ >= arena_.sites().size()) return false;
         out.site_id = uint32_t(last_site_);
         return true;
     }
 
     if (out.tag == EV_REGW) {
         int64_t delta;
-        if (!take_u8(out.reg) || !take_var(delta)) return false;
+        if (!take_u8(out.reg) || out.reg >= 32 || !take_var(delta)) return false;
         uint8_t slot = out.reg & 31;
-        last_reg_[slot] = uint64_t(int64_t(last_reg_[slot]) + delta);
+        last_reg_[slot] += uint64_t(delta);
         out.value = last_reg_[slot];
         return true;
     }
@@ -54,15 +62,14 @@ bool EventCursor::next(RawEvent& out) {
         if (!take_u8(flags) || !take_var(addr_delta)) return false;
         out.is_write = (flags & 1) != 0;
         out.size = uint8_t(flags >> 1);
-        last_addr_ = uint64_t(int64_t(last_addr_) + addr_delta);
+        last_addr_ += uint64_t(addr_delta);
         out.addr = last_addr_;
         out.value_known = out.tag == EV_MEM;
         if (out.value_known) {
             int64_t value_delta;
             if (!take_var(value_delta)) return false;
             size_t lane = out.is_write ? 1 : 0;
-            last_mem_value_[lane] =
-                uint64_t(int64_t(last_mem_value_[lane]) + value_delta);
+            last_mem_value_[lane] += uint64_t(value_delta);
             out.value = last_mem_value_[lane];
         }
         return true;
@@ -70,14 +77,14 @@ bool EventCursor::next(RawEvent& out) {
 
     if (out.tag == EV_CALL) {
         uint64_t symbol_id;
-        if (!take_uvar(symbol_id) || symbol_id > UINT32_MAX ||
+        if (!take_uvar(symbol_id) || symbol_id >= arena_.strings().size() ||
             !take_u8(out.nargs) || out.nargs > 8)
             return false;
         out.symbol_id = uint32_t(symbol_id);
         for (uint8_t i = 0; i < out.nargs; i++) {
             int64_t delta;
             if (!take_var(delta)) return false;
-            last_arg_[i] = uint64_t(int64_t(last_arg_[i]) + delta);
+            last_arg_[i] += uint64_t(delta);
             out.args[i] = last_arg_[i];
         }
         return true;
@@ -86,7 +93,7 @@ bool EventCursor::next(RawEvent& out) {
     if (out.tag == EV_RET) {
         int64_t delta;
         if (!take_var(delta)) return false;
-        last_ret_ = uint64_t(int64_t(last_ret_) + delta);
+        last_ret_ += uint64_t(delta);
         out.value = last_ret_;
         return true;
     }
@@ -94,13 +101,13 @@ bool EventCursor::next(RawEvent& out) {
     if (out.tag == EV_RDVAL || out.tag == EV_SIMDV) {
         uint64_t name;
         uint8_t kind;
-        if (!take_uvar(name) || !take_u8(kind)) return false;
+        if (!take_uvar(name) || name >= arena_.strings().size() || !take_u8(kind))
+            return false;
         out.name_id = uint32_t(name);
         if (kind == 0) {
             int64_t delta;
             if (!take_var(delta)) return false;
-            uint64_t value =
-                uint64_t(int64_t(last_observed_[out.name_id]) + delta);
+            uint64_t value = last_observed_[out.name_id] + uint64_t(delta);
             last_observed_[out.name_id] = value;
             out.observed = value;
         } else if (kind == 1) {
@@ -127,15 +134,8 @@ bool EventCursor::next(RawEvent& out) {
 }
 
 size_t EventCursor::next_batch(RawEvent* out, size_t capacity) {
-    if (batch_done_) return 0;
     size_t count = 0;
-    while (count < capacity) {
-        if (!next(out[count])) {
-            batch_done_ = true;
-            break;
-        }
-        count++;
-    }
+    while (count < capacity && next(out[count])) count++;
     return count;
 }
 

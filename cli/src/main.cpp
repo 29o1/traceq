@@ -4,6 +4,7 @@
 #include "emit.h"
 #include "query_common.h"
 #include "export.h"
+#include "cli_args.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -26,18 +27,16 @@ static int unknown_option(const char* cmd, const char* arg) {
 static bool parse_range(const char* s, uint64_t& base, uint64_t& len) {
     const char* comma = strchr(s, ',');
     if (!comma || comma == s || !comma[1]) return false;
-    char* end = nullptr;
-    base = strtoull(s, &end, 0);
-    if (end != comma) return false;
-    len = strtoull(comma + 1, &end, 0);
-    return *end == '\0';
+    base = parse_u64(std::string_view(s, size_t(comma - s)));
+    len = parse_u64(comma + 1);
+    return true;
 }
 
 // --context N on hit queries: bounded instruction span around the first
 // shown hit. The cap keeps the one-round-trip answer inside the output
 // contract even at the maximum.
 static bool parse_context(const char* cmd, const char* s, int& out) {
-    out = atoi(s);
+    out = parse_int(s);
     if (out <= 0 || out > 200) {
         fprintf(stderr, "%s: --context N must be 1..200\n", cmd);
         return false;
@@ -54,23 +53,24 @@ static void usage_taint(FILE* o) {
 }
 
 int cmd_taint(int argc, char** argv) {
-    uint64_t seed_addr = 0, window = 0, at_ev = 0, off = 0;
+    std::optional<uint64_t> seed_addr, at_ev, off;
+    uint64_t window = 0;
     int seed_reg = -1, seed_q = -1, limit = gt::DEFAULT_OUTPUT_ROWS;
     bool back = false, seed_nzcv = false, json = false, index_deps = false;
     std::string gtb, mod;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) { usage_taint(stdout); return 0; }
-        else if (!strcmp(argv[i], "--seed-addr")) seed_addr = strtoull(next(), nullptr, 0);
-        else if (!strcmp(argv[i], "--seed-reg")) seed_reg = atoi(next());
-        else if (!strcmp(argv[i], "--seed-q")) seed_q = atoi(next());
+        else if (!strcmp(argv[i], "--seed-addr")) seed_addr = parse_u64(next(), 0);
+        else if (!strcmp(argv[i], "--seed-reg")) seed_reg = parse_int(next());
+        else if (!strcmp(argv[i], "--seed-q")) seed_q = parse_int(next());
         else if (!strcmp(argv[i], "--seed-nzcv")) seed_nzcv = true;
         else if (!strcmp(argv[i], "--back")) back = true;
         else if (!strcmp(argv[i], "--index-deps")) index_deps = true;
-        else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
-        else if (!strcmp(argv[i], "--window")) window = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--at-ev")) at_ev = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--off")) off = strtoull(next(), nullptr, 0);
+        else if (!strcmp(argv[i], "--limit")) limit = parse_int(next());
+        else if (!strcmp(argv[i], "--window")) window = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--at-ev")) at_ev = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--off")) off = parse_u64(next(), 0);
         else if (!strcmp(argv[i], "--mod")) mod = next();
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
@@ -113,7 +113,7 @@ int cmd_diff(int argc, char** argv) {
             printf("usage: gt diff a.gtb b.gtb [--context N] [--json]\n");
             return 0;
         }
-        else if (!strcmp(argv[i], "--context") && i + 1 < argc) ctx = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--context") && i + 1 < argc) ctx = parse_int(argv[++i]);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-' && a.empty()) a = argv[i];
         else if (argv[i][0] != '-') b = argv[i];
@@ -135,7 +135,7 @@ int cmd_fold(int argc, char** argv) {
             printf("usage: gt fold trace.gtb [--top N] [--json]\n");
             return 0;
         }
-        else if (!strcmp(argv[i], "--top") && i + 1 < argc) top = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--top") && i + 1 < argc) top = parse_int(argv[++i]);
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("fold", argv[i]);
@@ -185,7 +185,7 @@ int cmd_mem_access(int argc, char** argv) {
             return 0;
         }
         else if (!strcmp(argv[i], "--addr"))
-            addrs.push_back(strtoull(next(), nullptr, 0));
+            addrs.push_back(parse_u64(next(), 0));
         else if (!strcmp(argv[i], "--range")) {
             if (!parse_range(next(), range_base, range_len)) {
                 fprintf(stderr, "mem-access: --range B,L (hex or dec)\n");
@@ -196,23 +196,23 @@ int cmd_mem_access(int argc, char** argv) {
         else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
         else if (!strcmp(argv[i], "--from")) {
-            from_ev = strtoull(next(), nullptr, 0);
+            from_ev = parse_u64(next(), 0);
             have_from = true;
         }
         else if (!strcmp(argv[i], "--to")) {
-            to_ev = strtoull(next(), nullptr, 0);
+            to_ev = parse_u64(next(), 0);
             have_to = true;
         }
         else if (!strcmp(argv[i], "--limit")) {
-            limit = atoi(next());
+            limit = parse_int(next());
             have_limit = true;
         }
         else if (!strcmp(argv[i], "--offset")) {
-            offset = strtoull(next(), nullptr, 10);
+            offset = parse_u64(next(), 10);
             have_offset = true;
         }
         else if (!strcmp(argv[i], "--last")) {
-            last = atoi(next());
+            last = parse_int(next());
             have_last = true;
         }
         else if (!strcmp(argv[i], "--context")) {
@@ -279,7 +279,7 @@ int cmd_mem_state(int argc, char** argv) {
             ranges.push_back({base, len});
         }
         else if (!strcmp(argv[i], "--at-ev") || !strcmp(argv[i], "--at")) {
-            at_evs.push_back(strtoull(next(), nullptr, 10));
+            at_evs.push_back(parse_u64(next(), 10));
         }
         else if (!strcmp(argv[i], "--qword")) qword = true;
         else if (!strcmp(argv[i], "--json")) json = true;
@@ -314,23 +314,23 @@ int cmd_find_pc(int argc, char** argv) {
                    "  repeat --addr or --off to find several PCs in one trace pass\n");
             return 0;
         }
-        else if (!strcmp(argv[i], "--addr")) addrs.push_back(strtoull(next(), nullptr, 0));
+        else if (!strcmp(argv[i], "--addr")) addrs.push_back(parse_u64(next(), 0));
         else if (!strcmp(argv[i], "--off")) {
-            offs.push_back(strtoull(next(), nullptr, 0));
+            offs.push_back(parse_u64(next(), 0));
         }
         else if (!strcmp(argv[i], "--mod")) mod = next();
-        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 10);
+        else if (!strcmp(argv[i], "--from")) from_ev = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--to")) to_ev = parse_u64(next(), 10);
         else if (!strcmp(argv[i], "--limit")) {
-            limit = atoi(next());
+            limit = parse_int(next());
             have_limit = true;
         }
         else if (!strcmp(argv[i], "--offset")) {
-            offset = strtoull(next(), nullptr, 10);
+            offset = parse_u64(next(), 10);
             have_offset = true;
         }
         else if (!strcmp(argv[i], "--last")) {
-            last = atoi(next());
+            last = parse_int(next());
             have_last = true;
         }
         else if (!strcmp(argv[i], "--context")) {
@@ -384,26 +384,26 @@ int cmd_calls(int argc, char** argv) {
         }
         else if (!strcmp(argv[i], "--name")) names.emplace_back(next());
         else if (!strcmp(argv[i], "--target-addr"))
-            target_addrs.push_back(strtoull(next(), nullptr, 0));
+            target_addrs.push_back(parse_u64(next(), 0));
         else if (!strcmp(argv[i], "--target-off"))
-            target_offs.push_back(strtoull(next(), nullptr, 0));
+            target_offs.push_back(parse_u64(next(), 0));
         else if (!strcmp(argv[i], "--mod")) mod = next();
         else if (!strcmp(argv[i], "--top")) {
-            top = atoi(next());
+            top = parse_int(next());
             have_top = true;
         }
-        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 0);
-        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 0);
+        else if (!strcmp(argv[i], "--from")) from_ev = parse_u64(next(), 0);
+        else if (!strcmp(argv[i], "--to")) to_ev = parse_u64(next(), 0);
         else if (!strcmp(argv[i], "--limit")) {
-            limit = atoi(next());
+            limit = parse_int(next());
             have_limit = true;
         }
         else if (!strcmp(argv[i], "--offset")) {
-            offset = strtoull(next(), nullptr, 10);
+            offset = parse_u64(next(), 10);
             have_offset = true;
         }
         else if (!strcmp(argv[i], "--last")) {
-            last = atoi(next());
+            last = parse_int(next());
             have_last = true;
         }
         else if (!strcmp(argv[i], "--json")) json = true;
@@ -455,23 +455,23 @@ int cmd_find_value(int argc, char** argv) {
             return 0;
         }
         else if (!strcmp(argv[i], "--value")) {
-            values.push_back(strtoull(next(), nullptr, 0));
+            values.push_back(parse_u64(next(), 0));
             value_option = true;
         }
         else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
-        else if (!strcmp(argv[i], "--from")) from_ev = strtoull(next(), nullptr, 0);
-        else if (!strcmp(argv[i], "--to")) to_ev = strtoull(next(), nullptr, 0);
+        else if (!strcmp(argv[i], "--from")) from_ev = parse_u64(next(), 0);
+        else if (!strcmp(argv[i], "--to")) to_ev = parse_u64(next(), 0);
         else if (!strcmp(argv[i], "--limit")) {
-            limit = atoi(next());
+            limit = parse_int(next());
             have_limit = true;
         }
         else if (!strcmp(argv[i], "--offset")) {
-            offset = strtoull(next(), nullptr, 10);
+            offset = parse_u64(next(), 10);
             have_offset = true;
         }
         else if (!strcmp(argv[i], "--last")) {
-            last = atoi(next());
+            last = parse_int(next());
             have_last = true;
         }
         else if (!strcmp(argv[i], "--context")) {
@@ -484,7 +484,7 @@ int cmd_find_value(int argc, char** argv) {
     if (value_option && positional.size() == 1) {
         gtb = std::move(positional[0]);
     } else if (!value_option && positional.size() == 2) {
-        values.push_back(strtoull(positional[0].c_str(), nullptr, 0));
+        values.push_back(parse_u64(positional[0].c_str(), 0));
         gtb = std::move(positional[1]);
     }
     if (gtb.empty() || values.empty() || from_ev > to_ev ||
@@ -525,8 +525,8 @@ int cmd_calltree(int argc, char** argv) {
             return 0;
         }
         else if (!strcmp(argv[i], "--func")) func = next();
-        else if (!strcmp(argv[i], "--depth")) depth = atoi(next());
-        else if (!strcmp(argv[i], "--limit")) limit = atoi(next());
+        else if (!strcmp(argv[i], "--depth")) depth = parse_int(next());
+        else if (!strcmp(argv[i], "--limit")) limit = parse_int(next());
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("calltree", argv[i]);
@@ -575,7 +575,7 @@ static void usage() {
         "capture live traces with GumTrace, then convert them with `gt import`.\n");
 }
 
-int main(int argc, char** argv) {
+static int dispatch(int argc, char** argv) {
     if (argc < 2) { usage(); return 2; }
     std::string cmd = argv[1];
     if (cmd == "--help" || cmd == "-h" || cmd == "help") {
@@ -600,6 +600,15 @@ int main(int argc, char** argv) {
     return 2;
 }
 
+int main(int argc, char** argv) {
+    try {
+        return dispatch(argc, argv);
+    } catch (const std::invalid_argument& error) {
+        fprintf(stderr, "gt: %s\n", error.what());
+        return 2;
+    }
+}
+
 int cmd_export(int argc, char** argv) {
     std::string in, out = "-", fmt = "compact";
     uint64_t from = 0, to = UINT64_MAX;
@@ -615,10 +624,10 @@ int cmd_export(int argc, char** argv) {
                    "export\n");
             return 0;
         }
-        else if (!strcmp(argv[i], "--from")) from = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--to")) { to = strtoull(next(), nullptr, 10); have_to = true; }
+        else if (!strcmp(argv[i], "--from")) from = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--to")) { to = parse_u64(next(), 10); have_to = true; }
         else if (!strcmp(argv[i], "--limit")) {
-            limit = strtoull(next(), nullptr, 10);
+            limit = parse_u64(next(), 10);
             have_limit = true;
         }
         else if (!strcmp(argv[i], "--all")) all = true;
@@ -651,6 +660,10 @@ int cmd_export(int argc, char** argv) {
         n = gt::export_compact(f, o, from, to, limit, &stop_gi);
     else
         n = gt::export_jsonl(f, o, from, to, limit, &stop_gi);
+    if (n == UINT64_MAX) {
+        if (out != "-") fclose(o);
+        return scan_error(in);
+    }
     bool truncated = stop_gi != UINT64_MAX;
     std::string next_cmd;
     if (truncated) {
@@ -662,7 +675,7 @@ int cmd_export(int argc, char** argv) {
         if (limit) next_cmd += " --limit " + std::to_string(limit);
         if (have_to) next_cmd += " --to " + std::to_string(to);
         next_cmd += " --format " + fmt;
-        next_cmd += " " + in;
+        next_cmd += " " + shell_arg(in);
         if (fmt == "compact") fprintf(o, "next: %s\n", next_cmd.c_str());
         else if (fmt == "upstream")
             fprintf(stderr, "next: %s\n", next_cmd.c_str());
@@ -674,7 +687,11 @@ int cmd_export(int argc, char** argv) {
         meta.total = n;
         meta.shown = n;
         meta.next = next_cmd;
+        meta.input_stop = gt::stop_reason_name(static_cast<gt::StopReason>(f.stop_reason));
         gt::emit::finish_jsonl(meta, o);
+    } else {
+        gt::emit::input_note(fmt == "upstream" ? stderr : o, "input",
+                            gt::stop_reason_name(static_cast<gt::StopReason>(f.stop_reason)));
     }
     if (out != "-") fclose(o);
     fprintf(stderr, "%llu lines\n", (unsigned long long)n);

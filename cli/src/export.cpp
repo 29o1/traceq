@@ -30,7 +30,7 @@ uint64_t export_upstream(const GtbFile& file, FILE* out, uint64_t from_idx,
         }
     };
 
-    TraceScan(file).for_each([&](uint64_t event, const Group& group) {
+    bool scan_ok = TraceScan(file).for_each([&](uint64_t event, const Group& group) {
         if (event < from_idx || event > to_idx) return event <= to_idx;
         if (max_lines && lines >= max_lines) {
             if (stop_event) *stop_event = event;
@@ -86,6 +86,7 @@ uint64_t export_upstream(const GtbFile& file, FILE* out, uint64_t from_idx,
         }
         return true;
     });
+    if (!scan_ok) return UINT64_MAX;
     return lines;
 }
 
@@ -118,7 +119,7 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
     memory.reserve(2);
 
     TraceScan scan(file);
-    scan.for_each([&](uint64_t event, const Group& group) {
+    bool scan_ok = scan.for_each([&](uint64_t event, const Group& group) {
         if (event < from_idx) return true;
         if (event > to_idx) return false;
         if (max_lines && lines >= max_lines) {
@@ -152,7 +153,7 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
             reads.clear();
             writes.clear();
             memory.clear();
-            reconstruct_agent_values(site, group, registers, reads, writes,
+            reconstruct_agent_values(site, group, registers, scan.reg_known(), reads, writes,
                                      memory);
 
             if (json) {
@@ -287,6 +288,7 @@ static uint64_t export_agent(const GtbFile& file, FILE* out, bool json,
         }
         return true;
     });
+    if (!scan_ok) return UINT64_MAX;
     return lines;
 }
 
@@ -304,20 +306,21 @@ uint64_t export_jsonl(const GtbFile& file, FILE* out, uint64_t from_idx,
                         stop_event);
 }
 
-std::string render_context(const GtbFile& file, uint64_t ev, uint64_t span,
-                           bool json) {
+bool render_context(const GtbFile& file, uint64_t ev, uint64_t span,
+                    bool json, std::string& out) {
     uint64_t from = ev > span ? ev - span : 0;
     uint64_t to = ev > UINT64_MAX - span ? UINT64_MAX : ev + span;
     char* buf = nullptr;
     size_t len = 0;
     FILE* ms = open_memstream(&buf, &len);
-    if (!ms) return std::string();
-    if (json)
-        export_jsonl(file, ms, from, to, 0, nullptr);
-    else
-        export_compact(file, ms, from, to, 0, nullptr);
+    if (!ms) return false;
+    uint64_t lines = json ? export_jsonl(file, ms, from, to, 0, nullptr)
+                          : export_compact(file, ms, from, to, 0, nullptr);
     fclose(ms);
-    std::string out;
+    if (lines == UINT64_MAX) {
+        free(buf);
+        return false;
+    }
     if (!json) {
         out.assign(buf ? buf : "", len);
     } else {
@@ -338,7 +341,7 @@ std::string render_context(const GtbFile& file, uint64_t ev, uint64_t span,
         out += ']';
     }
     free(buf);
-    return out;
+    return true;
 }
 
 } // namespace gt

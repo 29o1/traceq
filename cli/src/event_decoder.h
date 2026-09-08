@@ -11,6 +11,8 @@
 
 namespace gt {
 
+class SiteArena;
+
 struct RawEvent {
     uint8_t tag = 0;
 
@@ -36,33 +38,35 @@ struct RawEvent {
 
 class EventCursor {
 public:
-    explicit EventCursor(const std::vector<uint8_t>& events)
-        : p_(events.data()), len_(events.size()) {}
+    EventCursor(const std::vector<uint8_t>& events, const SiteArena& arena)
+        : arena_(arena), p_(events.data()), len_(events.size()) {}
 
-    // Returns false at end-of-stream or at the first malformed/truncated
-    // event, matching the historical reader's stop-at-corruption behavior.
+    // Returns false at EOF or on malformed data; ok() distinguishes them.
     bool next(RawEvent& out);
+    bool ok() const { return !failed_; }
     // Amortizes the decoder call boundary for full-trace scans. `out` must
     // point to capacity RawEvent slots; returns the number decoded.
     size_t next_batch(RawEvent* out, size_t capacity);
 
 private:
+    bool decode(RawEvent& out);
     bool take_u8(uint8_t& out);
     bool take_uvar(uint64_t& out);
     bool take_var(int64_t& out);
 
+    const SiteArena& arena_;
     const uint8_t* p_ = nullptr;
     size_t len_ = 0;
     size_t off_ = 0;
 
-    int64_t last_site_ = 0;
+    uint64_t last_site_ = 0;
     uint64_t last_reg_[32] = {0};
     uint64_t last_addr_ = 0;
     uint64_t last_mem_value_[2] = {0};
     uint64_t last_arg_[8] = {0};
     uint64_t last_ret_ = 0;
     std::unordered_map<uint32_t, uint64_t> last_observed_;
-    bool batch_done_ = false;
+    bool failed_ = false;
 };
 
 } // namespace gt

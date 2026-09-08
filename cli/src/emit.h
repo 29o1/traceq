@@ -19,6 +19,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <traceq/ingest.h>
 
 namespace gt {
 namespace emit {
@@ -115,6 +116,8 @@ struct Meta {
     uint64_t total = 0;              // primary result items, when known
     uint64_t shown = 0;              // primary result items represented
     std::string next;                // full continuation command ("" = none)
+    std::string input_stop;          // importer stop reason, separate from pagination
+    std::string input_b_stop;        // second input for diff, when present
 };
 
 inline void meta_append(std::string& s, const Meta& m) {
@@ -133,7 +136,20 @@ inline void meta_append(std::string& s, const Meta& m) {
     s += b;
     if (m.next.empty()) s += "null";
     else esc_append(s, m.next.c_str());
+    if (!m.input_stop.empty()) {
+        s += ',';
+        kv_str(s, "input_stop", m.input_stop);
+    }
+    if (!m.input_b_stop.empty()) {
+        s += ',';
+        kv_str(s, "input_b_stop", m.input_b_stop);
+    }
     s += '}';
+}
+
+inline void input_note(FILE* out, const char* label, const std::string& stop) {
+    if (!stop.empty() && stop != "normal")
+        fprintf(out, "%s stop: %s\n", label, stop.c_str());
 }
 
 // Query JSON is buffered until finish() so a validation/scan failure never
@@ -148,7 +164,9 @@ inline void meta_append(std::string& s, const Meta& m) {
 // text mode.
 class QueryWriter {
 public:
-    explicit QueryWriter(bool json, FILE* out = stdout) : json_(json), out_(out) {}
+    QueryWriter(bool json, const GtbFile& input,
+                const GtbFile* input_b = nullptr, FILE* out = stdout)
+        : json_(json), out_(out), input_(input), input_b_(input_b) {}
 
     void row(std::string row) {
         if (json_) rows_.push_back(std::move(row));
@@ -159,7 +177,10 @@ public:
         ctx_ = std::move(rendered);
     }
 
-    void finish(const Meta& m) {
+    void finish(Meta m) {
+        m.input_stop = stop_reason_name(static_cast<StopReason>(input_.stop_reason));
+        if (input_b_)
+            m.input_b_stop = stop_reason_name(static_cast<StopReason>(input_b_->stop_reason));
         if (!json_) {
             if (!ctx_.empty())
                 fprintf(out_, "context ev=%llu:\n%s",
@@ -170,6 +191,8 @@ public:
                 fprintf(out_, "... [%llu more rows truncated]\n",
                         (unsigned long long)(m.total - m.shown));
             if (!m.next.empty()) fprintf(out_, "next: %s\n", m.next.c_str());
+            input_note(out_, "input", m.input_stop);
+            input_note(out_, "input B", m.input_b_stop);
             return;
         }
         fputs("{\"data\":[", out_);
@@ -194,6 +217,8 @@ public:
 private:
     bool json_;
     FILE* out_;
+    const GtbFile& input_;
+    const GtbFile* input_b_;
     std::vector<std::string> rows_;
     uint64_t ctx_ev_ = 0;
     std::string ctx_;

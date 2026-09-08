@@ -16,11 +16,12 @@ inline size_t get_uvar(const uint8_t* p, size_t len, uint64_t& out) {
     uint64_t v = 0; int shift = 0; size_t n = 0;
     while (n < len && shift < 64) {
         uint8_t b = p[n++];
+        if (shift == 63 && (b & 0xfe)) return 0; // overflow or continuation
         v |= uint64_t(b & 0x7F) << shift;
         if (!(b & 0x80)) { out = v; return n; }
         shift += 7;
     }
-    return 0; // truncated
+    return 0; // malformed or truncated
 }
 
 inline uint64_t zigzag_enc(int64_t v) {

@@ -20,7 +20,7 @@ using namespace gt;
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     std::vector<uint64_t> mod_exec(f.arena.modules().size(), 0);
     uint64_t first_addr = 0, first_off = 0;
     uint64_t call_instructions = 0, return_instructions = 0;
@@ -28,7 +28,7 @@ int q_stat(const std::string& gtb, bool json) {
     uint64_t n_rdval = 0, n_simdv = 0, n_verbatim = 0;
     std::string first_mod;
     bool saw_exec = false;
-    EventCursor cursor(f.events);
+    EventCursor cursor(f.events, f.arena);
     RawEvent batch[64];
     size_t count;
     while ((count = cursor.next_batch(batch, 64)) != 0) {
@@ -68,6 +68,7 @@ int q_stat(const std::string& gtb, bool json) {
             }
         }
     }
+    if (!cursor.ok()) return scan_error(gtb);
     const char* dialect = f.crlf ? "upstream+crlf" : "upstream";
     if (json) {
         std::string o;
@@ -169,7 +170,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     uint64_t ctx_first_ev = UINT64_MAX;
     const int ctx_span = options.context;
     struct Row {
@@ -250,7 +251,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         return use_range ? addr >= range_base && addr - range_base < range_len
                          : addr_set.count(addr) != 0;
     };
-    ex.for_each([&](uint64_t gi, const Group& g) {
+    if (!ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > to_ev) return false;
         // In selectorless mode no pre-window write history is needed: only
         // writes inside the explicitly bounded event window are returned.
@@ -259,7 +260,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         mems.clear();
         if (g.has_exec)
             reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
-                                     mems);
+                                     ex.reg_known(), mems);
         int lanes = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < lanes; k++) {
             bool is_write = mems.empty() ? g.mem[k].is_write : mems[size_t(k)].is_w;
@@ -319,7 +320,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
             }
         }
         return true;
-    });
+    })) return scan_error(gtb);
     if (last > 0) {
         for (const Row& row : tail) {
             emit_row(row);
@@ -345,13 +346,15 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
         next += " --limit " + std::to_string(limit);
         next += " --offset " + std::to_string(offset + shown);
-        next += ' ' + gtb;
+        next += ' ' + shell_arg(gtb);
+        if (ctx_span > 0) next += " --context " + std::to_string(ctx_span);
         if (json) next += " --json";
         meta.next = std::move(next);
     }
     if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
-        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
-                                          json);
+        std::string rows;
+        if (!render_context(f, ctx_first_ev, uint64_t(ctx_span), json, rows))
+            return scan_error(gtb, "cannot render context");
         if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
     }
     writer.finish(meta);
@@ -391,7 +394,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
 
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(options.json);
+    emit::QueryWriter writer(options.json, f);
 
     struct State {
         MemStateRange range;
@@ -523,13 +526,20 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
     TraceScan ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
-    ex.for_each([&](uint64_t gi, const Group& g) {
+    if (!ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > at_evs.back()) return false;
         saw_event = true;
-        if (g.has_exec && g.n_mem != 0) {
+        if (g.n_mem != 0) {
             mems.clear();
-            reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
-                                     mems);
+            if (g.has_exec)
+                reconstruct_agent_memory(f.arena.get(g.site_id), g,
+                                         ex.regfile(), ex.reg_known(), mems);
+            if (mems.empty())
+                for (int i = 0; i < g.n_mem; i++) {
+                    const MemOp& m = g.mem[i];
+                    mems.push_back({m.is_write, m.addr, m.value,
+                                    m.value_known, m.size});
+                }
             for (const auto& m : mems) {
                 uint64_t width = m.size ? m.size : 8;
                 if (m.addr > UINT64_MAX - width) continue;
@@ -559,7 +569,7 @@ int q_mem_states(const std::string& gtb, const MemStateOptions& options) {
             next_at++;
         }
         return true;
-    });
+    })) return scan_error(gtb);
     if (!saw_event || next_at != at_evs.size()) {
         uint64_t missing = next_at < at_evs.size() ? at_evs[next_at] : 0;
         fprintf(stderr, "mem-state: --at-ev %llu is outside the trace\n",
@@ -587,7 +597,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     uint64_t ctx_first_ev = UINT64_MAX;
     const int ctx_span = options.context;
     std::unordered_set<uint64_t> addr_set(addrs.begin(), addrs.end());
@@ -680,7 +690,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         }
         putchar('\n');
     };
-    ex.for_each([&](uint64_t gi, const Group& g) {
+    if (!ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi < from_ev) return true;
         if (gi > to_ev) return false;
         if (!g.has_exec) return true;
@@ -701,7 +711,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         rd.clear();
         wr.clear();
         mems.clear();
-        reconstruct_agent_values(s, g, ex.regfile(), rd, wr, mems);
+        reconstruct_agent_values(s, g, ex.regfile(), ex.reg_known(), rd, wr, mems);
         std::string txt(f.arena.pool_ptr() + s.disasm_off, s.disasm_len);
         Row row{gi, g.source_line, site_off, s.addr, std::move(module),
                 std::move(txt), rd, wr, mems};
@@ -713,7 +723,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
             shown++;
         }
         return true;
-    });
+    })) return scan_error(gtb);
     if (last > 0)
         for (const Row& row : tail) {
             emit_row(row);
@@ -728,18 +738,20 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
         std::string next = "gt find-pc";
         for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
         for (uint64_t off : offs) next += " --off " + emit::hex64(off);
-        if (!mod.empty()) next += " --mod " + mod;
+        if (!mod.empty()) next += " --mod " + shell_arg(mod);
         if (from_ev) next += " --from " + std::to_string(from_ev);
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
         next += " --limit " + std::to_string(lim);
         next += " --offset " + std::to_string(offset + shown);
-        next += " " + gtb;
+        next += " " + shell_arg(gtb);
+        if (ctx_span > 0) next += " --context " + std::to_string(ctx_span);
         if (json) next += " --json";
         meta.next = std::move(next);
     }
     if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
-        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
-                                          json);
+        std::string rows;
+        if (!render_context(f, ctx_first_ev, uint64_t(ctx_span), json, rows))
+            return scan_error(gtb, "cannot render context");
         if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
     }
     writer.finish(meta);
@@ -763,7 +775,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     uint64_t ctx_first_ev = UINT64_MAX;
     const int ctx_span = options.context;
     std::unordered_map<uint64_t, size_t> value_index;
@@ -856,7 +868,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     TraceScan ex(f);
     std::vector<AgentMemVal> mems;
     mems.reserve(2);
-    ex.for_each([&](uint64_t gi, const Group& g) {
+    if (!ex.for_each([&](uint64_t gi, const Group& g) {
         if (gi > to_ev) return false;
         if (gi < from_ev) return true;
         if (g.has_verbatim) {
@@ -940,7 +952,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         mems.clear();
         if (g.has_exec && g.n_mem)
             reconstruct_agent_memory(f.arena.get(g.site_id), g, ex.regfile(),
-                                     mems);
+                                     ex.reg_known(), mems);
         int mem_count = mems.empty() ? g.n_mem : int(mems.size());
         for (int k = 0; k < mem_count; k++) {
             bool known = mems.empty() ? g.mem[k].value_known
@@ -960,7 +972,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
                 is_write ? 'w' : 'r', "", addr, size, g);
         }
         return true;
-    });
+    })) return scan_error(gtb);
     if (last > 0)
         for (size_t value_i = 0; value_i < tails.size(); value_i++)
             for (const ValueRow& value_row : tails[value_i]) {
@@ -979,7 +991,7 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     }
     if (meta.truncated && last <= 0) {
         bool batched = values.size() > 1;
-        std::string next = batched ? "gt find-value " + gtb
+        std::string next = batched ? "gt find-value " + shell_arg(gtb)
                                    : "gt find-value " + emit::hex64(values[0]);
         if (batched)
             for (uint64_t value : values)
@@ -990,13 +1002,15 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
         if (to_ev != UINT64_MAX) next += " --to " + std::to_string(to_ev);
         next += " --limit " + std::to_string(limit);
         next += " --offset " + std::to_string(offset + uint64_t(limit));
-        if (!batched) next += ' ' + gtb;
+        if (!batched) next += ' ' + shell_arg(gtb);
+        if (ctx_span > 0) next += " --context " + std::to_string(ctx_span);
         if (json) next += " --json";
         meta.next = std::move(next);
     }
     if (ctx_span > 0 && ctx_first_ev != UINT64_MAX) {
-        std::string rows = render_context(f, ctx_first_ev, uint64_t(ctx_span),
-                                          json);
+        std::string rows;
+        if (!render_context(f, ctx_first_ev, uint64_t(ctx_span), json, rows))
+            return scan_error(gtb, "cannot render context");
         if (!rows.empty()) writer.set_context(ctx_first_ev, std::move(rows));
     }
     writer.finish(meta);

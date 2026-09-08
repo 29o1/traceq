@@ -98,11 +98,12 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
     memset(regs_, 0, sizeof(regs_));
     memset(known_, 0, sizeof(known_));
     Group g;
+    bool valid = true;
     uint64_t gi = 0;
     uint64_t next_source_line = 1;
     auto add_obs = [&](Group::Obs* arr, int& cnt, uint32_t name_id,
                        unsigned __int128 val) {
-        if (cnt >= Group::MAX_OBS) return;
+        if (cnt >= Group::MAX_OBS) { valid = false; return; }
         arr[cnt].name_id = name_id;
         arr[cnt].val = val;
         cnt++;
@@ -169,18 +170,15 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
             g.has_exec = true;
             g.site_id = event.site_id;
         } else if (event.tag == EV_REGW) {
-            if (g.n_wr < 8) {
-                g.wr_id[g.n_wr] = event.reg;
-                g.wr_val[g.n_wr] = event.value;
-                g.n_wr++;
-            }
+            if (g.n_wr >= 8) return valid = false;
+            g.wr_id[g.n_wr] = event.reg;
+            g.wr_val[g.n_wr] = event.value;
+            g.n_wr++;
         } else if (event.tag == EV_MEM || event.tag == EV_MEMW_NV) {
-            if (g.n_mem < 2) {
-                MemOp m{event.is_write, event.addr, event.size,
-                        event.value_known ? event.value : 0,
-                        event.value_known};
-                g.mem[g.n_mem++] = m;
-            }
+            if (g.n_mem >= 2) return valid = false;
+            MemOp m{event.is_write, event.addr, event.size,
+                    event.value_known ? event.value : 0, event.value_known};
+            g.mem[g.n_mem++] = m;
         } else if (event.tag == EV_CALL) {
             // a second call in one group would silently overwrite the first
             // (importer files can emit consecutive call lines with no EXEC
@@ -192,7 +190,7 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
                 const std::string& name = f_.arena.str(event.symbol_id);
                 g.call_name = decoded_call_name(name, g.is_jni_call);
             } else {
-                return false;
+                return valid = false;
             }
             for (uint8_t i = 0; i < event.nargs; i++) g.args[i] = event.args[i];
         } else if (event.tag == EV_RET) {
@@ -215,16 +213,17 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
             g.verbatim_len = event.verbatim_len;
             if (!flush_group()) return false;
         }
-        return true;
+        return valid;
     };
 
-    EventCursor cursor(f_.events);
+    EventCursor cursor(f_.events, f_.arena);
     RawEvent batch[64];
     size_t count;
     while ((count = cursor.next_batch(batch, 64)) != 0) {
         for (size_t i = 0; i < count; i++)
-            if (!consume_event(batch[i])) return true;
+            if (!consume_event(batch[i])) return valid;
     }
+    if (!cursor.ok()) return false;
     flush_group();
     return true;
 }
@@ -269,6 +268,7 @@ static ObsMap obs_map(const Site& s, const Group& g) {
 }
 
 static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
+                       const uint8_t* known,
                        std::vector<AgentRegVal>& rd, std::vector<AgentRegVal>& wr) {
     auto push_unique = [](std::vector<AgentRegVal>& values, int ctx, uint64_t val) {
         for (const auto& item : values)
@@ -278,11 +278,8 @@ static void agent_regs(const Site& s, const Group& g, const uint64_t* regs,
     ObsMap m = obs_map(s, g);
     for (uint8_t i = 0; i < s.n_ops; i++) {
         const OpPlan& op = s.ops[i];
-        if (op.kind == OP_REG_R && op.ctx_idx >= 0)
-            push_unique(rd, op.ctx_idx,
-                        m.use_obs ? uint64_t(g.obs[m.obs_at[i]].val)
-                                  : op.ctx_idx == 31 ? regs[31]
-                                                     : regs[op.ctx_idx & 31]);
+        if (op.kind == OP_REG_R && op.ctx_idx >= 0 && known[op.ctx_idx & 31])
+            push_unique(rd, op.ctx_idx, regs[op.ctx_idx & 31]);
         else if (op.kind == OP_REG_W && op.ctx_idx >= 0) {
             if (m.use_wobs) {
                 push_unique(wr, op.ctx_idx,
@@ -305,11 +302,12 @@ static unsigned __int128 mask_mem_value(unsigned __int128 value, uint8_t size) {
 }
 
 void reconstruct_agent_memory(const Site& s, const Group& g,
-                              const uint64_t* regs,
+                              const uint64_t* regs, const uint8_t* known,
                               std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
     uint8_t inferred_size = s.mem_width;
-    unsigned __int128 pair_values[8];
+    struct DataValue { unsigned __int128 value; bool known; };
+    DataValue pair_values[8];
     int n_pair_values = 0;
     int mem_idx = 0;
     for (uint8_t i = 0; i < s.n_ops && mem_idx < g.n_mem; i++) {
@@ -323,39 +321,43 @@ void reconstruct_agent_memory(const Site& s, const Group& g,
             mv.known = true;
         }
 
-        unsigned __int128 data_values[8];
+        DataValue data_values[8];
         int n_data_values = 0;
-        auto add_data_value = [&](unsigned __int128 value) {
-            if (n_data_values < 8) data_values[n_data_values++] = value;
+        auto add_data_value = [&](unsigned __int128 value, bool is_known) {
+            if (n_data_values < 8)
+                data_values[n_data_values++] = {value, is_known};
         };
         if (op.kind == OP_MEM_W) {
             for (uint8_t j = 0; j < s.n_ops; j++) {
                 const OpPlan& r = s.ops[j];
                 if (r.kind != OP_REG_R) continue;
-                if (om.use_obs && om.obs_at[j] >= 0)
-                    add_data_value(g.obs[om.obs_at[j]].val);
-                else if (r.ctx_idx >= 0)
-                    add_data_value(r.ctx_idx == 31 ? regs[31]
-                                                    : regs[r.ctx_idx & 31]);
+                if (r.ctx_idx >= 0)
+                    add_data_value(regs[r.ctx_idx & 31], known[r.ctx_idx & 31]);
+                else if (om.use_obs && om.obs_at[j] >= 0)
+                    add_data_value(g.obs[om.obs_at[j]].val, true);
+                else
+                    add_data_value(0, false);
             }
         } else {
             for (uint8_t j = 0; j < s.n_ops; j++) {
                 const OpPlan& w = s.ops[j];
                 if (w.kind != OP_REG_W) continue;
                 if (om.use_wobs && om.wobs_at[j] >= 0) {
-                    add_data_value(g.wobs[om.wobs_at[j]].val);
+                    add_data_value(g.wobs[om.wobs_at[j]].val, true);
                     continue;
                 }
+                DataValue value{0, false};
                 for (int k = 0; k < g.n_wr; k++)
                     if (w.ctx_idx >= 0 && g.wr_id[k] == w.ctx_idx) {
-                        add_data_value(g.wr_val[k]);
+                        value = {g.wr_val[k], true};
                         break;
                     }
+                add_data_value(value.value, value.known);
             }
         }
         if (!mv.known && n_data_values > 0) {
-            mv.val = data_values[0];
-            mv.known = true;
+            mv.val = data_values[0].value;
+            mv.known = data_values[0].known;
         }
         if (mv.known) mv.val = mask_mem_value(mv.val, mv.size);
         if (n_pair_values == 0) {
@@ -374,8 +376,8 @@ void reconstruct_agent_memory(const Site& s, const Group& g,
         second.addr += stride;
         second.size = uint8_t(stride);
         second.known = false;
-        if (n_pair_values >= 2) {
-            second.val = mask_mem_value(pair_values[1], second.size);
+        if (n_pair_values >= 2 && pair_values[1].known) {
+            second.val = mask_mem_value(pair_values[1].value, second.size);
             second.known = true;
         }
         out.push_back(second);
@@ -383,12 +385,12 @@ void reconstruct_agent_memory(const Site& s, const Group& g,
 }
 
 void reconstruct_agent_values(const Site& site, const Group& group,
-                              const uint64_t* regs,
+                              const uint64_t* regs, const uint8_t* known,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems) {
-    agent_regs(site, group, regs, reads, writes);
-    reconstruct_agent_memory(site, group, regs, mems);
+    agent_regs(site, group, regs, known, reads, writes);
+    reconstruct_agent_memory(site, group, regs, known, mems);
 }
 
 } // namespace gt

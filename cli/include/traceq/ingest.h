@@ -82,10 +82,10 @@ struct AgentMemVal {
 
 const char* agent_reg_name(int ctx_idx);
 void reconstruct_agent_memory(const Site& site, const Group& group,
-                              const uint64_t* regs,
+                              const uint64_t* regs, const uint8_t* known,
                               std::vector<AgentMemVal>& mems);
 void reconstruct_agent_values(const Site& site, const Group& group,
-                              const uint64_t* regs,
+                              const uint64_t* regs, const uint8_t* known,
                               std::vector<AgentRegVal>& reads,
                               std::vector<AgentRegVal>& writes,
                               std::vector<AgentMemVal>& mems);
@@ -95,7 +95,8 @@ void reconstruct_agent_values(const Site& site, const Group& group,
 class TraceScan {
 public:
     explicit TraceScan(const GtbFile& f) : f_(f) {}
-    // cb(group_index 0-based, group); returns false to stop
+    // cb(group_index 0-based, group); callback false stops successfully.
+    // for_each returns false if the scanned EVENTS prefix is malformed.
     bool for_each(const std::function<bool(uint64_t, const Group&)>& cb);
     const uint64_t* regfile() const { return regs_; }
     const uint8_t* reg_known() const { return known_; }

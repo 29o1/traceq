@@ -27,21 +27,21 @@ int q_diff(const std::string& a_p, const std::string& b_p, int context, bool jso
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> sa, sb;
     sa.reserve(size_t(std::min<uint64_t>(a.events_seen, a.events.size())));
-    TraceScan(a).for_each([&](uint64_t ev, const Group& g) {
+    if (!TraceScan(a).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sa.push_back({g.site_id, ev});
         return true;
-    });
+    })) return scan_error(a_p);
     // The comparison only needs A's arena and compact execution sequence from
     // this point onward. Release its large event payload before loading B so
     // diff does not hold two full traces plus both derived sequences at once.
     std::vector<uint8_t>().swap(a.events);
     if (!load_query_file(b, b_p)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, a, &b);
     sb.reserve(size_t(std::min<uint64_t>(b.events_seen, b.events.size())));
-    TraceScan(b).for_each([&](uint64_t ev, const Group& g) {
+    if (!TraceScan(b).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) sb.push_back({g.site_id, ev});
         return true;
-    });
+    })) return scan_error(b_p);
     std::vector<uint8_t>().swap(b.events);
     auto key = [](const GtbFile& f, uint32_t site, std::string& mod_out, uint64_t& off_out) {
         const Site& s = f.arena.get(site);
@@ -170,14 +170,14 @@ int q_fold(const std::string& gtb, int top, bool json) {
     }
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
-    emit::QueryWriter writer(json);
+    emit::QueryWriter writer(json, f);
     struct Exec { uint32_t site; uint64_t ev; };
     std::vector<Exec> s;
     s.reserve(size_t(std::min<uint64_t>(f.events_seen, f.events.size())));
-    TraceScan(f).for_each([&](uint64_t ev, const Group& g) {
+    if (!TraceScan(f).for_each([&](uint64_t ev, const Group& g) {
         if (g.has_exec) s.push_back({g.site_id, ev});
         return true;
-    });
+    })) return scan_error(gtb);
     struct Loop { size_t start; size_t period; size_t reps; };
     std::vector<Loop> loops;
     size_t i = 0;
@@ -229,6 +229,10 @@ int q_fold(const std::string& gtb, int top, bool json) {
             emit::kv_u64(o, "period", L.period);
             o += ',';
             emit::kv_u64(o, "reps", L.reps);
+            o += ',';
+            emit::kv_u64(o, "body_shown", std::min<size_t>(L.period, 8));
+            o += ',';
+            emit::kv_bool(o, "body_truncated", L.period > 8);
             o += ",\"body\":[";
             for (size_t j = 0; j < L.period && j < 8; j++) {
                 if (j) o += ',';

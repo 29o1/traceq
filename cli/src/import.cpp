@@ -29,6 +29,7 @@
 #include <traceq/import.h>
 #include <traceq/site.h>
 #include <traceq/common.h>
+#include "cli_args.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -515,9 +516,9 @@ int cmd_import(int argc, char** argv) {
             return 0;
         }
         else if (!strcmp(argv[i], "-o")) out = next();
-        else if (!strcmp(argv[i], "--max-events")) opts.max_events = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--max-bytes")) opts.max_bytes = strtoull(next(), nullptr, 10);
-        else if (!strcmp(argv[i], "--max-ms")) opts.max_ms = strtoull(next(), nullptr, 10);
+        else if (!strcmp(argv[i], "--max-events")) opts.max_events = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--max-bytes")) opts.max_bytes = parse_u64(next(), 10);
+        else if (!strcmp(argv[i], "--max-ms")) opts.max_ms = parse_u64(next(), 10);
         else if (argv[i][0] != '-') in = argv[i];
         else {
             fprintf(stderr, "import: unknown option %s\n", argv[i]);
