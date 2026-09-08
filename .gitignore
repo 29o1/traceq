@@ -9,6 +9,9 @@ cli/gt-test
 /bench/
 /cli/tests/
 
+# local architecture diagram artifacts
+/traceq-architecture*
+
 # stray top-level build dir (ad-hoc artifacts)
 build/
 
