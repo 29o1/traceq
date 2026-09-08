@@ -851,6 +851,8 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
                    uint64_t addr, uint8_t size, const Group& g) {
         if ((reads_only && rw != 'r') || (writes_only && rw != 'w')) return;
         uint64_t row_index = totals[value_i]++;
+        if (last <= 0 && (row_index < offset || shown_per_value[value_i] >= lim))
+            return;
         ValueRow value_row{value_i, gi, g.source_line, addr, lane, kind, reg,
                            query_at(f, g.has_exec ? g.site_id : 0xFFFFFFFFu), rw,
                            size};
@@ -860,7 +862,6 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
             tail.push_back(std::move(value_row));
             return;
         }
-        if (row_index < offset || shown_per_value[value_i] >= lim) return;
         emit_value_row(value_row);
         shown_per_value[value_i]++;
         shown++;
