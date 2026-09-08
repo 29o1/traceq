@@ -60,6 +60,13 @@ Use `gt <command> --help` for parameters. All queries support `--json`.
 - Query JSON is one `{"data":[...],"meta":{...}}` document; JSONL export ends
   with a meta record. `meta` reports counts, truncation, and a `next` command
   when available. A truncated JSONL export reports `total: null`.
+- `meta.input_stop` records why import stopped; `diff` also reports
+  `input_b_stop`. Import caps such as `max_events` mean only a prefix was
+  imported, independently of result pagination. `normal` means the importer
+  finished, not that capture covered the entire execution.
+- A malformed event encountered during scanning causes a nonzero exit status.
+  Bounded queries validate only the scanned prefix. Text and JSONL output may
+  already contain rows when an error occurs; check the exit status.
 - List queries with `--limit` and export default to 20 items. For `find-value`,
   limits, offsets, and `--last` apply per distinct value. `--context N` on
   `find-pc`, `find-value`, and `mem-access` adds nearby events for the first shown hit.
@@ -67,4 +74,12 @@ Use `gt <command> --help` for parameters. All queries support `--json`.
   source line. Event windows include both endpoints; `mem-state --at-ev E`
   includes observations through E.
 - In `mem-state` JSON, read `data_hex` together with `unknown`: unknown bytes
-  are padded with `00`. For taint coverage, check `partial` and `stop`.
+  are padded with `00`. Unobserved register writes invalidate prior values;
+  reconstructed reads and stores do not reuse those stale values. Hexdump
+  observations contribute known bytes to memory state.
+- For taint coverage, check `partial` and `stop`. Explicit `--at-ev 0`,
+  `--off 0`, and `--seed-addr 0` select zero; omitting `--at-ev` starts at the
+  first event forward or the last event backward. Numeric arguments must be
+  complete, nonnegative integers within range.
+- Each `fold` loop reports `body_shown` and `body_truncated` separately from
+  pagination of the loop list.

@@ -57,10 +57,21 @@ make
 
 - 查询 JSON 为单个 `{"data":[...],"meta":{...}}` 文档；JSONL 导出以 meta 记录结尾。
   `meta` 提供计数、截断状态及可用时的 `next` 命令；截断的 JSONL 导出返回 `total: null`。
+- `meta.input_stop` 记录导入停止原因，`diff` 另有 `input_b_stop`。`max_events` 等
+  导入上限表示输入只保留了前缀，与结果分页独立；`normal` 表示导入正常完成，
+  不代表采集覆盖了完整执行过程。
+- 扫描遇到损坏事件时返回非零退出码。有界查询只验证扫描过的前缀；发生错误时，
+  文本或 JSONL 可能已经输出部分行，需检查退出码。
 - 支持 `--limit` 的列表查询与导出默认输出 20 项。`find-value` 的上限、偏移和
   `--last` 按每个不同的候选值分别生效。`find-pc`、`find-value`、`mem-access` 的
   `--context N` 可附带首个展示命中附近的事件。
 - `ev` 是从 0 开始的事件组索引；`line` 在提供时表示从 1 开始的原始行号。
   事件窗口包含两端，`mem-state --at-ev E` 包含截至 E 的观测。
 - `mem-state` JSON 中的 `data_hex` 需结合 `unknown` 解读：未知字节以 `00` 填充。
-  污点分析的覆盖范围需结合 `partial` 和 `stop` 判断。
+  没有观测值的寄存器写入会使旧值失效，重建读取与存储时不会复用这些陈旧值。
+  hexdump 观测也会计入内存的已知字节。
+- 污点分析的覆盖范围需结合 `partial` 和 `stop` 判断。显式 `--at-ev 0`、`--off 0`、
+  `--seed-addr 0` 均选择零值；省略 `--at-ev` 时，正向从首事件、反向从末事件开始。
+  数值参数必须是完整、非负且未越界的整数。
+- `fold` 每个循环的 `body_shown`、`body_truncated` 单独标记循环体展示数量与截断，
+  与循环列表的分页独立。
