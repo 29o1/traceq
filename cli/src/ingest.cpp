@@ -304,8 +304,9 @@ static unsigned __int128 mask_mem_value(unsigned __int128 value, uint8_t size) {
     return value & ((static_cast<unsigned __int128>(1) << bits) - 1);
 }
 
-static void agent_mems(const Site& s, const Group& g, const uint64_t* regs,
-                       std::vector<AgentMemVal>& out) {
+void reconstruct_agent_memory(const Site& s, const Group& g,
+                              const uint64_t* regs,
+                              std::vector<AgentMemVal>& out) {
     ObsMap om = obs_map(s, g);
     uint8_t inferred_size = s.mem_width;
     unsigned __int128 pair_values[8];
@@ -379,12 +380,6 @@ static void agent_mems(const Site& s, const Group& g, const uint64_t* regs,
         }
         out.push_back(second);
     }
-}
-
-void reconstruct_agent_memory(const Site& site, const Group& group,
-                              const uint64_t* regs,
-                              std::vector<AgentMemVal>& mems) {
-    agent_mems(site, group, regs, mems);
 }
 
 void reconstruct_agent_values(const Site& site, const Group& group,

@@ -200,23 +200,11 @@ private:
 };
 
 // Trailing footer for JSONL export. Query commands use QueryWriter instead.
-// Text mode: the
-// print_truncated marker ("... [N more rows truncated]") when rows were cut,
-// plus "next: <cmd>" when present.
-inline void finish(const Meta& m, bool json, FILE* out) {
-    if (json) {
-        std::string s = "{\"meta\":";
-        meta_append(s, m);
-        s += "}\n";
-        fwrite(s.data(), 1, s.size(), out);
-        return;
-    }
-    if (!m.total_known && m.truncated)
-        fputs("... [more rows truncated]\n", out);
-    else if (m.total > m.shown)
-        fprintf(out, "... [%llu more rows truncated]\n",
-                (unsigned long long)(m.total - m.shown));
-    if (!m.next.empty()) fprintf(out, "next: %s\n", m.next.c_str());
+inline void finish_jsonl(const Meta& m, FILE* out) {
+    std::string s = "{\"meta\":";
+    meta_append(s, m);
+    s += "}\n";
+    fwrite(s.data(), 1, s.size(), out);
 }
 
 } // namespace emit

@@ -357,7 +357,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     GtbFile f;
     if (!load_query_file(f, gtb)) return 1;
     emit::QueryWriter writer(json);
-    std::vector<std::string> stack;
+    size_t stack_depth = 0;
     bool capturing = false;
     size_t base = 0;
     uint64_t lim = uint64_t(limit);
@@ -410,7 +410,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     TraceScan(f).for_each([&](uint64_t gi, const Group& g) {
         if (g.is_call) {
             const char* name = g.call_name ? g.call_name : "<unknown>";
-            size_t d = stack.size();
+            size_t d = stack_depth;
             if (global) {
                 if (d <= size_t(depth < 0 ? 0 : depth))
                     emit_line(gi, int(d), g, name);
@@ -423,11 +423,11 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
                 matches++;
                 emit_line(gi, 0, g, name);
             }
-            stack.push_back(name);
+            stack_depth++;
         }
         if (g.is_ret) {
-            if (!stack.empty()) stack.pop_back();
-            if (capturing && stack.size() <= base) capturing = false;
+            if (stack_depth > 0) stack_depth--;
+            if (capturing && stack_depth <= base) capturing = false;
         }
         return true;
     });

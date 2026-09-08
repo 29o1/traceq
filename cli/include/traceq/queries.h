@@ -7,8 +7,8 @@
 // mode (one JSON document, integer values as hex strings) and returns data plus
 // metadata (truncated/total/shown/next).
 //
-// Every query sequentially scans the loaded .gtb event buffer (one TraceScan
-// pass); there is no index/ingest step.
+// Queries scan the loaded .gtb event buffer; --context adds a bounded export
+// scan around the first shown hit. There is no persistent index.
 #include <cstdint>
 #include <string>
 #include <vector>

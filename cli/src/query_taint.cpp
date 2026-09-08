@@ -36,8 +36,8 @@ using namespace gt;
 //
 // Register space: mask bits 0..31 = x0..x30/sp, bits 32..63 = q0..q31, plus a
 // separate NZCV flag. Per-site source/destination roles are compiled from the
-// disassembly during import. SIMD/NZCV *values* are never recorded, only
-// dependence.
+// disassembly during import. This walk uses those dependencies, not observed
+// SIMD values.
 //
 // Memory: forward is a pure stream walk. Backward keeps a sliding ring of
 // compact per-event records (whole-trace Group materialization cost ~200B per
@@ -67,8 +67,6 @@ static const char* taint_reg_name(int slot, char* buf) {
     if (slot < 64) { snprintf(buf, 16, "q%d", slot - 32); return buf; }
     return "nzcv";
 }
-
-// Per-site taint roles are compiled once during import and stored in Site.
 
 // verbatim-hexdump memcpy bridging and dump-payload search use the shared
 // upstream-dialect parsers from traceq/import.h (parse_hexdump_header /

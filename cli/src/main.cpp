@@ -12,10 +12,6 @@
 
 int cmd_import(int argc, char** argv);
 int cmd_export(int argc, char** argv);
-int cmd_taint(int argc, char** argv);
-int cmd_diff(int argc, char** argv);
-int cmd_fold(int argc, char** argv);
-int cmd_calltree(int argc, char** argv);
 
 static bool is_help(const char* s) {
     return !strcmp(s, "--help") || !strcmp(s, "-h");
@@ -678,7 +674,7 @@ int cmd_export(int argc, char** argv) {
         meta.total = n;
         meta.shown = n;
         meta.next = next_cmd;
-        gt::emit::finish(meta, true, o);
+        gt::emit::finish_jsonl(meta, o);
     }
     if (out != "-") fclose(o);
     fprintf(stderr, "%llu lines\n", (unsigned long long)n);

@@ -282,9 +282,18 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
                                                      addr - mem_addr < width;
                                           }));
             if (!hit) continue;
+            if (is_write && !writes_only) {
+                for (uint64_t lane = 0; lane < width; lane++) {
+                    if (lane > UINT64_MAX - mem_addr) break;
+                    uint64_t addr = mem_addr + lane;
+                    if (selected_byte(addr)) last_write[addr] = gi;
+                }
+            }
+            if (gi < from_ev || (writes_only && !is_write) ||
+                (reads_only && is_write)) continue;
             bool has_prior = false;
             uint64_t prior_write_ev = 0;
-            if (!all_writes) {
+            if (!is_write) {
                 for (uint64_t lane = 0; lane < width; lane++) {
                     if (lane > UINT64_MAX - mem_addr) break;
                     uint64_t addr = mem_addr + lane;
@@ -297,24 +306,6 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
                     }
                 }
             }
-            if (gi < from_ev) {
-                if (is_write) {
-                    for (uint64_t lane = 0; lane < width; lane++) {
-                        if (lane > UINT64_MAX - mem_addr) break;
-                        uint64_t addr = mem_addr + lane;
-                        if (selected_byte(addr)) last_write[addr] = gi;
-                    }
-                }
-                continue;
-            }
-            if (is_write && !all_writes) {
-                for (uint64_t lane = 0; lane < width; lane++) {
-                    if (lane > UINT64_MAX - mem_addr) break;
-                    uint64_t addr = mem_addr + lane;
-                    if (selected_byte(addr)) last_write[addr] = gi;
-                }
-            }
-            if ((writes_only && !is_write) || (reads_only && is_write)) continue;
             Row row{gi, g.source_line, mem_addr, value, g.site_id, mem_size,
                     is_write, value_known, g.has_exec, has_prior,
                     prior_write_ev};
