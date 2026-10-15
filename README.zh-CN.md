@@ -1,4 +1,4 @@
-# traceq — ARM64 指令执行轨迹查询工具
+# traceq — ARM64 trace 指令查询工具
 
 [English](README.md)
 
@@ -6,7 +6,7 @@ traceq 将 [GumTrace](https://github.com/lidongyooo/GumTrace) 采集的 ARM64 �
 
 ## 设计理念
 
-原始指令轨迹往往极其庞大（动辄数百万行、数个 GB）。直接把完整日志喂给大模型不仅浪费大量 Token，还会因超出上下文窗口或注意力被大量汇编噪声稀释，严重影响分析推理质量。
+原始 trace 指令日志往往极其庞大（动辄数百万行、数个 GB）。直接把完整日志喂给大模型不仅浪费大量 Token，还会因超出上下文窗口或注意力被大量汇编噪声稀释，严重影响分析推理质量。
 
 **traceq 的核心原则是：将确定性计算留在本地。**
 
@@ -16,7 +16,7 @@ traceq 将 [GumTrace](https://github.com/lidongyooo/GumTrace) 采集的 ARM64 �
 
 | 命令 | 说明 |
 |---|---|
-| `stat` / `find-pc` / `find-value` | 查看轨迹元数据；按地址或模块偏移定位指令；检索运行时寄存器或内存值 |
+| `stat` / `find-pc` / `find-value` | 查看 trace 元数据；按地址或模块偏移定位指令；检索运行时寄存器或内存值 |
 | `mem-access` / `mem-state` | 查询内存读写事件；重建指定时刻已观测到的内存缓冲区内容 |
 | `calls` / `calltree` | 恢复函数调用关系，提取参数及调用树 |
 | `taint` | 正向或反向追踪寄存器与内存的数据依赖链路 |
@@ -36,10 +36,10 @@ git clone https://github.com/29o1/traceq.git
 cd traceq
 make
 
-# 1. 导入轨迹文件（使用仓库自带的测试样例或你自己的 GumTrace 日志）
+# 1. 导入 trace 日志（使用仓库自带的测试样例或你自己的 GumTrace 日志）
 ./cli/gt import bench/traces/memcpy_device.log -o trace.gtb
 
-# 2. 查看轨迹概况与首个执行点
+# 2. 查看 trace 概况与首个执行点
 ./cli/gt stat trace.gtb --json
 
 # 3. 按模块和偏移查询执行记录，并附带相邻 1 条上下文
@@ -55,4 +55,4 @@ make
 
 - **数据与元数据分离**：JSON 查询统一返回单个 `{"data": [...], "meta": {...}}` 文档。`meta` 中包含条数、截断标记 `truncated` 以及用于下一页的 `next` 命令。
 - **未知内存区分**：在 `mem-state` 中，未观测到的字节以 `00` 填充，并由 `unknown` 掩码明确标记，避免将“未观测到”误判为“值为 0”。未观测到的寄存器写入会主动使旧值失效，防止状态重建使用陈旧数据。
-- **追踪边界明确**：`taint` 污点分析在遇到轨迹未覆盖的边界时，会明确标记 `partial: true` 与 `stop` 原因，保证数据流推导的可信度。
+- **追踪边界明确**：`taint` 污点分析在遇到 trace 未覆盖的边界时，会明确标记 `partial: true` 与 `stop` 原因，保证数据流推导的可信度。
