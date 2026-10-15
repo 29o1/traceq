@@ -2,84 +2,65 @@
 
 [简体中文](README.zh-CN.md)
 
-traceq converts ARM64 instruction logs from
-[GumTrace](https://github.com/lidongyooo/GumTrace) into compact `.gtb` files for
-offline queries and export. Analyze execution, runtime values, memory, calls,
-loops, taint, and execution-sequence differences through the `gt` CLI.
+traceq converts [GumTrace](https://github.com/lidongyooo/GumTrace) ARM64 logs into
+compact `.gtb` binaries. Use the `gt` CLI to query execution, reconstruct observed
+state, and trace data dependencies offline.
 
 ## Design Philosophy
 
-traceq performs deterministic filtering, state reconstruction, and evidence
-correlation locally. It returns the **smallest sufficient evidence** needed by an
-agent. This lowers token use, increases context information density, shortens
-analysis time, and preserves provenance, unknown state, and truncation details.
+Raw execution traces are massive (often millions of instructions and multiple gigabytes).
+Dumping raw logs into an LLM burns through token budgets, exceeds context windows,
+and dilutes attention with irrelevant execution noise.
+
+**traceq keeps deterministic computation local.**
+
+Filtering, memory reconstruction, and dataflow correlation happen entirely on the local
+machine. traceq returns only the **smallest sufficient evidence** needed to answer a question
+or reach a conclusion. This reduces token consumption and turnaround time while strictly
+preserving provenance, truncation markers, and unknown-state boundaries.
+
+## Features
+
+| Commands | Description |
+|---|---|
+| `stat`, `find-pc`, `find-value` | Inspect trace metadata; locate instructions by address or module offset; search runtime values |
+| `mem-access`, `mem-state` | Query memory reads/writes; reconstruct observed memory buffers at any event |
+| `calls`, `calltree` | Recover runtime function calls, arguments, and annotated call trees |
+| `taint` | Trace register and memory data dependencies forward or backward |
+| `fold`, `diff` | Detect execution loops; identify the first execution divergence between two runs |
+| `export` | Export bounded slices as compact text, streaming JSONL, or upstream log format |
+
+- **Native Structured Output**: All queries support `--json` (formatted as `{"data": [...], "meta": {...}}`), designed for scripting and LLM function calling.
+- **Bounded Context**: Strict pagination controls (`--limit`, `--last`) with optional surrounding context (`--context N`) around matching events.
+- **Fast In-Memory Scanning**: Directly scans the loaded `.gtb` event buffer without requiring external databases or indexing steps.
 
 ## Quick Start
 
-Requires macOS or Linux, `make`, and a C++17 compiler. The import command assumes
-that a GumTrace log named `trace.log` is available in the project directory.
+Requires macOS or Linux, `make`, and a C++17 compiler.
 
 ```bash
 git clone https://github.com/29o1/traceq.git
 cd traceq
 make
 
-./cli/gt import trace.log -o trace.gtb
+# 1. Import a trace (using the included sample or your own GumTrace log)
+./cli/gt import bench/traces/memcpy_device.log -o trace.gtb
+
+# 2. Inspect trace metadata and find the entry point
 ./cli/gt stat trace.gtb --json
+
+# 3. Query instruction execution at an offset, with 1 line of nearby context
+./cli/gt find-pc trace.gtb --mod libc.so --off 0x57490 --limit 1 --context 1 --json
 ```
 
-Query a location with nearby context; replace the module and offset below with
-values from `stat`'s `first_at` field:
+Replace the module name and offset with values from `stat`'s `first_at` field.
+Run `gt <command> --help` for full command parameters. Optionally run `make install`
+to install `gt` to `~/.local/bin`.
 
-```bash
-./cli/gt find-pc trace.gtb --mod libdemo.so --off 0x1234 --limit 1 --context 3 --json
-```
+## Output Semantics
 
-Optional: `make install` installs `gt` to `~/.local/bin`; add that directory to
-`PATH`. Otherwise, use `./cli/gt` from the project directory.
+To provide reliable, hallucination-resistant evidence boundaries for agents and automated workflows:
 
-## Commands
-
-Use `gt <command> --help` for parameters. All queries support `--json`.
-
-| Command | Purpose |
-|---|---|
-| `find-pc` | Find executions by address or module offset |
-| `find-value` | Find observed runtime values |
-| `mem-access` | Find memory reads and writes |
-| `mem-state` | Reconstruct known memory at an event |
-| `calls` | Query calls recovered from executed call instructions |
-| `calltree` | Build a tree from call/return annotations |
-| `taint` | Trace data dependencies forward or backward |
-| `diff` | Find the first divergence in module/offset sequences; excludes runtime values |
-| `fold` | Detect repeated instruction sequences and loops |
-| `export` | Export as `compact`, `jsonl`, or original `upstream` text |
-
-## Reading Results
-
-- Query JSON is one `{"data":[...],"meta":{...}}` document; JSONL export ends
-  with a meta record. `meta` reports counts, truncation, and a `next` command
-  when available. A truncated JSONL export reports `total: null`.
-- `meta.input_stop` records why import stopped; `diff` also reports
-  `input_b_stop`. Import caps such as `max_events` mean only a prefix was
-  imported, independently of result pagination. `normal` means the importer
-  finished, not that capture covered the entire execution.
-- A malformed event encountered during scanning causes a nonzero exit status.
-  Bounded queries validate only the scanned prefix. Text and JSONL output may
-  already contain rows when an error occurs; check the exit status.
-- List queries with `--limit` and export default to 20 items. For `find-value`,
-  limits, offsets, and `--last` apply per distinct value. `--context N` on
-  `find-pc`, `find-value`, and `mem-access` adds nearby events for the first shown hit.
-- `ev` is a zero-based event-group index; `line`, when present, is a one-based
-  source line. Event windows include both endpoints; `mem-state --at-ev E`
-  includes observations through E.
-- In `mem-state` JSON, read `data_hex` together with `unknown`: unknown bytes
-  are padded with `00`. Unobserved register writes invalidate prior values;
-  reconstructed reads and stores do not reuse those stale values. Hexdump
-  observations contribute known bytes to memory state.
-- For taint coverage, check `partial` and `stop`. Explicit `--at-ev 0`,
-  `--off 0`, and `--seed-addr 0` select zero; omitting `--at-ev` starts at the
-  first event forward or the last event backward. Numeric arguments must be
-  complete, nonnegative integers within range.
-- Each `fold` loop reports `body_shown` and `body_truncated` separately from
-  pagination of the loop list.
+- **Data & Metadata Separation**: JSON queries return a single `{"data": [...], "meta": {...}}` document. `meta` reports result counts, a `truncated` boolean, and a `next` command for pagination.
+- **Explicit Unknown Memory**: In `mem-state`, unobserved bytes are padded with `00` and explicitly flagged by the `unknown` bitmask, preventing unobserved buffers from being mistaken for zero-initialized memory. Stale register values are invalidated when unobserved writes occur.
+- **Bounded Taint Coverage**: `taint` tracks dependency propagation and reports `partial: true` alongside a `stop` reason when analysis encounters trace boundaries.
