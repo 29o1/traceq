@@ -63,4 +63,13 @@ To provide reliable, hallucination-resistant evidence boundaries for agents and 
 
 - **Data & Metadata Separation**: JSON queries return a single `{"data": [...], "meta": {...}}` document. `meta` reports result counts, a `truncated` boolean, and a `next` command for pagination.
 - **Explicit Unknown Memory**: In `mem-state`, unobserved bytes are padded with `00` and explicitly flagged by the `unknown` bitmask, preventing unobserved buffers from being mistaken for zero-initialized memory. Stale register values are invalidated when unobserved writes occur.
+- **Copy, Fill, and Dump Evidence**: `mem-state` tracks bounded, annotated `memcpy`/`memmove`/`memset` calls through a matching destination return, including source dependencies and short hexdump tails in existing GTBs. Pending calls and unavailable source bytes invalidate old destination values; overlapping `memcpy` is kept unknown unless actual writes establish its result. `--provenance` adds byte-source spans, original lines, copy evidence, and fill arguments. Dependencies require an additional metadata scan that skips register reconstruction; ordinary output stays compact.
+- **Event and Source Coordinates**: `ev` is a zero-based group index; `line` is a one-based physical source line. `mem-state --at-line L` resolves a source line directly and reports both coordinates. A line inside a group is rejected because that group's completed state includes later lines; the diagnostic gives the group's end line and event. Return annotations remain separate when needed to preserve source order.
+- **Batched Accesses**: Repeat `mem-access --range B,L` to query their union in one scan. Overlapping selectors do not duplicate an access. `--limit`, `--offset`, and `--last` apply globally to the union. Single-range rows retain `off`; multi-range rows use absolute `addr`. Continuation commands preserve every selector.
 - **Bounded Taint Coverage**: `taint` tracks dependency propagation and reports `partial: true` alongside a `stop` reason when analysis encounters trace boundaries.
+
+For a repeated investigation, batch the relevant selectors and save the successful
+JSON result for reuse. Check the process exit status before parsing stdout:
+diagnostics are written to stderr, and a failed JSON query has no result document.
+Use a call's `ret_ev` or `ret_line` when the question concerns its completed memory
+effect. This avoids querying pre-call bytes or mixing event indices with source lines.

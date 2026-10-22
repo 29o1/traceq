@@ -48,8 +48,16 @@ struct TaintOptions {
     bool index_deps = false;
 };
 
+struct MemStateRange {
+    uint64_t base = 0;
+    uint64_t len = 0;
+};
+
 struct MemAccessOptions : QueryWindow {
     std::vector<uint64_t> addrs;
+    // Range selectors form a union; pagination applies to distinct access rows.
+    std::vector<MemStateRange> ranges;
+    // Single-range library callers remain supported.
     bool use_range = false;
     uint64_t range_base = 0;
     uint64_t range_len = 0;
@@ -76,16 +84,14 @@ struct FindValueOptions : QueryWindow {
     std::vector<uint64_t> values;
 };
 
-struct MemStateRange {
-    uint64_t base = 0;
-    uint64_t len = 0;
-};
-
 struct MemStateOptions {
     std::vector<MemStateRange> ranges;
     std::vector<uint64_t> at_evs;
+    // Physical source lines must end a group, so no later facts leak backward.
+    std::vector<uint64_t> at_lines;
     bool json = false;
     bool qword = false;
+    bool provenance = false; // byte spans and annotated copy/fill evidence
 };
 
 struct CallsOptions : QueryWindow {

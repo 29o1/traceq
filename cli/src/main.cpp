@@ -166,6 +166,7 @@ int cmd_stat(int argc, char** argv) {
 int cmd_mem_access(int argc, char** argv) {
     std::string gtb;
     std::vector<uint64_t> addrs;
+    std::vector<MemStateRange> ranges;
     uint64_t range_base = 0, range_len = 0, offset = 0;
     uint64_t from_ev = 0, to_ev = UINT64_MAX;
     int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
@@ -175,11 +176,14 @@ int cmd_mem_access(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
+            printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L...) "
                    "[--read | --write] [--from E] [--to E] "
                    "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                    "       gt mem-access trace.gtb --write --from E --to E "
                    "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
+                   "  repeated ranges select a union without duplicate accesses; "
+                   "limit/offset/last apply globally\n"
+                   "  off is included for a single range; batches use absolute addr\n"
                    "  the selectorless form lists writes only inside an explicit "
                    "finite event window\n");
             return 0;
@@ -192,6 +196,7 @@ int cmd_mem_access(int argc, char** argv) {
                 return 2;
             }
             use_range = true;
+            ranges.push_back({range_base, range_len});
         }
         else if (!strcmp(argv[i], "--read")) reads_only = true;
         else if (!strcmp(argv[i], "--write")) writes_only = true;
@@ -228,7 +233,7 @@ int cmd_mem_access(int argc, char** argv) {
         from_ev > to_ev ||
         (reads_only && writes_only) ||
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
-        fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
+        fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L...) "
                         "[--read | --write] [--from E] [--to E] "
                         "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                         "       gt mem-access trace.gtb --write --from E --to E "
@@ -237,10 +242,8 @@ int cmd_mem_access(int argc, char** argv) {
     }
     MemAccessOptions options;
     options.addrs = std::move(addrs);
-    options.use_range = use_range;
+    options.ranges = std::move(ranges);
     options.all_writes = all_writes;
-    options.range_base = range_base;
-    options.range_len = range_len;
     options.limit = limit;
     options.offset = offset;
     options.from_ev = from_ev;
@@ -256,17 +259,20 @@ int cmd_mem_access(int argc, char** argv) {
 int cmd_mem_state(int argc, char** argv) {
     std::string gtb;
     std::vector<MemStateRange> ranges;
-    std::vector<uint64_t> at_evs;
-    bool json = false, qword = false;
+    std::vector<uint64_t> at_evs, at_lines;
+    bool json = false, qword = false, provenance = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
-                   "[--qword] [--json]\n"
-                   "  repeat --range and/or --at-ev to reconstruct their Cartesian "
-                   "product in one trace pass\n"
-                   "  reconstruct known bytes from observed reads/writes up to event N; "
+            printf("usage: gt mem-state trace.gtb --range B,L... (--at-ev N... | --at-line L...) "
+                   "[--qword] [--provenance] [--json]\n"
+                   "  repeat --range and checkpoints (--at-ev/--at-line) to reconstruct their Cartesian "
+                   "product together; annotated copies also track source dependencies\n"
+                   "  --at-line uses 1-based source lines at event ends; interior lines are rejected\n"
+                   "  reconstruct observed bytes and returned memcpy/memmove/memset effects up to event N; "
                    "unknown bytes print as ??\n"
+                   "  pending/unconfirmed effects invalidate old destination values\n"
+                   "  --provenance includes byte sources and copy/fill call/return evidence\n"
                    "  --qword emits 8-byte little-endian cells from the range base\n");
             return 0;
         }
@@ -281,21 +287,25 @@ int cmd_mem_state(int argc, char** argv) {
         else if (!strcmp(argv[i], "--at-ev") || !strcmp(argv[i], "--at")) {
             at_evs.push_back(parse_u64(next(), 10));
         }
+        else if (!strcmp(argv[i], "--at-line")) at_lines.push_back(parse_u64(next(), 10));
         else if (!strcmp(argv[i], "--qword")) qword = true;
+        else if (!strcmp(argv[i], "--provenance")) provenance = true;
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("mem-state", argv[i]);
     }
-    if (gtb.empty() || ranges.empty() || at_evs.empty()) {
-        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
-                        "[--qword] [--json]\n");
+    if (gtb.empty() || ranges.empty() || (at_evs.empty() && at_lines.empty())) {
+        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L... (--at-ev N... | --at-line L...) "
+                        "[--qword] [--provenance] [--json]\n");
         return 2;
     }
     MemStateOptions options;
     options.ranges = std::move(ranges);
     options.at_evs = std::move(at_evs);
+    options.at_lines = std::move(at_lines);
     options.json = json;
     options.qword = qword;
+    options.provenance = provenance;
     return q_mem_states(gtb, options);
 }
 
@@ -551,12 +561,13 @@ static void usage() {
         "  gt diff      a.gtb b.gtb\n"
         "  gt fold      --top N trace.gtb\n"
         "  gt stat      trace.gtb [--json]\n"
-        "  gt mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
+        "  gt mem-access trace.gtb (--addr A... | --range B,L...) [--read | --write]\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
         "               [--json]\n"
         "  gt mem-access trace.gtb --write --from E --to E "
         "([--limit N] | --last N) [--context N] [--json]\n"
-        "  gt mem-state trace.gtb --range B,L... --at-ev N... [--qword] [--json]\n"
+        "  gt mem-state trace.gtb --range B,L... (--at-ev N... | --at-line L...)\n"
+        "               [--qword] [--provenance] [--json]\n"
         "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
         "               [--json]\n"

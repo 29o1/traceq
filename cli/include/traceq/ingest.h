@@ -94,7 +94,10 @@ void reconstruct_agent_values(const Site& site, const Group& group,
 // writes and explicit observations; unknown state stays unknown.
 class TraceScan {
 public:
-    explicit TraceScan(const GtbFile& f) : f_(f) {}
+    // Metadata-only consumers can skip register reconstruction without changing
+    // group boundaries, source coordinates, observations, or decode validation.
+    explicit TraceScan(const GtbFile& f, bool track_registers = true)
+        : f_(f), track_registers_(track_registers) {}
     // cb(group_index 0-based, group); callback false stops successfully.
     // for_each returns false if the scanned EVENTS prefix is malformed.
     bool for_each(const std::function<bool(uint64_t, const Group&)>& cb);
@@ -103,6 +106,7 @@ public:
 
 private:
     const GtbFile& f_;
+    bool track_registers_ = true;
     uint64_t regs_[32] = {0};
     uint8_t known_[32] = {0};
 };

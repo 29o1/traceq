@@ -143,22 +143,22 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
         }
         // Imported read observations are authoritative PRE-execution values.
         // Fold them into the reconstructed state before exposing the group.
-        apply_observed_regs(g.obs, g.n_obs);
+        if (track_registers_) apply_observed_regs(g.obs, g.n_obs);
         // callback sees PRE-execution register state (reads print before the
         // writes of this event are applied)
         bool go = cb(gi++, g);
-        if (g.has_exec && g.site_id < f_.arena.sites().size()) {
+        if (track_registers_ && g.has_exec && g.site_id < f_.arena.sites().size()) {
             const Site& site = f_.arena.get(g.site_id);
             for (uint8_t i = 0; i < site.n_ops; i++)
                 if (site.ops[i].kind == OP_REG_W && site.ops[i].ctx_idx >= 0)
                     known_[site.ops[i].ctx_idx & 31] = 0;
         }
-        for (int i = 0; i < g.n_wr; i++) {
+        for (int i = 0; track_registers_ && i < g.n_wr; i++) {
             if (g.wr_id[i] < 0 || g.wr_id[i] >= 32) continue;
             regs_[g.wr_id[i]] = g.wr_val[i];
             known_[g.wr_id[i]] = 1;
         }
-        apply_observed_regs(g.wobs, g.n_wobs);
+        if (track_registers_) apply_observed_regs(g.wobs, g.n_wobs);
         g = Group();
         return go;
     };
@@ -182,8 +182,9 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
         } else if (event.tag == EV_CALL) {
             // a second call in one group would silently overwrite the first
             // (importer files can emit consecutive call lines with no EXEC
-            // between them) — close the group instead
-            if (g.is_call && !flush_group()) return false;
+            // between them) — close the group instead. A prior standalone
+            // return must also stay before this new call in source order.
+            if ((g.is_call || g.is_ret) && !flush_group()) return false;
             g.is_call = true;
             g.n_call_args = event.nargs;
             if (event.symbol_id < f_.arena.strings().size()) {
@@ -194,6 +195,9 @@ bool TraceScan::for_each(const std::function<bool(uint64_t, const Group&)>& cb) 
             }
             for (uint8_t i = 0; i < event.nargs; i++) g.args[i] = event.args[i];
         } else if (event.tag == EV_RET) {
+            // Consecutive returns are distinct annotations. Overwriting the
+            // first would lose a return and shift every later source line.
+            if (g.is_ret && !flush_group()) return false;
             g.is_ret = true;
             g.ret_val = event.value;
         } else if (event.tag == EV_RDVAL || event.tag == EV_SIMDV) {
@@ -328,15 +332,43 @@ void reconstruct_agent_memory(const Site& s, const Group& g,
                 data_values[n_data_values++] = {value, is_known};
         };
         if (op.kind == OP_MEM_W) {
-            for (uint8_t j = 0; j < s.n_ops; j++) {
-                const OpPlan& r = s.ops[j];
-                if (r.kind != OP_REG_R) continue;
-                if (r.ctx_idx >= 0)
-                    add_data_value(regs[r.ctx_idx & 31], known[r.ctx_idx & 31]);
-                else if (om.use_obs && om.obs_at[j] >= 0)
-                    add_data_value(g.obs[om.obs_at[j]].val, true);
-                else
-                    add_data_value(0, false);
+            if (s.taint.cat == TC_STORE) {
+                // Printed operands can omit the store value or put its base
+                // register first. Address observations are not stored data.
+                // Preserve each declared lane, including an unknown first
+                // lane of a pair, instead of shifting another value into it.
+                uint8_t simd_at = 0;
+                for (uint8_t k = 0; k < s.taint.n_st; k++) {
+                    uint8_t slot = s.taint.st[k];
+                    if (slot < 32) {
+                        add_data_value(regs[slot], known[slot]);
+                        continue;
+                    }
+                    bool found = false;
+                    uint8_t simd = 0;
+                    for (uint8_t j = 0; j < s.n_ops; j++) {
+                        if (s.ops[j].kind != OP_REG_R || s.ops[j].ctx_idx >= 0) continue;
+                        if (simd++ != simd_at) continue;
+                        if (om.use_obs && om.obs_at[j] >= 0) {
+                            add_data_value(g.obs[om.obs_at[j]].val, true);
+                            found = true;
+                        }
+                        break;
+                    }
+                    simd_at++;
+                    if (!found) add_data_value(0, false);
+                }
+            } else {
+                for (uint8_t j = 0; j < s.n_ops; j++) {
+                    const OpPlan& r = s.ops[j];
+                    if (r.kind != OP_REG_R) continue;
+                    if (r.ctx_idx >= 0)
+                        add_data_value(regs[r.ctx_idx & 31], known[r.ctx_idx & 31]);
+                    else if (om.use_obs && om.obs_at[j] >= 0)
+                        add_data_value(g.obs[om.obs_at[j]].val, true);
+                    else
+                        add_data_value(0, false);
+                }
             }
         } else {
             for (uint8_t j = 0; j < s.n_ops; j++) {

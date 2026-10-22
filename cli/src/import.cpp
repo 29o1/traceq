@@ -30,6 +30,7 @@
 #include <traceq/site.h>
 #include <traceq/common.h>
 #include "cli_args.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -113,6 +114,7 @@ struct Importer {
     bool crlf = false;
     bool stopped = false;
     bool in_hexdump_ = false; // verbatim lines currently inside a dump block
+    uint64_t dump_base_ = 0, dump_end_ = 0;
 
     Importer(const char* p, size_t n) : base(p), len(n), rec(arena) {}
 
@@ -366,7 +368,8 @@ struct Importer {
                 // unterminated last line included: the renderer always
                 // appends a line ending, so only VERBATIM replays it exactly.
                 // hexdump content observations: inside a dump block each row
-                // synthesizes value-known mem READ lanes (full qwords only),
+                // synthesizes value-known mem READ lanes (including short
+                // tails, clipped to the advertised dump range),
                 // recorded BEFORE its verbatim record so they ride the same
                 // group (a mem-only group never flushes on its own). The raw
                 // line is still stored verbatim — byte-exact replay is kept.
@@ -375,14 +378,26 @@ struct Importer {
                 int nb = 0;
                 if (in_hexdump_ &&
                     parse_hexdump_row(p, size_t(be - p), raddr, bytes, nb)) {
-                    for (int k = 0; k + 8 <= nb; k += 8) {
-                        uint64_t v;
-                        memcpy(&v, bytes + k, 8);
-                        rec.imp_mem_val(false, raddr + uint64_t(k), 8, v);
+                    if (raddr <= UINT64_MAX - uint64_t(nb)) {
+                        uint64_t lo = std::max(raddr, dump_base_);
+                        uint64_t hi = std::min(raddr + uint64_t(nb), dump_end_);
+                        for (uint64_t a = lo; a < hi;) {
+                            uint8_t width = uint8_t(std::min<uint64_t>(8, hi - a));
+                            uint64_t v = 0;
+                            for (uint8_t k = 0; k < width; k++)
+                                v |= uint64_t(bytes[a - raddr + k]) << (k * 8);
+                            rec.imp_mem_val(false, a, width, v);
+                            a += width;
+                        }
                     }
                 } else {
                     in_hexdump_ =
-                        parse_hexdump_header(p, size_t(be - p), raddr, hlen);
+                        parse_hexdump_header(p, size_t(be - p), raddr, hlen) &&
+                        hlen <= UINT64_MAX - raddr;
+                    if (in_hexdump_) {
+                        dump_base_ = raddr;
+                        dump_end_ = raddr + hlen;
+                    }
                 }
                 verbatim(p, le);
             } else {
@@ -422,6 +437,7 @@ bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
         while (i < n && ((p[i] >= '0' && p[i] <= '9') ||
                          (p[i] >= 'a' && p[i] <= 'f') ||
                          (p[i] >= 'A' && p[i] <= 'F'))) {
+            if (i - s == 16) return false; // reject overflow, never wrap
             char c = p[i++];
             v = (v << 4) | uint64_t(c <= '9' ? c - '0'
                                              : (c | 32) - 'a' + 10);
