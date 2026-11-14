@@ -9,7 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gt {
+namespace traceq {
 
 class SiteArena;
 
@@ -69,4 +69,4 @@ private:
     bool failed_ = false;
 };
 
-} // namespace gt
+} // namespace traceq

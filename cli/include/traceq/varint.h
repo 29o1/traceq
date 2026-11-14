@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace gt {
+namespace traceq {
 
 // LEB128-style unsigned varint with zigzag option for signed deltas.
 inline size_t put_uvar(uint8_t* p, uint64_t v) {
@@ -37,4 +37,4 @@ inline size_t get_var(const uint8_t* p, size_t len, int64_t& out) {
     return n;
 }
 
-} // namespace gt
+} // namespace traceq

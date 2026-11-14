@@ -7,7 +7,7 @@
 #include <vector>
 #include <cstdio>
 
-namespace gt {
+namespace traceq {
 
 inline constexpr int DEFAULT_OUTPUT_ROWS = 20;
 
@@ -17,4 +17,4 @@ inline uint64_t now_ns() {
     return uint64_t(ts.tv_sec) * 1000000000ull + uint64_t(ts.tv_nsec);
 }
 
-} // namespace gt
+} // namespace traceq

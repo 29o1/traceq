@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace gt {
+namespace traceq {
 
 struct ImportCounts {
     uint64_t lines = 0, exec = 0;
@@ -46,4 +46,4 @@ bool parse_hexdump_header(const char* p, size_t n, uint64_t& addr,
 bool parse_hexdump_row(const char* p, size_t n, uint64_t& addr,
                        uint8_t out[16], int& n_out);
 
-} // namespace gt
+} // namespace traceq

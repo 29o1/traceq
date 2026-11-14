@@ -6,7 +6,7 @@
 #include <cstring>
 #include <cstdio>
 
-namespace gt {
+namespace traceq {
 
 using namespace format;
 
@@ -393,4 +393,4 @@ void reconstruct_agent_values(const Site& site, const Group& group,
     reconstruct_agent_memory(site, group, regs, known, mems);
 }
 
-} // namespace gt
+} // namespace traceq

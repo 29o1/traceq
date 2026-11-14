@@ -7,7 +7,7 @@
 #include <cstdio>
 #include <vector>
 
-using namespace gt;
+using namespace traceq;
 
 // ---------------------------------------------------------------------------
 // diff (gtb exec sequence)

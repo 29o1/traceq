@@ -6,7 +6,7 @@
 #include <vector>
 #include <unordered_map>
 
-namespace gt {
+namespace traceq {
 
 enum SiteKind : uint8_t {
     SK_NORMAL = 0,
@@ -78,7 +78,7 @@ struct Site {
     TaintPlan taint;
 };
 
-struct TextOp; // defined below (text-built sites, gt import)
+struct TextOp; // defined below (text-built sites, traceq import)
 
 class SiteArena {
 public:
@@ -122,7 +122,7 @@ private:
     std::unordered_map<std::string, uint32_t> module_ids_;
 };
 
-// ---- text-built sites (gt import) ----
+// ---- text-built sites (traceq import) ----
 // One plan operand per printed value token, in print order. name points into
 // the caller's buffer (usually the mmapped log) and is copied by intern_text.
 struct TextOp {
@@ -141,4 +141,4 @@ int text_name_ctx(const char* s, size_t n, int* simd_idx);
 size_t legacy_hex64(char* p, uint64_t v);
 size_t legacy_hex128(char* p, unsigned __int128 v);
 
-} // namespace gt
+} // namespace traceq

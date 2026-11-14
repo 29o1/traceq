@@ -2,7 +2,9 @@
 *.o
 *.a
 *.dSYM/
+cli/traceq
 cli/gt
+cli/traceq-test
 cli/gt-test
 
 # local-only validation assets
@@ -17,3 +19,23 @@ build/
 
 # macOS
 .DS_Store
+
+# Unified capture workspace: downloaded SDKs and generated local evidence.
+/.deps/
+/artifacts/
+__pycache__/
+
+# Local research, measurements and development notes.
+/experiments/
+/docs/
+/WORKSPACE.md
+/cli/WRITE_STREAM.md
+/capture/traceq/WRITE_STREAM_EXPERIMENT.md
+/capture/traceq/UPSTREAM_README.md
+
+# Imported auxiliary tools; canonical builds use tools/build_capture.py.
+/capture/traceq/src/taint/
+/capture/traceq/build_android.sh
+/capture/traceq/build_ios.sh
+/capture/traceq/example.js
+/capture/traceq/example_ios.js

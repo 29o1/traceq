@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace gt {
+namespace traceq {
 
 struct MemOp {
     bool is_write;
@@ -107,4 +107,4 @@ private:
     uint8_t known_[32] = {0};
 };
 
-} // namespace gt
+} // namespace traceq

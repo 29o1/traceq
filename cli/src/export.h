@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 
-namespace gt {
+namespace traceq {
 
 // Exporters return UINT64_MAX on a decode failure; streamed output may contain
 // a prefix, which the caller must not present as a successful complete export.
@@ -33,4 +33,4 @@ uint64_t export_jsonl(const GtbFile& file, FILE* out,
 bool render_context(const GtbFile& file, uint64_t ev, uint64_t span,
                     bool json, std::string& out);
 
-} // namespace gt
+} // namespace traceq

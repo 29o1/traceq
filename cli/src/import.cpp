@@ -1,4 +1,4 @@
-// gt import — upstream GumTrace text log -> .gtb.
+// traceq import — upstream GumTrace text log -> .gtb.
 //
 // The upstream printer's line grammar (observed in real logs):
 //   insn:  [mod] 0xABS!0xOFF disasm; tok tok ... [-> tok ...] <EOL>
@@ -39,7 +39,7 @@
 #include <sys/stat.h>
 #include <unordered_map>
 
-namespace gt {
+namespace traceq {
 
 namespace {
 
@@ -500,18 +500,18 @@ bool import_log(const std::string& in_path, const std::string& out_path,
     return ok;
 }
 
-} // namespace gt
+} // namespace traceq
 
 // ---------------------------------------------------------------------------
 // CLI front-end
 // ---------------------------------------------------------------------------
 int cmd_import(int argc, char** argv) {
     std::string in, out;
-    gt::RecOptions opts;
+    traceq::RecOptions opts;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
-            printf("usage: gt import trace.log -o trace.gtb [--max-events N] "
+            printf("usage: traceq import trace.log -o trace.gtb [--max-events N] "
                    "[--max-bytes N] [--max-ms N]\n");
             return 0;
         }
@@ -522,21 +522,21 @@ int cmd_import(int argc, char** argv) {
         else if (argv[i][0] != '-') in = argv[i];
         else {
             fprintf(stderr, "import: unknown option %s\n", argv[i]);
-            fprintf(stderr, "try: gt import --help\n");
+            fprintf(stderr, "try: traceq import --help\n");
             return 2;
         }
     }
     if (in.empty() || out.empty()) {
-        fprintf(stderr, "usage: gt import trace.log -o trace.gtb [--max-events N]\n");
+        fprintf(stderr, "usage: traceq import trace.log -o trace.gtb [--max-events N]\n");
         return 2;
     }
-    gt::ImportResult r;
-    uint64_t t0 = gt::now_ns();
-    if (!gt::import_log(in, out, opts, r)) {
+    traceq::ImportResult r;
+    uint64_t t0 = traceq::now_ns();
+    if (!traceq::import_log(in, out, opts, r)) {
         fprintf(stderr, "import: cannot read %s or write %s\n", in.c_str(), out.c_str());
         return 1;
     }
-    double ms = double(gt::now_ns() - t0) / 1e6;
+    double ms = double(traceq::now_ns() - t0) / 1e6;
     printf("{\"import\":{\"lines\":%llu,\"exec\":%llu,"
            "\"call_instructions\":%llu,\"return_instructions\":%llu,"
            "\"call_annotations\":%llu,\"return_annotations\":%llu,"
@@ -548,7 +548,7 @@ int cmd_import(int argc, char** argv) {
            (unsigned long long)r.cnt.call, (unsigned long long)r.cnt.ret,
            (unsigned long long)r.cnt.verbatim, (unsigned long long)r.in_bytes,
            (unsigned long long)r.gtb_bytes, ms,
-           gt::stop_reason_name(r.stats.reason),
+           traceq::stop_reason_name(r.stats.reason),
            r.stopped ? ",\"stopped\":true" : "");
     return 0;
 }

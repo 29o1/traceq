@@ -5,6 +5,7 @@
 #include "query_common.h"
 #include "export.h"
 #include "cli_args.h"
+#include "state_stream.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -13,6 +14,7 @@
 
 int cmd_import(int argc, char** argv);
 int cmd_export(int argc, char** argv);
+int cmd_last_writers(int argc, char** argv);
 
 static bool is_help(const char* s) {
     return !strcmp(s, "--help") || !strcmp(s, "-h");
@@ -20,7 +22,7 @@ static bool is_help(const char* s) {
 
 static int unknown_option(const char* cmd, const char* arg) {
     fprintf(stderr, "%s: unknown option %s\n", cmd, arg);
-    fprintf(stderr, "try: gt %s --help\n", cmd);
+    fprintf(stderr, "try: traceq %s --help\n", cmd);
     return 2;
 }
 
@@ -46,7 +48,7 @@ static bool parse_context(const char* cmd, const char* s, int& out) {
 
 static void usage_taint(FILE* o) {
     fprintf(o,
-            "usage: gt taint (--seed-addr A | --seed-reg R | --seed-q Q | "
+            "usage: traceq taint (--seed-addr A | --seed-reg R | --seed-q Q | "
             "--seed-nzcv) [--back] [--index-deps] [--at-ev N] "
             "[--off O [--mod M]] [--window N] [--limit N] trace.gtb [--json]\n"
             "  --index-deps  include load index registers (table/S-box lookups)\n");
@@ -55,7 +57,7 @@ static void usage_taint(FILE* o) {
 int cmd_taint(int argc, char** argv) {
     std::optional<uint64_t> seed_addr, at_ev, off;
     uint64_t window = 0;
-    int seed_reg = -1, seed_q = -1, limit = gt::DEFAULT_OUTPUT_ROWS;
+    int seed_reg = -1, seed_q = -1, limit = traceq::DEFAULT_OUTPUT_ROWS;
     bool back = false, seed_nzcv = false, json = false, index_deps = false;
     std::string gtb, mod;
     for (int i = 1; i < argc; i++) {
@@ -110,7 +112,7 @@ int cmd_diff(int argc, char** argv) {
     bool json = false;
     for (int i = 1; i < argc; i++) {
         if (is_help(argv[i])) {
-            printf("usage: gt diff a.gtb b.gtb [--context N] [--json]\n");
+            printf("usage: traceq diff a.gtb b.gtb [--context N] [--json]\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--context") && i + 1 < argc) ctx = parse_int(argv[++i]);
@@ -120,7 +122,7 @@ int cmd_diff(int argc, char** argv) {
         else return unknown_option("diff", argv[i]);
     }
     if (a.empty() || b.empty()) {
-        fprintf(stderr, "usage: gt diff a.gtb b.gtb [--context N] [--json]\n");
+        fprintf(stderr, "usage: traceq diff a.gtb b.gtb [--context N] [--json]\n");
         return 2;
     }
     return q_diff(a, b, ctx, json);
@@ -132,7 +134,7 @@ int cmd_fold(int argc, char** argv) {
     bool json = false;
     for (int i = 1; i < argc; i++) {
         if (is_help(argv[i])) {
-            printf("usage: gt fold trace.gtb [--top N] [--json]\n");
+            printf("usage: traceq fold trace.gtb [--top N] [--json]\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--top") && i + 1 < argc) top = parse_int(argv[++i]);
@@ -141,7 +143,7 @@ int cmd_fold(int argc, char** argv) {
         else return unknown_option("fold", argv[i]);
     }
     if (gtb.empty()) {
-        fprintf(stderr, "usage: gt fold trace.gtb [--top N] [--json]\n");
+        fprintf(stderr, "usage: traceq fold trace.gtb [--top N] [--json]\n");
         return 2;
     }
     return q_fold(gtb, top, json);
@@ -152,14 +154,14 @@ int cmd_stat(int argc, char** argv) {
     bool json = false;
     for (int i = 1; i < argc; i++) {
         if (is_help(argv[i])) {
-            printf("usage: gt stat trace.gtb [--json]\n");
+            printf("usage: traceq stat trace.gtb [--json]\n");
             return 0;
         }
         else if (!strcmp(argv[i], "--json")) json = true;
         else if (argv[i][0] != '-') gtb = argv[i];
         else return unknown_option("stat", argv[i]);
     }
-    if (gtb.empty()) { fprintf(stderr, "usage: gt stat trace.gtb [--json]\n"); return 2; }
+    if (gtb.empty()) { fprintf(stderr, "usage: traceq stat trace.gtb [--json]\n"); return 2; }
     return q_stat(gtb, json);
 }
 
@@ -168,17 +170,17 @@ int cmd_mem_access(int argc, char** argv) {
     std::vector<uint64_t> addrs;
     uint64_t range_base = 0, range_len = 0, offset = 0;
     uint64_t from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
+    int limit = traceq::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool use_range = false, json = false, writes_only = false, reads_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
     bool have_from = false, have_to = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
+            printf("usage: traceq mem-access trace.gtb (--addr A... | --range B,L) "
                    "[--read | --write] [--from E] [--to E] "
                    "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
-                   "       gt mem-access trace.gtb --write --from E --to E "
+                   "       traceq mem-access trace.gtb --write --from E --to E "
                    "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
                    "  the selectorless form lists writes only inside an explicit "
                    "finite event window\n");
@@ -228,10 +230,10 @@ int cmd_mem_access(int argc, char** argv) {
         from_ev > to_ev ||
         (reads_only && writes_only) ||
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
-        fprintf(stderr, "usage: gt mem-access trace.gtb (--addr A... | --range B,L) "
+        fprintf(stderr, "usage: traceq mem-access trace.gtb (--addr A... | --range B,L) "
                         "[--read | --write] [--from E] [--to E] "
                         "([--limit N] [--offset M] | --last N) [--context N] [--json]\n"
-                        "       gt mem-access trace.gtb --write --from E --to E "
+                        "       traceq mem-access trace.gtb --write --from E --to E "
                         "([--limit N] [--offset M] | --last N) [--context N] [--json]\n");
         return 2;
     }
@@ -261,7 +263,7 @@ int cmd_mem_state(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
+            printf("usage: traceq mem-state trace.gtb --range B,L... --at-ev N... "
                    "[--qword] [--json]\n"
                    "  repeat --range and/or --at-ev to reconstruct their Cartesian "
                    "product in one trace pass\n"
@@ -287,7 +289,7 @@ int cmd_mem_state(int argc, char** argv) {
         else return unknown_option("mem-state", argv[i]);
     }
     if (gtb.empty() || ranges.empty() || at_evs.empty()) {
-        fprintf(stderr, "usage: gt mem-state trace.gtb --range B,L... --at-ev N... "
+        fprintf(stderr, "usage: traceq mem-state trace.gtb --range B,L... --at-ev N... "
                         "[--qword] [--json]\n");
         return 2;
     }
@@ -303,12 +305,12 @@ int cmd_find_pc(int argc, char** argv) {
     std::string gtb, mod;
     std::vector<uint64_t> addrs, offs;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
+    int limit = traceq::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool json = false, have_limit = false, have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
+            printf("usage: traceq find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
                    "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
                    "[--context N] [--json]\n"
                    "  repeat --addr or --off to find several PCs in one trace pass\n");
@@ -343,7 +345,7 @@ int cmd_find_pc(int argc, char** argv) {
     if (gtb.empty() || addrs.empty() == offs.empty() ||
         (!addrs.empty() && !mod.empty()) || from_ev > to_ev ||
         (have_last && last <= 0) || (have_last && (have_limit || have_offset))) {
-        fprintf(stderr, "usage: gt find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
+        fprintf(stderr, "usage: traceq find-pc trace.gtb (--addr A... | --off O... [--mod M]) "
                         "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
                         "[--context N] [--json]\n");
         return 2;
@@ -367,14 +369,14 @@ int cmd_calls(int argc, char** argv) {
     std::vector<std::string> names;
     std::vector<uint64_t> target_addrs, target_offs;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int top = 0, limit = gt::DEFAULT_OUTPUT_ROWS, last = 0;
+    int top = 0, limit = traceq::DEFAULT_OUTPUT_ROWS, last = 0;
     bool json = false, have_top = false, have_limit = false;
     bool have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt calls trace.gtb [--top N]\n"
-                   "       gt calls trace.gtb [--name NAME...] "
+            printf("usage: traceq calls trace.gtb [--top N]\n"
+                   "       traceq calls trace.gtb [--name NAME...] "
                    "[--target-addr A...] [--target-off O... [--mod M]]\n"
                    "                [--from E] [--to E] "
                    "([--limit N] [--offset M] | --last N) [--json]\n"
@@ -415,7 +417,7 @@ int cmd_calls(int argc, char** argv) {
         (have_top && (have_last || have_limit || have_offset)) ||
         (have_last && (have_limit || have_offset)) ||
         (!mod.empty() && target_offs.empty())) {
-        fprintf(stderr, "usage: gt calls trace.gtb [--top N] | [selectors] "
+        fprintf(stderr, "usage: traceq calls trace.gtb [--top N] | [selectors] "
                         "([--limit N] [--offset M] | --last N) [--json]\n");
         return 2;
     }
@@ -439,17 +441,17 @@ int cmd_find_value(int argc, char** argv) {
     std::vector<std::string> positional;
     std::vector<uint64_t> values;
     uint64_t offset = 0, from_ev = 0, to_ev = UINT64_MAX;
-    int limit = gt::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
+    int limit = traceq::DEFAULT_OUTPUT_ROWS, last = 0, context = 0;
     bool value_option = false, json = false;
     bool reads_only = false, writes_only = false;
     bool have_limit = false, have_offset = false, have_last = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt find-value V trace.gtb [--read | --write] "
+            printf("usage: traceq find-value V trace.gtb [--read | --write] "
                    "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
                    "[--context N] [--json]\n"
-                   "       gt find-value trace.gtb --value V... [same options]\n"
+                   "       traceq find-value trace.gtb --value V... [same options]\n"
                    "  repeat --value to search multiple values in one trace pass; "
                    "limits, offsets, and --last apply per value\n");
             return 0;
@@ -491,10 +493,10 @@ int cmd_find_value(int argc, char** argv) {
         (reads_only && writes_only) || (have_last && last <= 0) ||
         (have_last && (have_limit || have_offset))) {
         fprintf(stderr,
-                "usage: gt find-value V trace.gtb [--read | --write] "
+                "usage: traceq find-value V trace.gtb [--read | --write] "
                 "[--from E] [--to E] ([--limit N] [--offset M] | --last N) "
                 "[--context N] [--json]\n"
-                "       gt find-value trace.gtb --value V... [same options]\n");
+                "       traceq find-value trace.gtb --value V... [same options]\n");
         return 2;
     }
     FindValueOptions options;
@@ -513,12 +515,12 @@ int cmd_find_value(int argc, char** argv) {
 
 int cmd_calltree(int argc, char** argv) {
     std::string gtb, func;
-    int depth = 3, limit = gt::DEFAULT_OUTPUT_ROWS;
+    int depth = 3, limit = traceq::DEFAULT_OUTPUT_ROWS;
     bool json = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt calltree [--func NAME] [--depth D] [--limit N] "
+            printf("usage: traceq calltree [--func NAME] [--depth D] [--limit N] "
                    "trace.gtb [--json]\n"
                    "  omit --func to print the bounded call forest from the "
                    "trace root\n");
@@ -532,7 +534,7 @@ int cmd_calltree(int argc, char** argv) {
         else return unknown_option("calltree", argv[i]);
     }
     if (gtb.empty()) {
-        fprintf(stderr, "usage: gt calltree [--func NAME] [--depth D] [--limit N] "
+        fprintf(stderr, "usage: traceq calltree [--func NAME] [--depth D] [--limit N] "
                         "trace.gtb [--json]\n");
         return 2;
     }
@@ -541,38 +543,43 @@ int cmd_calltree(int argc, char** argv) {
 
 static void usage() {
     printf(
-        "gt — traceq: agent-facing trace CLI\n"
+        "traceq — agent-facing trace CLI\n"
         "usage:\n"
-        "  gt import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
-        "  gt export    [--format compact|jsonl|upstream]\n"
+        "  traceq instructions trace.gtsw [--from E --to E] [--gaps] [--limit N] [--json]\n"
+        "  traceq boundaries trace.gtsw [--from E --to E] [--reg x0] [--limit N] [--json]\n"
+        "  traceq context trace.gtsw --at-ev E... [--before N --after N] [--reg x0] [--limit N] [--json]\n"
+        "  traceq reg-state trace.gtsw --at-ev E [--phase pre|post] [--reg x0] [--json]\n"
+        "  traceq last-writers trace.gtsw --range BASE,LEN [--at-seq N] [--json]\n"
+        "  traceq import    trace.log -o trace.gtb   (upstream GumTrace text log)\n"
+        "  traceq export    [--format compact|jsonl|upstream]\n"
         "               [--from E --to E] [--limit N | --all] trace.gtb [-o FILE]\n"
-        "  gt taint     (--seed-addr A|--seed-reg R|--seed-q Q) [--back]\n"
+        "  traceq taint     (--seed-addr A|--seed-reg R|--seed-q Q) [--back]\n"
         "               [--at-ev N] [--off O [--mod M]] [--window N] trace.gtb\n"
-        "  gt diff      a.gtb b.gtb\n"
-        "  gt fold      --top N trace.gtb\n"
-        "  gt stat      trace.gtb [--json]\n"
-        "  gt mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
+        "  traceq diff      a.gtb b.gtb\n"
+        "  traceq fold      --top N trace.gtb\n"
+        "  traceq stat      trace.gtb [--json]\n"
+        "  traceq mem-access trace.gtb (--addr A... | --range B,L) [--read | --write]\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
         "               [--json]\n"
-        "  gt mem-access trace.gtb --write --from E --to E "
+        "  traceq mem-access trace.gtb --write --from E --to E "
         "([--limit N] | --last N) [--context N] [--json]\n"
-        "  gt mem-state trace.gtb --range B,L... --at-ev N... [--qword] [--json]\n"
-        "  gt find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
+        "  traceq mem-state trace.gtb --range B,L... --at-ev N... [--qword] [--json]\n"
+        "  traceq find-pc  trace.gtb (--addr A... | --off O... [--mod M])\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
         "               [--json]\n"
-        "  gt find-value V trace.gtb | trace.gtb --value V... [--read | --write]\n"
+        "  traceq find-value V trace.gtb | trace.gtb --value V... [--read | --write]\n"
         "               [--from E] [--to E] ([--limit N] | --last N) [--context N]\n"
         "               [--json]\n"
-        "  gt calls     trace.gtb [--top N | --name NAME | --target-addr A |\n"
+        "  traceq calls     trace.gtb [--top N | --name NAME | --target-addr A |\n"
         "               --target-off O [--mod M]] [--limit N | --last N] [--json]\n"
-        "  gt calltree  [--func NAME] [--depth D] trace.gtb\n"
+        "  traceq calltree  [--func NAME] [--depth D] trace.gtb\n"
         "\n"
         "query --json output is one {\"data\":[...],\"meta\":{...}} document;\n"
         "u64 values are hex strings. export --format jsonl remains streaming.\n"
         "limit-based queries and export default to 20 rows; export --all is explicit.\n"
         "all queries scan the loaded .gtb event buffer — there is no index step.\n"
         "\n"
-        "capture live traces with GumTrace, then convert them with `gt import`.\n");
+        "query structured traceq captures directly; use `traceq import` for legacy text logs.\n");
 }
 
 static int dispatch(int argc, char** argv) {
@@ -583,6 +590,12 @@ static int dispatch(int argc, char** argv) {
         return 0;
     }
     if (cmd == "import") return cmd_import(argc - 1, argv + 1);
+    if (cmd == "context") return traceq::stream::context_command(argc-1,argv+1);
+    if (cmd == "instructions" || cmd == "reg-state" || cmd == "boundaries" ||
+        ((cmd == "last-writers" || cmd == "mem-access" || cmd == "mem-state" || cmd == "find-pc" || cmd == "stat") &&
+         traceq::stream::is_state_stream(argc-1,argv+1)))
+        return traceq::stream::command(cmd,argc-1,argv+1);
+    if (cmd == "last-writers") return cmd_last_writers(argc - 1, argv + 1);
     if (cmd == "export") return cmd_export(argc - 1, argv + 1);
     if (cmd == "taint") return cmd_taint(argc - 1, argv + 1);
     if (cmd == "diff") return cmd_diff(argc - 1, argv + 1);
@@ -595,7 +608,7 @@ static int dispatch(int argc, char** argv) {
     if (cmd == "calls") return cmd_calls(argc - 1, argv + 1);
     if (cmd == "calltree" || cmd == "call-tree")
         return cmd_calltree(argc - 1, argv + 1);
-    fprintf(stderr, "gt: unknown command %s\n", cmd.c_str());
+    fprintf(stderr, "traceq: unknown command %s\n", cmd.c_str());
     usage();
     return 2;
 }
@@ -604,7 +617,7 @@ int main(int argc, char** argv) {
     try {
         return dispatch(argc, argv);
     } catch (const std::invalid_argument& error) {
-        fprintf(stderr, "gt: %s\n", error.what());
+        fprintf(stderr, "traceq: %s\n", error.what());
         return 2;
     }
 }
@@ -612,12 +625,12 @@ int main(int argc, char** argv) {
 int cmd_export(int argc, char** argv) {
     std::string in, out = "-", fmt = "compact";
     uint64_t from = 0, to = UINT64_MAX;
-    uint64_t limit = gt::DEFAULT_OUTPUT_ROWS;
+    uint64_t limit = traceq::DEFAULT_OUTPUT_ROWS;
     bool have_to = false, have_limit = false, all = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
         if (is_help(argv[i])) {
-            printf("usage: gt export [--format compact|jsonl|upstream] "
+            printf("usage: traceq export [--format compact|jsonl|upstream] "
                    "[--from E] [--to E] [--limit N | --all] "
                    "trace.gtb [-o FILE]\n"
                    "  output defaults to 20 lines; use --all for a complete "
@@ -638,7 +651,7 @@ int cmd_export(int argc, char** argv) {
     }
     if (in.empty() || from > to || (have_limit && limit == 0) ||
         (all && have_limit)) {
-        fprintf(stderr, "usage: gt export [--format compact|jsonl|upstream] "
+        fprintf(stderr, "usage: traceq export [--format compact|jsonl|upstream] "
                         "[--from E] [--to E] [--limit N | --all] "
                         "trace.gtb [-o FILE]\n");
         return 2;
@@ -648,18 +661,18 @@ int cmd_export(int argc, char** argv) {
                 fmt.c_str());
         return 2;
     }
-    gt::GtbFile f;
+    traceq::GtbFile f;
     if (!load_query_file(f, in)) return 1;
     FILE* o = out == "-" ? stdout : fopen(out.c_str(), "wb");
     if (!o) return 1;
     if (all) limit = 0;
     uint64_t stop_gi = UINT64_MAX, n = 0;
     if (fmt == "upstream")
-        n = gt::export_upstream(f, o, from, to, limit, &stop_gi);
+        n = traceq::export_upstream(f, o, from, to, limit, &stop_gi);
     else if (fmt == "compact")
-        n = gt::export_compact(f, o, from, to, limit, &stop_gi);
+        n = traceq::export_compact(f, o, from, to, limit, &stop_gi);
     else
-        n = gt::export_jsonl(f, o, from, to, limit, &stop_gi);
+        n = traceq::export_jsonl(f, o, from, to, limit, &stop_gi);
     if (n == UINT64_MAX) {
         if (out != "-") fclose(o);
         return scan_error(in);
@@ -671,7 +684,7 @@ int cmd_export(int argc, char** argv) {
         // byte-guarded (roundtrip contract), so its cursor rides stderr with
         // the other diagnostics; the agent formats print it as the trailing
         // line of the content stream.
-        next_cmd = "gt export --from " + std::to_string(stop_gi);
+        next_cmd = "traceq export --from " + std::to_string(stop_gi);
         if (limit) next_cmd += " --limit " + std::to_string(limit);
         if (have_to) next_cmd += " --to " + std::to_string(to);
         next_cmd += " --format " + fmt;
@@ -681,17 +694,17 @@ int cmd_export(int argc, char** argv) {
             fprintf(stderr, "next: %s\n", next_cmd.c_str());
     }
     if (fmt == "jsonl") {
-        gt::emit::Meta meta;
+        traceq::emit::Meta meta;
         meta.truncated = truncated;
         meta.total_known = !truncated;
         meta.total = n;
         meta.shown = n;
         meta.next = next_cmd;
-        meta.input_stop = gt::stop_reason_name(static_cast<gt::StopReason>(f.stop_reason));
-        gt::emit::finish_jsonl(meta, o);
+        meta.input_stop = traceq::stop_reason_name(static_cast<traceq::StopReason>(f.stop_reason));
+        traceq::emit::finish_jsonl(meta, o);
     } else {
-        gt::emit::input_note(fmt == "upstream" ? stderr : o, "input",
-                            gt::stop_reason_name(static_cast<gt::StopReason>(f.stop_reason)));
+        traceq::emit::input_note(fmt == "upstream" ? stderr : o, "input",
+                            traceq::stop_reason_name(static_cast<traceq::StopReason>(f.stop_reason)));
     }
     if (out != "-") fclose(o);
     fprintf(stderr, "%llu lines\n", (unsigned long long)n);

@@ -1,5 +1,5 @@
 #pragma once
-// GtbRecorder: the .gtb writer used by `gt import`.
+// GtbRecorder: the .gtb writer used by `traceq import`.
 //
 //   [META chunk]   site arena (static instruction table + precompiled plans)
 //   [EVENTS chunk]* varint event stream:
@@ -24,7 +24,7 @@
 //       RET   x0 delta
 //   [FOOTER chunk] stop reason + counters + u8 CRLF flag
 //
-// `gt import` grows the arena while parsing, so it writes EVENTS first and META
+// `traceq import` grows the arena while parsing, so it writes EVENTS first and META
 // just before the FOOTER. The loader accepts chunks in any order.
 //
 // Integer register history is delta-encoded. RDVAL/SIMDV retain values that
@@ -36,7 +36,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace gt {
+namespace traceq {
 
 enum StopReason : uint8_t {
     STOP_NONE = 0,
@@ -129,4 +129,4 @@ private:
     bool crlf_ = false;
 };
 
-} // namespace gt
+} // namespace traceq

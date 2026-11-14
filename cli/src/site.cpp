@@ -2,7 +2,7 @@
 #include <traceq/varint.h>
 #include <cstring>
 
-namespace gt {
+namespace traceq {
 
 size_t legacy_hex64(char* p, uint64_t v) {
     // matches Utils::append_uint64_hex: 0 -> "0", otherwise trimmed hex
@@ -36,7 +36,7 @@ int32_t SiteArena::intern_string(const std::string& s) {
 }
 
 // ---------------------------------------------------------------------------
-// text-built sites (gt import)
+// text-built sites (traceq import)
 // ---------------------------------------------------------------------------
 int text_name_ctx(const char* s, size_t n, int* simd_idx) {
     *simd_idx = -1;
@@ -412,7 +412,9 @@ uint32_t SiteArena::intern_text(uint64_t addr, const char* prefix, size_t prefix
         if (tops[i].kind != OP_MEM_R && tops[i].kind != OP_MEM_W) {
             int simd = -1;
             int ctx = text_name_ctx(tops[i].name, tops[i].name_len, &simd);
-            if (ctx < 0 && simd < 0) return 0xFFFFFFFFu;
+            bool zero = tops[i].name_len == 3 &&
+                (!memcmp(tops[i].name,"xzr",3) || !memcmp(tops[i].name,"wzr",3));
+            if (ctx < 0 && simd < 0 && !zero) return 0xFFFFFFFFu;
             p.ctx_idx = int8_t(ctx);
         }
     }
@@ -596,4 +598,4 @@ bool SiteArena::deserialize(const uint8_t* p, size_t len, SiteArena& out) {
     return o == len;
 }
 
-} // namespace gt
+} // namespace traceq

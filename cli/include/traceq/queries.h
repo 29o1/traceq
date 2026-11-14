@@ -15,7 +15,7 @@
 #include <vector>
 
 struct QueryWindow {
-    int limit = gt::DEFAULT_OUTPUT_ROWS;
+    int limit = traceq::DEFAULT_OUTPUT_ROWS;
     uint64_t offset = 0;
     uint64_t from_ev = 0;
     uint64_t to_ev = UINT64_MAX;
@@ -39,7 +39,7 @@ struct TaintOptions {
     int seed_q = -1;
     bool seed_nzcv = false;
     bool backward = false;
-    int limit = gt::DEFAULT_OUTPUT_ROWS;
+    int limit = traceq::DEFAULT_OUTPUT_ROWS;
     uint64_t window = 0;
     std::optional<uint64_t> at_ev;
     std::optional<uint64_t> off;

@@ -1,7 +1,7 @@
 #pragma once
-// Internal dual-mode (text / JSON) output plumbing for the gt CLI.
+// Internal dual-mode (text / JSON) output plumbing for the traceq CLI.
 //
-// The consumer of `gt` is an agent with a bounded context window, so every
+// The consumer of `traceq` is an agent with a bounded context window, so every
 // bounded query returns one standard JSON document with `data` and `meta`;
 // text mode keeps the
 // "... [N more rows truncated]" marker plus "next:" (copy-executable
@@ -21,7 +21,7 @@
 #include <vector>
 #include <traceq/ingest.h>
 
-namespace gt {
+namespace traceq {
 namespace emit {
 
 // JSON string escaping (RFC 8259): quotes, backslash, control characters.
@@ -233,4 +233,4 @@ inline void finish_jsonl(const Meta& m, FILE* out) {
 }
 
 } // namespace emit
-} // namespace gt
+} // namespace traceq

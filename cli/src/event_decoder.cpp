@@ -5,7 +5,7 @@
 #include <traceq/site.h>
 #include <cstring>
 
-namespace gt {
+namespace traceq {
 
 bool EventCursor::take_u8(uint8_t& out) {
     if (off_ >= len_) return false;
@@ -139,4 +139,4 @@ size_t EventCursor::next_batch(RawEvent* out, size_t capacity) {
     return count;
 }
 
-} // namespace gt
+} // namespace traceq

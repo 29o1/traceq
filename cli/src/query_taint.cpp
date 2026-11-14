@@ -11,7 +11,7 @@
 #include <unordered_set>
 #include <vector>
 
-using namespace gt;
+using namespace traceq;
 
 // ---------------------------------------------------------------------------
 // taint (gtb-based stream walk)
@@ -583,7 +583,7 @@ int q_taint(const std::string& gtb, const TaintOptions& options) {
         return s.empty() ? " (none)" : s;
     };
     auto taint_cmd = [&](int new_limit) -> std::string {
-        std::string s = "gt taint";
+        std::string s = "traceq taint";
         if (options.seed_addr)
             s += " --seed-addr " + emit::hex64(*options.seed_addr);
         if (options.seed_reg >= 0)

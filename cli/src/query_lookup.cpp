@@ -15,7 +15,7 @@
 #include <unordered_set>
 #include <vector>
 
-using namespace gt;
+using namespace traceq;
 
 int q_stat(const std::string& gtb, bool json) {
     GtbFile f;
@@ -35,7 +35,7 @@ int q_stat(const std::string& gtb, bool json) {
         for (size_t i = 0; i < count; i++) {
             const RawEvent& event = batch[i];
             switch (event.tag) {
-            case gt::format::EV_EXEC: {
+            case traceq::format::EV_EXEC: {
                 n_exec++;
                 if (event.site_id >= f.arena.sites().size()) break;
                 const Site& s = f.arena.get(event.site_id);
@@ -56,14 +56,14 @@ int q_stat(const std::string& gtb, bool json) {
                 }
                 break;
             }
-            case gt::format::EV_REGW: n_regw++; break;
-            case gt::format::EV_MEM:
-            case gt::format::EV_MEMW_NV: n_mem++; break;
-            case gt::format::EV_CALL: n_call++; break;
-            case gt::format::EV_RET: n_ret++; break;
-            case gt::format::EV_RDVAL: n_rdval++; break;
-            case gt::format::EV_SIMDV: n_simdv++; break;
-            case gt::format::EV_VERBATIM: n_verbatim++; break;
+            case traceq::format::EV_REGW: n_regw++; break;
+            case traceq::format::EV_MEM:
+            case traceq::format::EV_MEMW_NV: n_mem++; break;
+            case traceq::format::EV_CALL: n_call++; break;
+            case traceq::format::EV_RET: n_ret++; break;
+            case traceq::format::EV_RDVAL: n_rdval++; break;
+            case traceq::format::EV_SIMDV: n_simdv++; break;
+            case traceq::format::EV_VERBATIM: n_verbatim++; break;
             default: break;
             }
         }
@@ -333,7 +333,7 @@ int q_mem_accesses(const std::string& gtb, const MemAccessOptions& options) {
     meta.truncated = last > 0 ? shown < total
                               : offset < total && shown < total - offset;
     if (meta.truncated && last <= 0) {
-        std::string next = "gt mem-access";
+        std::string next = "traceq mem-access";
         if (use_range)
             next += " --range " + emit::hex64(range_base) + ',' +
                     emit::hex64(range_len);
@@ -735,7 +735,7 @@ int q_find_pcs(const std::string& gtb, const FindPcOptions& options) {
     meta.shown = shown;
     meta.truncated = last > 0 ? shown < total : offset + shown < total;
     if (meta.truncated && last <= 0) {
-        std::string next = "gt find-pc";
+        std::string next = "traceq find-pc";
         for (uint64_t addr : addrs) next += " --addr " + emit::hex64(addr);
         for (uint64_t off : offs) next += " --off " + emit::hex64(off);
         if (!mod.empty()) next += " --mod " + shell_arg(mod);
@@ -992,8 +992,8 @@ int q_find_value(const std::string& gtb, const FindValueOptions& options) {
     }
     if (meta.truncated && last <= 0) {
         bool batched = values.size() > 1;
-        std::string next = batched ? "gt find-value " + shell_arg(gtb)
-                                   : "gt find-value " + emit::hex64(values[0]);
+        std::string next = batched ? "traceq find-value " + shell_arg(gtb)
+                                   : "traceq find-value " + emit::hex64(values[0]);
         if (batched)
             for (uint64_t value : values)
                 next += " --value " + emit::hex64(value);

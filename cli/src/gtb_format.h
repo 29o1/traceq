@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace gt::format {
+namespace traceq::format {
 
 inline constexpr uint32_t CHUNK_MAGIC = 0x47544348u; // "GTCH"
 inline constexpr uint32_t GTB_MAGIC = 0x47544232u;   // "GTB2"
@@ -29,4 +29,4 @@ enum EventTag : uint8_t {
     EV_VERBATIM = 9,
 };
 
-} // namespace gt::format
+} // namespace traceq::format

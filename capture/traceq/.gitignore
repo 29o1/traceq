@@ -1,0 +1,6 @@
+build_ios
+build_android
+.DS_Store
+.idea
+src/taint/build/
+__pycache__

@@ -1,0 +1,182 @@
+{
+  "imported_on": "2026-11-14",
+  "source_repository": "https://github.com/29o1/GumTrace",
+  "upstream_repository": "https://github.com/lidongyooo/GumTrace",
+  "source_commit": "14365e141cae354429743f592554d6f63e782261",
+  "includes_local_write_stream_changes": true,
+  "copied_files": [
+    {
+      "path": "WRITE_STREAM_EXPERIMENT.md",
+      "sha256": "5a503361db8559198d6d34b62a76a6eee80f1c40289d8591b1d0537e2b3e0c6d",
+      "bytes": 2236
+    },
+    {
+      "path": "src/WriteStream.cpp",
+      "sha256": "0853fdc76e8d2de0c7ce399afba915caba7f7143c9a83ae22ad29937b15bd7e7",
+      "bytes": 9452
+    },
+    {
+      "path": "src/WriteStream.h",
+      "sha256": "dfb6f2b83997886ae3a298206c2512d3cb3bd9b4fb7d27ddd294223129934ebc",
+      "bytes": 540
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "b892823515159605ec88a3689f534de5af2fecf7a8a121bfdc6f93c1d45f0183",
+      "bytes": 69
+    },
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "c2e722c33d1605769648432f745d6fcda6b7a147bd79d562a8f69f576e146ab9",
+      "bytes": 3380
+    },
+    {
+      "path": "README.md",
+      "sha256": "3306b2f0bda3efdcbf4992f5a815e39d60459920c6dac52435d0b970aee88e72",
+      "bytes": 9138
+    },
+    {
+      "path": "build_android.sh",
+      "sha256": "c997b5c097392d8c8460529152409ee873a5b1fb9cf23b610af25e16b7703845",
+      "bytes": 676
+    },
+    {
+      "path": "build_ios.sh",
+      "sha256": "666a70b5bf1881bf063960856fe9971050f7809c396653b0539cccd01f346945",
+      "bytes": 539
+    },
+    {
+      "path": "example.js",
+      "sha256": "06bd252b240d7561423a73db9594761286c5167a1cc08a028e6a6d3e25f4d6ee",
+      "bytes": 2539
+    },
+    {
+      "path": "example_ios.js",
+      "sha256": "3758ed94a7b036a65a050a82078387fbb1e7c445088539d904f7677f78ba2bf9",
+      "bytes": 2379
+    },
+    {
+      "path": "libs/FridaGum-Android-17.8.3-fix.a",
+      "sha256": "8c5c8f7f1f74e4265f9d4bd3543a9d5427ccb14ef47c0cc767e8ada4a573368a",
+      "bytes": 76915842
+    },
+    {
+      "path": "libs/FridaGum-Android-17.8.3.h",
+      "sha256": "dd8b1e47135c250da285065bff8a7fab88cc7d77f9021e57451a0f9110e322cd",
+      "bytes": 2069797
+    },
+    {
+      "path": "libs/FridaGum-IOS-17.8.3-fix.a",
+      "sha256": "c04d3833efe194d21630ccfe6f094e02fd03280f00b760ebb2ce9627109d2e55",
+      "bytes": 39394792
+    },
+    {
+      "path": "libs/FridaGum-IOS-17.8.3.h",
+      "sha256": "6f031db76547fac1da869f3570c1ffba8c0d08895540968f1f9546d1eb453476",
+      "bytes": 1765669
+    },
+    {
+      "path": "src/CallbackContext.cpp",
+      "sha256": "c5a2fa79f0c6f39bd5df989b5fac712806674291dde49329e1b4b06a4437ff55",
+      "bytes": 748
+    },
+    {
+      "path": "src/CallbackContext.h",
+      "sha256": "ee7652f6ca2f6a847b2654bf1a590fde41950859812fd28d54b3b69d8afe1c76",
+      "bytes": 578
+    },
+    {
+      "path": "src/FuncPrinter.cpp",
+      "sha256": "ff58c4587446678cc369759b9292267721234161eec93f543ab0bbc9564d8c9e",
+      "bytes": 33889
+    },
+    {
+      "path": "src/FuncPrinter.h",
+      "sha256": "5272967e60bba98843b08d516520f38aec1d57fb4cf1e11d5cb58e22c0ebe957",
+      "bytes": 5478
+    },
+    {
+      "path": "src/GumTrace.cpp",
+      "sha256": "d078aa012c97f9b46e4c935460abe0b924e26a81febefc300da0dd4f070915c3",
+      "bytes": 14214
+    },
+    {
+      "path": "src/GumTrace.h",
+      "sha256": "12ab05dd391ee49eff0dbc617028d61984f53b0d26c7e8365084e730be8d367f",
+      "bytes": 2890
+    },
+    {
+      "path": "src/Utils.cpp",
+      "sha256": "e9beb1656b305a586559d0c78cb54f303400f02e4d8aabfa5d7a5b7269a00ebf",
+      "bytes": 22897
+    },
+    {
+      "path": "src/Utils.h",
+      "sha256": "7c6ee165e2c0819f66b445a930ed6480723ee8132c2672005a29d7f1c316e519",
+      "bytes": 4211
+    },
+    {
+      "path": "src/main.cpp",
+      "sha256": "8fb7536f68a4e97277fc506baa4c2368baf514c3ff43547f56cba28e6bc718af",
+      "bytes": 5565
+    },
+    {
+      "path": "src/platform.h",
+      "sha256": "b281dd87c79c834fabb9de0f5b4e87e982c4b137aed4021d967c169936199f7c",
+      "bytes": 345
+    },
+    {
+      "path": "src/taint/CMakeLists.txt",
+      "sha256": "d4b583069dea63abe830a9db2b39931059befd81c002307e3e0519cdb71f2f71",
+      "bytes": 213
+    },
+    {
+      "path": "src/taint/TaintEngine.cpp",
+      "sha256": "79225a7bbdc9b31ed54e19508582de00b0a50302c0cc0abf845431d2c65ac7f1",
+      "bytes": 15125
+    },
+    {
+      "path": "src/taint/TaintEngine.h",
+      "sha256": "79e0a4c33fd1f857d46108b2faf68a476a99d003e0fb2b0574e403a6d8e28d77",
+      "bytes": 2449
+    },
+    {
+      "path": "src/taint/TaintTracker.1sc",
+      "sha256": "d2653bf6e14725bce672fab14fbdb94835d0548d0bfd203c57638388a3fa31c7",
+      "bytes": 5115
+    },
+    {
+      "path": "src/taint/TraceParser.cpp",
+      "sha256": "e26f47e6e0763eb4f390126c846d4e0e779488f97547e3ba000c657803bbc474",
+      "bytes": 33311
+    },
+    {
+      "path": "src/taint/TraceParser.h",
+      "sha256": "819b5d4640f3ac90faa14ac0085aa167875c2f141bcf5db43c8157a8fdcccd5d",
+      "bytes": 5005
+    },
+    {
+      "path": "src/taint/build.sh",
+      "sha256": "24026e24486611192b83102371a8b2be191b8b453d9ba3aecaa5c8b796f54483",
+      "bytes": 43
+    },
+    {
+      "path": "src/taint/main.cpp",
+      "sha256": "00c630376bbea8bf2a60be67ad4104a15ac68c8e540c71ebf3709cddb804c1fe",
+      "bytes": 7380
+    }
+  ],
+  "omitted_from_copy": [
+    ".github/workflows/ci.yml",
+    "src/.DS_Store",
+    "src/taint/.DS_Store",
+    "src/taint/result.log"
+  ],
+  "note": "Original directory retained. Hashes describe files at import, before integration-only build/doc edits. Binary archives are local dependencies, ignored by the parent repository.",
+  "current_directory": "capture/traceq",
+  "renamed_files": {
+    "src/GumTrace.cpp": "src/TraceqCapture.cpp",
+    "src/GumTrace.h": "src/TraceqCapture.h",
+    "README.md": "UPSTREAM_README.md"
+  }
+}

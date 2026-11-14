@@ -1,0 +1,17 @@
+{
+  "source_repository": "https://github.com/29o1/GumTrace",
+  "commit": "14365e141cae354429743f592554d6f63e782261",
+  "destination": "capture/traceq",
+  "artifacts": [
+    {
+      "path": "libs/FridaGum-Android-17.8.3-fix.a",
+      "sha256": "8c5c8f7f1f74e4265f9d4bd3543a9d5427ccb14ef47c0cc767e8ada4a573368a",
+      "bytes": 76915842
+    },
+    {
+      "path": "libs/FridaGum-IOS-17.8.3-fix.a",
+      "sha256": "c04d3833efe194d21630ccfe6f094e02fd03280f00b760ebb2ce9627109d2e55",
+      "bytes": 39394792
+    }
+  ]
+}

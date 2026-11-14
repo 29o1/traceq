@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace gt {
+namespace traceq {
 
 uint64_t export_upstream(const GtbFile& file, FILE* out, uint64_t from_idx,
                          uint64_t to_idx, uint64_t max_lines,
@@ -344,4 +344,4 @@ bool render_context(const GtbFile& file, uint64_t ev, uint64_t span,
     return true;
 }
 
-} // namespace gt
+} // namespace traceq

@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <vector>
 
-using namespace gt;
+using namespace traceq;
 
 int q_calls(const std::string& gtb, const CallsOptions& options) {
     if (!options.valid() || options.top < 0 ||
@@ -322,7 +322,7 @@ int q_calls(const std::string& gtb, const CallsOptions& options) {
         meta.truncated = options.last > 0 ? meta.shown < meta.total
                                          : options.offset + meta.shown < meta.total;
         if (meta.truncated && options.last <= 0) {
-            std::string next = "gt calls";
+            std::string next = "traceq calls";
             for (const auto& name : names) next += " --name " + shell_arg(name);
             for (uint64_t target : target_addrs)
                 next += " --target-addr " + emit::hex64(target);
@@ -440,7 +440,7 @@ int q_calltree_gtb(const std::string& gtb, const std::string& func, int depth,
     meta.shown = shown;
     meta.truncated = would_print > shown;
     if (meta.truncated) {
-        std::string next = "gt calltree";
+        std::string next = "traceq calltree";
         if (!global) next += " --func " + shell_arg(func);
         next += " --depth " + std::to_string(depth);
         next += " --limit " + std::to_string(limit * 5);

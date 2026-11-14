@@ -27,16 +27,16 @@ inline int scan_error(const std::string& path,
 // Load with a path-qualified diagnostic: "load failed: <path>: <reason>".
 // Agents wasted multiple retries on the old bare "load failed" when the real
 // cause was a cwd-relative path or a non-GTB2 file.
-inline bool load_query_file(gt::GtbFile& file, const std::string& path) {
+inline bool load_query_file(traceq::GtbFile& file, const std::string& path) {
     std::string reason;
     if (file.load(path, &reason)) return true;
     fprintf(stderr, "load failed: %s: %s\n", path.c_str(), reason.c_str());
     return false;
 }
 
-inline std::string query_at(const gt::GtbFile& file, uint32_t site_id) {
+inline std::string query_at(const traceq::GtbFile& file, uint32_t site_id) {
     if (site_id == UINT32_MAX) return "<event>";
-    const gt::Site& site = file.arena.get(site_id);
+    const traceq::Site& site = file.arena.get(site_id);
     char location[320];
     if (site.module_id < file.arena.modules().size())
         snprintf(location, sizeof location, "%s!0x%llx",

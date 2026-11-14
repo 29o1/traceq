@@ -1,0 +1,54 @@
+{
+  "source": "trace-tool-lab, round3",
+  "files": [
+    {
+      "original": "round3/host.mm",
+      "path": "capture_host.mm",
+      "original_sha256": "fe7fa89bf8319b5b958047321ce27cba213ff0838b3832525e58ef620e3843d5",
+      "imported_sha256": "fe7fa89bf8319b5b958047321ce27cba213ff0838b3832525e58ef620e3843d5",
+      "adaptation": "unchanged"
+    },
+    {
+      "original": "fixtures/targets.S",
+      "path": "fixtures/targets.S",
+      "original_sha256": "12a445ffb2b346eee2542dc320e51859f2a69e86d67773a4f1c3b0c280a2c8ad",
+      "imported_sha256": "12a445ffb2b346eee2542dc320e51859f2a69e86d67773a4f1c3b0c280a2c8ad",
+      "adaptation": "unchanged"
+    },
+    {
+      "original": "round2/extra_targets.S",
+      "path": "fixtures/extra_targets.S",
+      "original_sha256": "53eab7de25b9db53f75c7651fe5876fd1d4bbd5177520e1181b9bf8e86cec07f",
+      "imported_sha256": "53eab7de25b9db53f75c7651fe5876fd1d4bbd5177520e1181b9bf8e86cec07f",
+      "adaptation": "unchanged"
+    },
+    {
+      "original": "round3/targets.S",
+      "path": "fixtures/write_targets.S",
+      "original_sha256": "544f3681b8631fbd98817291710b3b0828b696d4896b1da1db1f463cd2d4b729",
+      "imported_sha256": "544f3681b8631fbd98817291710b3b0828b696d4896b1da1db1f463cd2d4b729",
+      "adaptation": "unchanged"
+    },
+    {
+      "original": "cases.py",
+      "path": "fixtures/base_expectations.py",
+      "original_sha256": "bb0bd712c6dc30640e6c96a2343d9826187dfb929d1c78a75e6f2a376485497d",
+      "imported_sha256": "bb0bd712c6dc30640e6c96a2343d9826187dfb929d1c78a75e6f2a376485497d",
+      "adaptation": "unchanged"
+    },
+    {
+      "original": "round2/cases_extended.py",
+      "path": "fixtures/extended_expectations.py",
+      "original_sha256": "66c29d10a3dedac5db751f689da7e079b7855af1d55417a652d6ab93dd147e2f",
+      "imported_sha256": "d51d29d4af6583d39938ef63d05a3ad7ccb900b7971e632782e2380d9015911f",
+      "adaptation": "local import module name only"
+    },
+    {
+      "original": "round3/cases.py",
+      "path": "fixtures/expectations.py",
+      "original_sha256": "2b4c5c97d84a35b96f5095f753b3b5e629f417f694914749741213e702824900",
+      "imported_sha256": "7b4a50e6bcc7302cbf568d304b276376f55abd166ede5ed4b0b5e1984b01fb88",
+      "adaptation": "local import module name only"
+    }
+  ]
+}

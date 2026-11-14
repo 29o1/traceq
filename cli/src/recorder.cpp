@@ -6,7 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-namespace gt {
+namespace traceq {
 
 static constexpr size_t EVENT_CHUNK_SIZE = 256 * 1024;
 
@@ -283,4 +283,4 @@ void GtbRecorder::imp_verbatim(const void* p, size_t n) {
     stats_.events_recorded++;
 }
 
-} // namespace gt
+} // namespace traceq
