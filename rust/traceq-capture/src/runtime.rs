@@ -152,28 +152,23 @@ fn gap(s: &mut Session, seq: u64, pc: u64, reason: u64) {
     s.known.fill(false);
     s.complete = false;
 }
-pub fn emit(e: Event) {
-    let p = owner_ptr();
-    if !p.is_null() {
-        unsafe {
-            emit_to(&mut *p, e);
-        }
-    }
-}
-fn fragments(kind: Kind, pc: u64, address: u64, bytes: &[u8]) {
+fn fragments(s: &mut Session, kind: Kind, pc: u64, address: u64, bytes: &[u8]) {
     for (i, b) in bytes.chunks(24).enumerate() {
         let mut words = [0; 24];
         words[..b.len()].copy_from_slice(b);
-        emit(event(
-            kind,
-            (i * 24) as u64,
-            pc,
-            address,
-            b.len() as u64,
-            u64::from_le_bytes(words[..8].try_into().unwrap()),
-            u64::from_le_bytes(words[8..16].try_into().unwrap()),
-            u64::from_le_bytes(words[16..].try_into().unwrap()),
-        ));
+        emit_to(
+            s,
+            event(
+                kind,
+                (i * 24) as u64,
+                pc,
+                address,
+                b.len() as u64,
+                u64::from_le_bytes(words[..8].try_into().unwrap()),
+                u64::from_le_bytes(words[8..16].try_into().unwrap()),
+                u64::from_le_bytes(words[16..].try_into().unwrap()),
+            ),
+        );
     }
 }
 pub fn emit_site(ins: &gum::Insn) {
@@ -181,7 +176,8 @@ pub fn emit_site(ins: &gum::Insn) {
     if p.is_null() {
         return;
     }
-    if unsafe { (*p).sites.insert(ins.address) } {
+    let s = unsafe { &mut *p };
+    if s.sites.insert(ins.address) {
         let mut text = [0u8; 193]; // 32-byte mnemonic, space, 160-byte operands.
         let mnemonic_len = ins
             .mnemonic
@@ -198,6 +194,7 @@ pub fn emit_site(ins: &gum::Insn) {
         let len = mnemonic_len + 1 + operands_len;
         text[mnemonic_len + 1..len].copy_from_slice(&ins.op_str[..operands_len]);
         fragments(
+            s,
             Kind::Site,
             ins.address,
             u32::from_le_bytes(ins.bytes[..4].try_into().unwrap()) as u64,
@@ -205,20 +202,27 @@ pub fn emit_site(ins: &gum::Insn) {
         );
     }
 }
-unsafe extern "C" fn record_module(module: *mut gum::Module, _: *mut core::ffi::c_void) -> i32 {
-    crate::ffi_guard(|| unsafe {
+unsafe extern "C" fn record_module(module: *mut gum::Module, data: *mut core::ffi::c_void) -> i32 {
+    // Enumeration is synchronous and the unpublished Session stays live.
+    let s = unsafe { &mut *data.cast::<Session>() };
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         let r = &*gum::gum_module_get_range(module);
         let name = gum::gum_module_get_name(module);
         if !name.is_null() {
             fragments(
+                s,
                 Kind::Module,
                 r.base_address,
                 r.size as u64,
                 std::ffi::CStr::from_ptr(name).to_bytes(),
             );
         }
-    });
-    1
+    }))
+    .is_err()
+    {
+        s.failed = true;
+    }
+    i32::from(!s.failed)
 }
 pub fn begin(path: &Path, header: Header, observation: u32, mode: Mode, external: bool) -> bool {
     begin_scoped(
@@ -269,7 +273,7 @@ pub fn begin_scoped(
     let Ok(storage) = Storage::open(path, header, mode) else {
         return false;
     };
-    let s = Box::new(Session {
+    let mut s = Box::new(Session {
         header,
         code_scope,
         observation,
@@ -289,44 +293,60 @@ pub fn begin_scoped(
         exit_seq: 0,
         exit_pc: 0,
     });
+    if header.profile == 2 {
+        let count = s.code_scope.ranges().len();
+        let explicit = count > 1;
+        emit_to(
+            &mut s,
+            event(
+                Kind::Features,
+                0,
+                0,
+                if explicit { 3 } else { 1 },
+                if explicit { count as u64 } else { 0 },
+                external as u64,
+                0,
+                0,
+            ),
+        );
+        if explicit {
+            for index in 0..count {
+                let range = s.code_scope.ranges()[index];
+                emit_to(
+                    &mut s,
+                    event(
+                        Kind::CodeRange,
+                        index as u64,
+                        range.base,
+                        range.size,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ),
+                );
+            }
+        }
+        if !s.failed {
+            unsafe {
+                gum::gum_process_enumerate_modules(
+                    Some(record_module),
+                    (&mut *s as *mut Session).cast(),
+                );
+            }
+        }
+    }
+    if s.failed {
+        return false;
+    }
+    // Publish only after metadata succeeds. A failed begin frees the session
+    // and reservation without requiring a matching end from the caller.
     let p = Box::into_raw(s);
     OWNER.with(|v| v.set(p));
     FOREIGN.store(false, Ordering::Relaxed);
     ACTIVE.store(p, Ordering::Release);
     reservation.0 = false;
-    if header.profile == 2 {
-        let count = unsafe { (*p).code_scope.ranges().len() };
-        let explicit = count > 1;
-        emit(event(
-            Kind::Features,
-            0,
-            0,
-            if explicit { 3 } else { 1 },
-            if explicit { count as u64 } else { 0 },
-            external as u64,
-            0,
-            0,
-        ));
-        if explicit {
-            for index in 0..count {
-                let range = unsafe { (*p).code_scope.ranges()[index] };
-                emit(event(
-                    Kind::CodeRange,
-                    index as u64,
-                    range.base,
-                    range.size,
-                    0,
-                    0,
-                    0,
-                    0,
-                ));
-            }
-        }
-        unsafe {
-            gum::gum_process_enumerate_modules(Some(record_module), ptr::null_mut());
-        }
-    }
-    !unsafe { (*p).failed }
+    true
 }
 pub fn end() -> Option<(bool, Summary)> {
     let p = owner_ptr();

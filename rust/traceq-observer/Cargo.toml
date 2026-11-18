@@ -7,4 +7,3 @@ publish = false
 
 [lib]
 crate-type = ["rlib", "staticlib"]
-

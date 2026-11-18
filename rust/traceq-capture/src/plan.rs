@@ -174,11 +174,9 @@ fn scalar_computation(id: u32, a: &Arm64) -> bool {
         return false;
     }
     let ops = &a.operands;
-    let count = a.op_count;
     if id == ARM64_INS_SDIV {
         let width = gpr_width(ops[0].reg());
-        return count == 3
-            && width != 0
+        return width != 0
             && ops[..3].iter().all(|op| {
                 op.kind == ARM64_OP_REG
                     && gpr_width(op.reg()) == width
@@ -193,7 +191,7 @@ fn scalar_computation(id: u32, a: &Arm64) -> bool {
     }
     match id {
         ARM64_INS_FADD | ARM64_INS_FMUL | ARM64_INS_FDIV => {
-            count == 3 && ops[1..3].iter().all(|op| scalar_fp_width(op) == width)
+            ops[1..3].iter().all(|op| scalar_fp_width(op) == width)
         }
         ARM64_INS_FCSEL => {
             (ARM64_CC_EQ..=ARM64_CC_NV).contains(&a.cc)
@@ -202,22 +200,20 @@ fn scalar_computation(id: u32, a: &Arm64) -> bool {
                 && ops[1..3].iter().all(|op| scalar_fp_width(op) == width)
         }
         ARM64_INS_FCMP => {
-            count == 2
-                && (scalar_fp_width(&ops[1]) == width
-                    || ops[1].kind == ARM64_OP_FP
-                        && ops[1].fp().to_bits() == 0
-                        && ops[1].vas == ARM64_VAS_INVALID
-                        && ops[1].vector_index == -1
-                        && plain(&ops[1]))
+            scalar_fp_width(&ops[1]) == width
+                || ops[1].kind == ARM64_OP_FP
+                    && ops[1].fp().to_bits() == 0
+                    && ops[1].vas == ARM64_VAS_INVALID
+                    && ops[1].vector_index == -1
+                    && plain(&ops[1])
         }
         ARM64_INS_SCVTF => {
-            count == 2
-                && (scalar_fp_width(&ops[1]) == width
-                    || ops[1].kind == ARM64_OP_REG
-                        && gpr_width(ops[1].reg()) != 0
-                        && ops[1].vas == ARM64_VAS_INVALID
-                        && ops[1].vector_index == -1
-                        && plain(&ops[1]))
+            scalar_fp_width(&ops[1]) == width
+                || ops[1].kind == ARM64_OP_REG
+                    && gpr_width(ops[1].reg()) != 0
+                    && ops[1].vas == ARM64_VAS_INVALID
+                    && ops[1].vector_index == -1
+                    && plain(&ops[1])
         }
         _ => false,
     }

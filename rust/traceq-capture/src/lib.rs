@@ -122,6 +122,39 @@ impl Drop for Engine {
         }
     }
 }
+
+unsafe fn select_scope(
+    module: *const c_char,
+    address: u64,
+    extra: &[CodeRange],
+) -> Result<CodeScope, i32> {
+    let selected = unsafe {
+        if !module.is_null() {
+            gum::gum_process_find_module_by_name(module)
+        } else {
+            gum::gum_process_find_module_by_address(address)
+        }
+    };
+    if selected.is_null() {
+        return Err(-2);
+    }
+    let range = unsafe { *gum::gum_module_get_range(selected) };
+    unsafe {
+        gum::g_object_unref(selected.cast());
+    }
+    if address != 0 && !plan::contains(range.base_address, range.size as u64, address, 1) {
+        return Err(-2);
+    }
+    CodeScope::new(
+        CodeRange {
+            base: range.base_address,
+            size: range.size as u64,
+        },
+        extra,
+    )
+    .ok_or(-1)
+}
+
 #[allow(clippy::too_many_arguments)]
 unsafe fn invoke_impl(
     path: *const c_char,
@@ -134,10 +167,12 @@ unsafe fn invoke_impl(
     extra: &[CodeRange],
 ) -> i32 {
     let started = std::time::Instant::now();
+    let Some(invoke) = invoke else {
+        return -1;
+    };
     if report.is_null()
         || !(report as usize).is_multiple_of(std::mem::align_of::<InvokeReport>())
         || (module.is_null() && address == 0)
-        || invoke.is_none()
         || observation > 3
         || (observation != 0 && path.is_null())
     {
@@ -153,44 +188,27 @@ unsafe fn invoke_impl(
     if runtime::active() {
         return -7;
     }
-    let report = unsafe { &mut *report };
-    *report = InvokeReport {
-        version: 1,
-        ..Default::default()
-    };
     unsafe {
         gum::gum_init();
     }
-    let selected = unsafe {
-        if !module.is_null() {
-            gum::gum_process_find_module_by_name(module)
-        } else {
-            gum::gum_process_find_module_by_address(address)
-        }
-    };
-    if selected.is_null() {
-        return -2;
-    }
-    let range = unsafe { *gum::gum_module_get_range(selected) };
+    let scope = unsafe { select_scope(module, address, extra) };
     unsafe {
-        gum::g_object_unref(selected.cast());
+        report.write(InvokeReport {
+            version: 1,
+            ..Default::default()
+        });
     }
-    if address != 0 && !plan::contains(range.base_address, range.size as u64, address, 1) {
-        return -2;
-    }
-    let Some(scope) = CodeScope::new(
-        CodeRange {
-            base: range.base_address,
-            size: range.size as u64,
-        },
-        extra,
-    ) else {
-        return -1;
+    let scope = match scope {
+        Ok(scope) => scope,
+        Err(status) => return status,
     };
     let (code_base, code_size) = scope.envelope();
-    report.code_base = code_base;
-    report.code_size = code_size;
-    report.thread_id = unsafe { gum::gum_process_get_current_thread_id() };
+    let thread_id = unsafe { gum::gum_process_get_current_thread_id() };
+    unsafe {
+        (*report).code_base = code_base;
+        (*report).code_size = code_size;
+        (*report).thread_id = thread_id;
+    }
     let mut engine = if observation != 0 {
         let Some(e) = (unsafe { Engine::new() }) else {
             return -4;
@@ -211,7 +229,7 @@ unsafe fn invoke_impl(
             code_size,
             data_base: 0,
             data_size: u64::MAX,
-            thread_id: report.thread_id,
+            thread_id,
             profile: 2,
         };
         if !runtime::begin_scoped(path, h, observation - 1, Mode::Chunked, true, scope) {
@@ -226,7 +244,7 @@ unsafe fn invoke_impl(
     }
     let entered = started.elapsed();
     unsafe {
-        invoke.unwrap()(context);
+        invoke(context);
     }
     let returned = started.elapsed();
     if let Some(e) = engine.as_mut() {
@@ -235,6 +253,9 @@ unsafe fn invoke_impl(
         }
     }
     let stopped = started.elapsed();
+    // The caller may refer to the report through its opaque callback context.
+    // Do not hold a Rust mutable borrow of that memory through the callback.
+    let report = unsafe { &mut *report };
     let mut ok = true;
     if observation != 0 {
         let Some((completed, n)) = runtime::end() else {

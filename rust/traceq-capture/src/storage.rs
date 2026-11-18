@@ -28,19 +28,7 @@ impl Storage {
             .create_new(true)
             .mode(0o600)
             .open(path)?;
-        let mut out = Self {
-            file: Some(BufWriter::with_capacity(65536, file)),
-            events: Vec::with_capacity(if mode == Mode::Flat { 0 } else { MAX_RECORDS }),
-            bytes: vec![
-                0;
-                if mode == Mode::Flat {
-                    0
-                } else {
-                    MAX_RECORDS * 64
-                }
-            ],
-            mode,
-        };
+        let mut writer = BufWriter::with_capacity(65536, file);
         let mut b = [0; 64];
         b[..8].copy_from_slice(if mode == Mode::Chunked {
             wire::CHUNK_MAGIC
@@ -58,36 +46,42 @@ impl Storage {
         ]) {
             dst.copy_from_slice(&v.to_le_bytes());
         }
-        out.writer()?.write_all(&b)?;
-        Ok(out)
-    }
-    fn writer(&mut self) -> io::Result<&mut BufWriter<File>> {
-        self.file
-            .as_mut()
-            .ok_or_else(|| io::Error::other("closed capture"))
+        writer.write_all(&b)?;
+        let records = if mode == Mode::Flat { 0 } else { MAX_RECORDS };
+        Ok(Self {
+            file: Some(writer),
+            events: Vec::with_capacity(records),
+            bytes: vec![0; records * 64],
+            mode,
+        })
     }
     #[inline]
     pub fn append(&mut self, e: Event) -> io::Result<()> {
-        if self.file.is_none() {
+        let Some(writer) = &mut self.file else {
             return Err(io::Error::other("closed capture"));
-        }
-        // A failed full-block write leaves the original records in place.
-        // Retrying must never grow the event allocation beyond its fixed bound.
-        if self.events.len() == MAX_RECORDS {
-            self.flush_block()?;
-        }
-        if self.mode == Mode::Flat {
+        };
+        let result = if self.mode == Mode::Flat {
             let mut b = [0; 64];
             for (dst, v) in b.chunks_exact_mut(8).zip(e.words()) {
                 dst.copy_from_slice(&v.to_le_bytes());
             }
-            return self.writer()?.write_all(&b);
+            writer.write_all(&b)
+        } else {
+            self.events.push(e);
+            if self.events.len() < MAX_RECORDS {
+                return Ok(());
+            }
+            self.flush_block()
+        };
+        if result.is_err() {
+            // A partial write may already be on disk. Discard the pending
+            // block and close without a second write from finish or Drop.
+            self.events.clear();
+            if let Some(writer) = self.file.take() {
+                drop(writer.into_parts());
+            }
         }
-        self.events.push(e);
-        if self.events.len() == MAX_RECORDS {
-            self.flush_block()?;
-        }
-        Ok(())
+        result
     }
     #[inline(never)]
     fn flush_block(&mut self) -> io::Result<()> {
@@ -124,13 +118,13 @@ impl Storage {
         let Some(mut writer) = self.file.take() else {
             return Err(io::Error::other("closed capture"));
         };
-        let buffered = writer.flush();
+        let flushed = flushed.and_then(|()| writer.flush());
         // Explicit close preserves the old finish failure contract. On a flush
         // error, into_parts avoids a second implicit retry during Drop.
         let (file, _) = writer.into_parts();
         let fd = file.into_raw_fd();
         let closed = unsafe { close(fd) };
-        flushed.and(buffered).and(if closed == 0 {
+        flushed.and(if closed == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -189,5 +183,35 @@ mod tests {
             input.finish().unwrap();
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[test]
+    fn failed_write_closes_storage_and_never_retries_pending_records() {
+        let path = std::env::temp_dir().join(format!(
+            "traceq-storage-write-error-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        File::create_new(&path).unwrap();
+        let event = Event::from_words([1, 0, 4096, 0, 0, 0, 0, 0]).unwrap();
+        for mode in [Mode::Flat, Mode::Buffered, Mode::Chunked] {
+            let mut storage = Storage {
+                file: Some(BufWriter::with_capacity(0, File::open(&path).unwrap())),
+                events: Vec::with_capacity(MAX_RECORDS),
+                bytes: vec![0; MAX_RECORDS * 64],
+                mode,
+            };
+            if mode != Mode::Flat {
+                for _ in 0..MAX_RECORDS - 1 {
+                    storage.append(event).unwrap();
+                }
+            }
+            assert!(storage.append(event).is_err());
+            assert!(storage.file.is_none() && storage.events.is_empty());
+            assert!(storage.append(event).is_err());
+            assert!(storage.finish().is_err());
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        std::fs::remove_file(path).unwrap();
     }
 }

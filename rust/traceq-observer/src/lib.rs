@@ -1,5 +1,5 @@
-//! Experimental full-context observer and ARM64 snapshot code generation.
-//! This FFI is pinned to the independently checked Gum 17.8.3 ARM64 layout.
+//! Shared ARM64 CPU-context layout and independent observer experiments.
+//! The product checks the context layout against the selected Gum header.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod snapshot;

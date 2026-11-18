@@ -1,7 +1,6 @@
 //! The minimal FFI surface for the pinned Gum devkit. This module does not own
 //! Gum objects. The invoke owner keeps modules mapped, stops Stalker, drains its
 //! garbage collector, and then releases transformer/stalker references.
-#![allow(dead_code)]
 use core::ffi::{c_char, c_int, c_void};
 pub use traceq_observer::CpuContext;
 #[path = "gum_constants.rs"]
@@ -117,9 +116,6 @@ impl Insn {
     pub fn mnemonic(&self) -> &str {
         ascii(&self.mnemonic)
     }
-    pub fn operands_text(&self) -> &str {
-        ascii(&self.op_str)
-    }
     /// # Safety
     /// The instruction must originate from the detail-enabled Gum iterator;
     /// its detail storage must remain live for the current transform call.
@@ -166,14 +162,6 @@ unsafe extern "C" {
         sink: *mut c_void,
     );
     pub fn gum_stalker_unfollow_me(stalker: *mut Stalker);
-    pub fn gum_stalker_follow(
-        stalker: *mut Stalker,
-        thread: usize,
-        transformer: *mut Transformer,
-        sink: *mut c_void,
-    );
-    pub fn gum_stalker_unfollow(stalker: *mut Stalker, thread: usize);
-    pub fn gum_stalker_exclude(stalker: *mut Stalker, range: *const MemoryRange);
     pub fn gum_stalker_transformer_make_from_callback(
         callback: Option<Transform>,
         data: *mut c_void,
