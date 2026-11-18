@@ -109,17 +109,41 @@ struct Instruction {
     committed: bool,
     gap: bool,
 }
-fn instruction_row(g: &Instruction, info: &Info) -> Value {
-    json!({
-        "ev": g.seq,
-        "pc": hx(g.pc),
-        "off": hx(g.pc.wrapping_sub(info.header.code_base)),
-        "opcode": hx(g.word),
-        "text": text(info, g.pc),
-        "completion": if g.committed { "confirmed" } else { "unobserved" },
-        "post_observed": g.committed,
-        "gap": g.gap
-    })
+
+struct HexWord(u64);
+impl Serialize for HexWord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&format_args!("0x{:x}", self.0))
+    }
+}
+
+#[derive(Serialize)]
+struct InstructionRow<'a> {
+    // Match the key order of the original sorted JSON object.
+    completion: &'static str,
+    ev: u64,
+    gap: bool,
+    off: HexWord,
+    opcode: HexWord,
+    pc: HexWord,
+    post_observed: bool,
+    text: Cow<'a, str>,
+}
+fn instruction_row<'a>(g: &Instruction, info: &'a Info) -> InstructionRow<'a> {
+    InstructionRow {
+        completion: if g.committed {
+            "confirmed"
+        } else {
+            "unobserved"
+        },
+        ev: g.seq,
+        gap: g.gap,
+        off: HexWord(g.pc.wrapping_sub(info.header.code_base)),
+        opcode: HexWord(g.word),
+        pc: HexWord(g.pc),
+        post_observed: g.committed,
+        text: text(info, g.pc),
+    }
 }
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let name = args[0].as_str();
@@ -403,8 +427,10 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 }
                 total += 1;
             })?;
-            let rows = page.iter().map(|g| instruction_row(g, &info)).collect();
-            (info, rows, total)
+            let rows: Vec<_> = page.iter().map(|g| instruction_row(g, &info)).collect();
+            let mut meta = capture_meta(&info);
+            meta.extend(page_meta(args, total, rows.len(), offset));
+            return Ok(response(rows, Value::Object(meta), json));
         }
         "boundaries" => {
             let mut total = 0;

@@ -1,5 +1,6 @@
 //! Native product command policy and presentation. All query callbacks stage
 //! bounded results; nothing is published before complete stream validation.
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
     borrow::Cow,
@@ -53,19 +54,27 @@ pub(crate) fn failure(command: &str, message: &str, code: i32, json: bool) -> Re
         }
     }
 }
-pub(crate) fn response(rows: Vec<Value>, meta: Value, json: bool) -> Response {
+pub(crate) fn response<T: Serialize>(rows: Vec<T>, meta: Value, json: bool) -> Response {
+    let mut stdout = Vec::new();
     if json {
-        Response::text(format!(
-            "{{\"data\":{},\"meta\":{meta}}}\n",
-            Value::Array(rows)
-        ))
+        stdout.extend_from_slice(b"{\"data\":");
+        serde_json::to_writer(&mut stdout, &rows).expect("serialize query rows");
+        stdout.extend_from_slice(b",\"meta\":");
+        serde_json::to_writer(&mut stdout, &meta).expect("serialize query metadata");
+        stdout.extend_from_slice(b"}\n");
     } else {
-        let mut text = String::new();
         for row in rows {
-            text += &format!("{row}\n");
+            serde_json::to_writer(&mut stdout, &row).expect("serialize query row");
+            stdout.push(b'\n');
         }
-        text += &format!("meta: {meta}\n");
-        Response::text(text)
+        stdout.extend_from_slice(b"meta: ");
+        serde_json::to_writer(&mut stdout, &meta).expect("serialize query metadata");
+        stdout.push(b'\n');
+    }
+    Response {
+        stdout,
+        stderr: Vec::new(),
+        status: 0,
     }
 }
 fn unsigned_digits(text: &str, decimal: bool) -> Option<(u32, &str)> {
