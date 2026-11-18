@@ -1,7 +1,9 @@
 //! Gum callback ownership: the pre callout owns its Plan, while a fused
 //! Boundary owns only its current Plan. Previous/post pointers are borrowed
-//! until Gum destroys the compiled block. The invoke owner drains Gum's GC
-//! before releasing the session and transformer.
+//! until Gum destroys the compiled block. The invoke owner finalizes pending
+//! observations and the session before draining Gum's GC and releasing its objects.
+//! Callout data uses Gum's heap so translation inside target malloc cannot
+//! reenter the target allocator. Every destroy callback uses the matching free.
 use crate::{
     gum::*,
     plan::{self, Plan},
@@ -17,7 +19,7 @@ unsafe extern "C" fn after(cpu: *mut CpuContext, data: *mut c_void) {
 }
 unsafe extern "C" fn free_plan(data: *mut c_void) {
     if !data.is_null() {
-        drop(unsafe { Box::from_raw(data.cast::<Plan>()) })
+        unsafe { free_callout(data.cast::<Plan>()) }
     }
 }
 struct Boundary {
@@ -34,9 +36,28 @@ unsafe extern "C" fn free_boundary(data: *mut c_void) {
     if data.is_null() {
         return;
     }
-    let boundary = unsafe { Box::from_raw(data.cast::<Boundary>()) };
+    let boundary = unsafe { &*data.cast::<Boundary>() };
     if !boundary.current.is_null() {
-        drop(unsafe { Box::from_raw(boundary.current) })
+        unsafe { free_callout(boundary.current) }
+    }
+    unsafe { free_callout(data.cast::<Boundary>()) };
+}
+// These plain translation records fit the malloc alignment of both pinned
+// ARM64 devkits. Keep them free of target-heap owning fields.
+const _: () = assert!(core::mem::align_of::<Plan>() <= 8);
+const _: () = assert!(core::mem::align_of::<Boundary>() <= 8);
+
+unsafe fn new_callout<T>(value: T) -> *mut T {
+    let data = unsafe { gum_malloc(core::mem::size_of::<T>()) }.cast::<T>();
+    if !data.is_null() {
+        unsafe { data.write(value) };
+    }
+    data
+}
+unsafe fn free_callout<T>(data: *mut T) {
+    unsafe {
+        ptr::drop_in_place(data);
+        gum_free(data.cast());
     }
 }
 unsafe fn post(iterator: *mut Iterator, p: *mut Plan) {
@@ -52,9 +73,12 @@ unsafe fn instrument_one(iterator: *mut Iterator, ins: &Insn, header: traceq_cor
         unsafe { gum_stalker_iterator_keep(iterator) };
         return;
     }
-    let p = Box::into_raw(Box::new(unsafe {
-        plan::make_in_scope(ins, header, runtime::code_contains)
-    }));
+    let p = unsafe { new_callout(plan::make_in_scope(ins, header, runtime::code_contains)) };
+    if p.is_null() {
+        runtime::fail();
+        unsafe { gum_stalker_iterator_keep(iterator) };
+        return;
+    }
     if header.profile == 2 {
         runtime::emit_site(ins)
     }
@@ -83,17 +107,36 @@ unsafe fn fused(iterator: *mut Iterator, header: traceq_core::wire::Header) {
             unsafe { gum_stalker_iterator_keep(iterator) };
             continue;
         }
-        let p = Box::into_raw(Box::new(unsafe {
-            plan::make_in_scope(ins, header, runtime::code_contains)
-        }));
+        let p = unsafe { new_callout(plan::make_in_scope(ins, header, runtime::code_contains)) };
+        if p.is_null() {
+            runtime::fail();
+            if !deferred.is_null() {
+                unsafe { post(iterator, deferred) };
+                deferred = ptr::null_mut();
+            }
+            unsafe { gum_stalker_iterator_keep(iterator) };
+            continue;
+        }
         runtime::emit_site(ins);
         if !deferred.is_null()
             && unsafe { (*deferred).pc.wrapping_add(4) == (*p).pc && !(*p).unsupported }
         {
-            let boundary = Box::into_raw(Box::new(Boundary {
-                previous: deferred,
-                current: p,
-            }));
+            let boundary = unsafe {
+                new_callout(Boundary {
+                    previous: deferred,
+                    current: p,
+                })
+            };
+            if boundary.is_null() {
+                runtime::fail();
+                unsafe {
+                    free_callout(p);
+                    post(iterator, deferred);
+                    gum_stalker_iterator_keep(iterator);
+                }
+                deferred = ptr::null_mut();
+                continue;
+            }
             unsafe {
                 gum_stalker_iterator_put_callout(
                     iterator,

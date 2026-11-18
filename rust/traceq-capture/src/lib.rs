@@ -9,6 +9,7 @@ pub mod gum;
 pub mod instrument;
 pub mod plan;
 pub mod runtime;
+mod sites;
 pub mod storage;
 use std::ffi::{CStr, c_char, c_void};
 use std::os::unix::ffi::OsStrExt;

@@ -133,6 +133,8 @@ fn ascii(bytes: &[u8]) -> &str {
 }
 unsafe extern "C" {
     pub fn gum_init();
+    pub fn gum_malloc(size: usize) -> *mut c_void;
+    pub fn gum_free(data: *mut c_void);
     pub fn gum_process_get_current_thread_id() -> u64;
     pub fn gum_process_find_module_by_name(name: *const c_char) -> *mut Module;
     pub fn gum_process_find_module_by_address(address: u64) -> *mut Module;

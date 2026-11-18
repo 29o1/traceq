@@ -4,10 +4,10 @@ use crate::{
     code_scope::CodeScope,
     gum,
     plan::{self, Plan},
+    sites::Sites,
     storage::{Mode, Storage},
 };
 use std::cell::Cell;
-use std::collections::HashSet;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
@@ -56,7 +56,7 @@ struct Session {
     known: [bool; 65],
     gpr_bank: [u64; 29],
     complete: bool,
-    sites: HashSet<u64>,
+    sites: Sites,
     failed: bool,
     exclusive: bool,
     pending: Option<Pending>,
@@ -177,7 +177,11 @@ pub fn emit_site(ins: &gum::Insn) {
         return;
     }
     let s = unsafe { &mut *p };
-    if s.sites.insert(ins.address) {
+    let Some(new) = s.sites.insert(&s.code_scope, ins.address) else {
+        s.failed = true;
+        return;
+    };
+    if new {
         let mut text = [0u8; 193]; // 32-byte mnemonic, space, 160-byte operands.
         let mnemonic_len = ins
             .mnemonic
@@ -273,6 +277,9 @@ pub fn begin_scoped(
     let Ok(storage) = Storage::open(path, header, mode) else {
         return false;
     };
+    let Some(sites) = Sites::new(&code_scope) else {
+        return false;
+    };
     let mut s = Box::new(Session {
         header,
         code_scope,
@@ -283,7 +290,7 @@ pub fn begin_scoped(
         known: [false; 65],
         gpr_bank: [0; 29],
         complete: false,
-        sites: HashSet::new(),
+        sites,
         failed: false,
         exclusive: false,
         pending: None,
@@ -883,7 +890,7 @@ mod tests {
                 known: [false; 65],
                 gpr_bank: [0; 29],
                 complete: false,
-                sites: HashSet::new(),
+                sites: Sites::new(&CodeScope::single(header.code_base, header.code_size)).unwrap(),
                 failed: false,
                 exclusive: false,
                 pending: None,
@@ -971,7 +978,7 @@ mod tests {
                 known: [false; 65],
                 gpr_bank: [0; 29],
                 complete: false,
-                sites: HashSet::new(),
+                sites: Sites::new(&CodeScope::single(header.code_base, header.code_size)).unwrap(),
                 failed: false,
                 exclusive: false,
                 pending: None,
