@@ -7,7 +7,7 @@ CASES=[*PREVIOUS,
     dict(id='store-writeback',function='store_writeback',seed=0x123456789abcdef0,count=7,initial=0),
     dict(id='store-writeback-zero',function='store_writeback',seed=0,count=0,initial=0),
     dict(id='store-buffer-flush',function='store_loop',seed=0,count=2048,initial=0),
-    dict(id='unsupported-stlr',function='unsupported_store',seed=0xab,count=1,initial=0,partial=True)]
+    dict(id='store-release',function='unsupported_store',seed=0xab,count=1,initial=0)]
 
 def expected(case):
     if case['function'] in {c['function'] for c in PREVIOUS}: return prior_expected(case)
