@@ -3,5 +3,4 @@
 /tests export-ignore
 /rust/*/examples export-ignore
 /rust/*/tests export-ignore
-/tools/check_cli_clean.py export-ignore
 /DEVELOPMENT.md export-ignore

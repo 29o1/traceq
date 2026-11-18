@@ -3,7 +3,7 @@ deps-host:
 	$(PYTHON) tools/dependencies.py host
 
 capture-host:
-	$(PYTHON) tools/build_capture.py host
+	$(PYTHON) tests/integration/build_host.py
 
 check-capture-build:
 	$(PYTHON) tests/test_capture_build.py
@@ -18,7 +18,7 @@ check-cli: cli
 	$(PYTHON) tests/test_find_value_stream.py
 
 check-cli-clean:
-	$(PYTHON) tools/check_cli_clean.py
+	$(PYTHON) tests/check_cli_clean.py
 
 check-find-value: cli
 	$(PYTHON) tests/test_find_value_stream.py
@@ -60,7 +60,7 @@ check-invoke-android: cli capture-android
 	$(PYTHON) tests/integration/check_invoke.py
 
 check: check-cli check-capture-build
-	$(PYTHON) tools/build_capture.py host --tests
+	$(PYTHON) tests/integration/build_host.py --tests
 	$(PYTHON) tests/integration/check_capture.py
 	$(PYTHON) tests/integration/check_state.py
 	$(PYTHON) tests/integration/check_owner.py
