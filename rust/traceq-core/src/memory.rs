@@ -1,6 +1,9 @@
 //! Bounded byte snapshots from actual memory observations. Unknown evidence
 //! never supplies a value, and callbacks cannot publish before full validation.
-use crate::{Error, Result, replay, wire::Input};
+use crate::{
+    Error, Result, replay,
+    wire::{Input, Kind},
+};
 use std::io::Read;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +17,9 @@ pub struct Observation {
     pub value: u8,
     pub seq: u64,
     pub pc: u64,
+    pub write: bool,
+    /// Position among all recorded accesses of this instruction (0..4).
+    pub access_index: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +50,7 @@ fn observe(cells: &mut [Option<Observation>], base: u64, g: &replay::EvidenceGro
         cells.fill(None);
     }
     let end = base + cells.len() as u64;
-    for access in g.accesses {
+    for (access_index, access) in g.accesses.iter().enumerate() {
         let first = base.max(access.address);
         let last = end.min(access.address + access.size);
         for address in first..last {
@@ -58,6 +64,8 @@ fn observe(cells: &mut [Option<Observation>], base: u64, g: &replay::EvidenceGro
                 value: value as u8,
                 seq: g.seq,
                 pc: g.pc,
+                write: access.kind == Kind::Write,
+                access_index: access_index as u8,
             });
         }
     }
@@ -246,7 +254,9 @@ mod tests {
             Some(Observation {
                 value: 10,
                 seq: 0,
-                pc: 0x1000
+                pc: 0x1000,
+                write: false,
+                access_index: 0,
             })
         );
         let second = run(&records, 1, Phase::Post);
@@ -257,7 +267,9 @@ mod tests {
             Some(Observation {
                 value: 0xbb,
                 seq: 1,
-                pc: 0x1000
+                pc: 0x1000,
+                write: true,
+                access_index: 0,
             })
         );
         assert_eq!(run(&records, 2, Phase::Pre).cells, second.cells);

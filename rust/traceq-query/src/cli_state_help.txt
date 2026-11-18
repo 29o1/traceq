@@ -17,6 +17,10 @@ execution-state stream queries (profile 2):
     Each frame has address, size, data_hex and one sources entry per byte:
       null means unknown (00 is a placeholder); [observed_ev,pc_index] means known.
     meta.pc_table preserves each source PC and pc_offset; references are page-local.
+    --access-source --json adds observed_rw (r/w) and observed_access_index to known bytes.
+    The index is zero-based within that instruction's recorded memory accesses.
+    With --compact this selects hex-v2: [observed_ev,pc_index,observed_rw,observed_access_index].
+    Sources describe the last observation at the checkpoint, which may be a read.
     Counts/limits still measure bytes, including unknowns; empty frames have size 0.
     All input validation, gap/completion semantics and checkpoint fields are retained.
   traceq last-writers FILE --range BASE,LEN [--at-seq E] [--compact] [--json]

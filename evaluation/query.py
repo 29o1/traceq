@@ -125,13 +125,17 @@ def expand_mem_access(document):
 
 
 def expand_mem_state(document):
-    """Restore every byte and source from explicit opt-in hex-v1 snapshots."""
+    """Restore every byte and source from compact memory snapshots."""
     if not isinstance(document, dict) or not isinstance(document.get('meta'), dict):
         return document
     meta = document['meta']
     if 'mem_state_format' not in meta:
         return document
-    if meta['mem_state_format'] != 'hex-v1' or meta.get('source_columns') != ['observed_ev', 'pc_index']:
+    with_access_source = meta['mem_state_format'] == 'hex-v2'
+    columns = ['observed_ev', 'pc_index']
+    if with_access_source:
+        columns.extend(['observed_rw', 'observed_access_index'])
+    if meta['mem_state_format'] not in ('hex-v1', 'hex-v2') or meta.get('source_columns') != columns:
         raise ValueError('Unsupported memory state format or source columns')
     table = meta.get('pc_table')
     if not isinstance(table, list) or len(table) > 4096 or not isinstance(document.get('data'), list):
@@ -167,11 +171,16 @@ def expand_mem_state(document):
                     raise ValueError('Unknown memory byte requires zero placeholder')
                 row.update(value=None, writer_seq=None, pc=None)
             else:
-                if not isinstance(source, list) or len(source) != 2 or \
+                if not isinstance(source, list) or len(source) != len(columns) or \
                         type(source[0]) is not int or not 0 <= source[0] < 1 << 64 or \
                         type(source[1]) is not int or not 0 <= source[1] < len(table):
                     raise ValueError('Invalid memory state observation source')
                 row.update(value=hex(raw[i]), observed_ev=source[0], **table[source[1]])
+                if with_access_source:
+                    direction, index = source[2:]
+                    if direction not in ('r', 'w') or type(index) is not int or not 0 <= index < 4:
+                        raise ValueError('Invalid memory state access source')
+                    row.update(observed_rw=direction, observed_access_index=index)
             rows.append(row)
         return rows
 

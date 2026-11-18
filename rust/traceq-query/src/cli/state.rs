@@ -1,12 +1,21 @@
 use super::*;
 use std::fmt::Write as _;
-fn byte_row(address: u64, cell: Option<memory::Observation>, info: &Info) -> Value {
+fn byte_row(
+    address: u64,
+    cell: Option<memory::Observation>,
+    info: &Info,
+    access_source: bool,
+) -> Value {
     let mut row = json!({"address":hx(address),"known":cell.is_some()});
     if let Some(b) = cell {
         row["value"] = hx(b.value);
         row["observed_ev"] = json!(b.seq);
         row["pc"] = hx(b.pc);
         row["pc_offset"] = hx(b.pc.wrapping_sub(info.header.code_base));
+        if access_source {
+            row["observed_rw"] = json!(if b.write { "w" } else { "r" });
+            row["observed_access_index"] = json!(b.access_index);
+        }
     } else {
         row["value"] = Value::Null;
         row["writer_seq"] = Value::Null;
@@ -15,11 +24,16 @@ fn byte_row(address: u64, cell: Option<memory::Observation>, info: &Info) -> Val
     row
 }
 
-fn byte_rows(base: u64, cells: &[Option<memory::Observation>], info: &Info) -> Vec<Value> {
+fn byte_rows(
+    base: u64,
+    cells: &[Option<memory::Observation>],
+    info: &Info,
+    access_source: bool,
+) -> Vec<Value> {
     cells
         .iter()
         .enumerate()
-        .map(|(index, &cell)| byte_row(base + index as u64, cell, info))
+        .map(|(index, &cell)| byte_row(base + index as u64, cell, info, access_source))
         .collect()
 }
 
@@ -27,6 +41,7 @@ fn byte_rows(base: u64, cells: &[Option<memory::Observation>], info: &Info) -> V
 struct CompactMemory {
     indices: BTreeMap<u64, usize>,
     pcs: Vec<Value>,
+    access_source: bool,
 }
 impl CompactMemory {
     fn frame(&mut self, address: u64, cells: &[Option<memory::Observation>], info: &Info) -> Value {
@@ -46,7 +61,16 @@ impl CompactMemory {
                     self.indices.insert(b.pc, index);
                     index
                 };
-                sources.push(json!([b.seq, index]));
+                sources.push(if self.access_source {
+                    json!([
+                        b.seq,
+                        index,
+                        if b.write { "w" } else { "r" },
+                        b.access_index
+                    ])
+                } else {
+                    json!([b.seq, index])
+                });
             } else {
                 bytes.push_str("00");
                 sources.push(Value::Null);
@@ -60,8 +84,21 @@ impl CompactMemory {
         })
     }
     fn metadata(self, meta: &mut Map<String, Value>) {
-        meta.insert("mem_state_format".into(), json!("hex-v1"));
-        meta.insert("source_columns".into(), json!(["observed_ev", "pc_index"]));
+        let (format, columns) = if self.access_source {
+            (
+                "hex-v2",
+                json!([
+                    "observed_ev",
+                    "pc_index",
+                    "observed_rw",
+                    "observed_access_index"
+                ]),
+            )
+        } else {
+            ("hex-v1", json!(["observed_ev", "pc_index"]))
+        };
+        meta.insert("mem_state_format".into(), json!(format));
+        meta.insert("source_columns".into(), columns);
         meta.insert("pc_table".into(), Value::Array(self.pcs));
     }
 }
@@ -91,6 +128,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let event_window = matches!(name, "instructions" | "find-pc" | "boundaries");
     let point_query = matches!(name, "mem-state" | "reg-state");
     let mut path = String::new();
+    let mut access_source = false;
     let mut phase = if name == "reg-state" {
         Phase::Pre
     } else {
@@ -119,6 +157,12 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--help" | "-h" => return Ok(Response::text(include_str!("../cli_state_help.txt"))),
             "--json" => {}
             "--compact" => compact = true,
+            "--access-source" if memory_query && json => access_source = true,
+            "--access-source" => {
+                return Err("--access-source requires mem-state --json"
+                    .to_string()
+                    .into());
+            }
             "--gaps" => gaps_only = true,
             "--range" if memory_query => {
                 let value = next(args, &mut i, a)?;
@@ -272,7 +316,10 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         let first = offset.min(len);
         let shown = limit.min(len - first);
         let page_base = base + first;
-        let mut packing = CompactMemory::default();
+        let mut packing = CompactMemory {
+            access_source,
+            ..CompactMemory::default()
+        };
         let mut meta = capture_meta(info);
         let rows = if batch_requested {
             let count = checkpoints.len() as u64;
@@ -297,7 +344,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                     let data = if compact {
                         packing.frame(page_base, &point.cells, info)
                     } else {
-                        Value::Array(byte_rows(page_base, &point.cells, info))
+                        Value::Array(byte_rows(page_base, &point.cells, info, access_source))
                     };
                     json!({
                         "ev": point.checkpoint.at,
@@ -322,7 +369,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             if compact {
                 vec![packing.frame(page_base, cells, info)]
             } else {
-                byte_rows(page_base, cells, info)
+                byte_rows(page_base, cells, info, access_source)
             }
         };
         if compact {

@@ -528,6 +528,34 @@ class StateStreamChecks(unittest.TestCase):
             self.assertTrue(all(not b['known']for b in q['data'][3]['data']))
             self.assertEqual(q['data'][3]['instruction_completion'],'unobserved')
 
+    def test_mem_state_access_source_uses_the_latest_access_and_exact_ordinal(self):
+        for chunked in [False,True]:
+            events=self.base()
+            events[3:3]=[(7,0,0x1000,0x2000,2,0x2211,0,1),
+                         (2,0,0x1000,0x2001,1,0x33,0,1)]
+            events[-1]=(4,3,0,1,0,1,2,2)
+            path=self.artifact(events,chunked)
+            args=['--range','0x2000,3','--checkpoint','0:post','--checkpoint','1:post','--access-source']
+            named=self.query(path,'mem-state',args)
+            first,unobserved=[f['data'] for f in named['data']]
+            self.assertEqual([(b['value'],b['observed_rw'],b['observed_access_index']) for b in first[:2]],
+                             [('0x11','r',0),('0x33','w',1)])
+            for b in [*first[2:],*unobserved]:
+                self.assertFalse(b['known'])
+                self.assertNotIn('observed_rw',b)
+                self.assertNotIn('observed_access_index',b)
+            packed=self.query(path,'mem-state',[*args,'--compact'])
+            self.assertEqual(packed['meta']['mem_state_format'],'hex-v2')
+            self.assertEqual(packed['meta']['source_columns'],
+                             ['observed_ev','pc_index','observed_rw','observed_access_index'])
+            self.assertEqual(packed['data'][0]['data']['sources'],[[0,0,'r',0],[0,0,'w',1],None])
+            self.assertEqual(packed['data'][1]['data']['sources'],[None]*3)
+            raw=path.read_bytes()
+            for damage in [raw[:-1],raw+b'x']:
+                path.write_bytes(damage)
+                bad=self.query(path,'mem-state',[*args,'--compact','--offset','9'],ok=False)
+                self.assertEqual(bad['error']['code'],'TRACE_ERROR')
+
     def assert_compact_memory_roundtrip(self,path,args):
         named=self.query(path,'mem-state',args)
         packed=self.query(path,'mem-state',[*args,'--compact'])
