@@ -1,6 +1,8 @@
 # build artifacts
 *.o
 *.a
+*.dylib
+*.so
 *.dSYM/
 /cli/traceq
 /rust/target/
@@ -27,6 +29,11 @@ cli/gt-test
 /.deps/
 /artifacts/
 __pycache__/
+
+# Trace payloads can contain captured register and memory values.
+*.gtsw
+*.gtsc
+*.gtb
 
 # Local research, measurements and development notes.
 /rust/traceq-engine/
