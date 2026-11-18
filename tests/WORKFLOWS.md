@@ -1,6 +1,9 @@
 # 产品、测试、评测与 Git 边界
 
 正式 CLI 位于 `rust/traceq-cli`，通过 `traceq-query` 调用 `traceq-core`。`make` 和 `make install` 只构建或安装正式 `traceq`。
+`make` 更新工作区的 `cli/traceq`，PATH 中已经安装的程序需要通过 `make install` 更新。
+切换默认版本时，先保存旧安装的二进制和哈希，再核对 `command -v traceq` 指向的实际文件与已验收的 `cli/traceq` 哈希一致，并用同一份冻结 trace 检查查询。
+验收记录同时保存构建产物和实际执行文件的绝对路径及哈希；仅记录源码提交无法确认当前安装的程序身份。
 Agent 可直接调用正式 CLI 的结构化查询。`agent-query` 由独立的 `evaluation/runner` 实现，用于任务包策略、调用记录和评测成本统计。
 `make eval-cli` 生成 `build/evaluation/traceq-eval`。历史任务包将它复制为 `work/traceq`，包内名称不代表它是正式 CLI。
 
