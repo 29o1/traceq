@@ -39,7 +39,9 @@ MEMORY_CHECKPOINT_GUIDANCE = ('Profile2 mem-state: one --range B,L plus repeated
                              'checkpoints-v1 data groups identify ev/phase/pc/instruction_completion/gap and contain byte rows. '
                              '--limit/--offset apply bytes per checkpoint; at most 64 checkpoints and 4096 returned byte cells in total, no clamping. '
                              'meta.total/shown count aggregate byte cells; meta.next advances all groups together. '
-                             'An unobserved post is unknown; pre values and global gaps retain their normal semantics.')
+                             'An unobserved post is unknown; pre values and global gaps retain their normal semantics. '
+                             'With --json, repeat --range to group disjoint or overlapping ranges in one scan. '
+                             'ranges-checkpoints-v1 returns range_base, range_size and checkpoints in each range group; byte limits apply per range and the whole page cap is 4096 cells.')
 COMPACT_STATE_GUIDANCE = ('Profile2 mem-state supports optional --compact --json for single/batch snapshots: hex-v1 frames '
                          'contain address/size/data_hex and per-byte sources. null source is unknown (00 placeholder); '
                          '[observed_ev,pc_index] is known, with PCs in page-local meta.pc_table. '
@@ -184,12 +186,24 @@ def expand_mem_state(document):
             rows.append(row)
         return rows
 
-    if meta.get('memory_format') == 'checkpoints-v1':
+    def expand_checkpoints(groups):
+        if not isinstance(groups, list):
+            raise ValueError('Invalid memory checkpoints')
         rows = []
-        for group in document['data']:
+        for group in groups:
             if not isinstance(group, dict) or 'data' not in group:
                 raise ValueError('Invalid memory checkpoint group')
             rows.append({**group, 'data': expand(group['data'])})
+        return rows
+
+    if meta.get('memory_format') == 'ranges-checkpoints-v1':
+        rows = []
+        for group in document['data']:
+            if not isinstance(group, dict) or 'data' not in group:
+                raise ValueError('Invalid memory range group')
+            rows.append({**group, 'data': expand_checkpoints(group['data'])})
+    elif meta.get('memory_format') == 'checkpoints-v1':
+        rows = expand_checkpoints(document['data'])
     else:
         if len(document['data']) != 1:
             raise ValueError('Single memory snapshot requires one frame')

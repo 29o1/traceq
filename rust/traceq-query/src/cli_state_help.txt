@@ -23,12 +23,17 @@ execution-state stream queries (profile 2):
     Sources describe the last observation at the checkpoint, which may be a read.
     Counts/limits still measure bytes, including unknowns; empty frames have size 0.
     All input validation, gap/completion semantics and checkpoint fields are retained.
+    With --json, repeat --range for up to 64 ranges sharing one validated scan.
+    ranges-checkpoints-v1 returns one group per range, in request order, with
+    range_base, range_size and the checkpoints in data. The byte offset and
+    limit apply to each range. The 4096-cell cap covers all ranges and checkpoints.
   traceq last-writers FILE --range BASE,LEN [--at-seq E] [--compact] [--json]
     --compact requires JSON; first_located_gap_ref indexes the current page's meta.located_gaps.
     last_observed_write.first_located_gap explains the earliest positioned gap after that write.
     Scope-exit memory effects remain unobserved; global unpositioned gaps are reported in meta.
     meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture.
-  Profile2 memory queries require one --range BASE,LEN; LEN is 1..4096 bytes.
+  Profile2 memory ranges use --range BASE,LEN; LEN is 1..4096 bytes.
+  mem-access and last-writers accept one range per query.
     Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
     --addr selects instruction PCs in find-pc; --len and --size are unsupported.
 

@@ -99,21 +99,45 @@ pub fn snapshots<R: Read>(
     offset: u64,
     limit: usize,
 ) -> Result<BatchSnapshot> {
-    if !(1..=4096).contains(&len)
-        || base.checked_add(len as u64).is_none()
+    snapshots_for_ranges(input, &[(base, len)], checkpoints, offset, limit)
+}
+
+/// Validate once for all ranges. Each checkpoint's cells concatenate the
+/// selected pages in range request order, including overlapping or repeated
+/// ranges. The same offset and limit apply independently to each range.
+pub fn snapshots_for_ranges<R: Read>(
+    input: Input<R>,
+    ranges: &[(u64, usize)],
+    checkpoints: &[Checkpoint],
+    offset: u64,
+    limit: usize,
+) -> Result<BatchSnapshot> {
+    if !(1..=64).contains(&ranges.len())
         || !(1..=64).contains(&checkpoints.len())
         || !(1..=4096).contains(&limit)
     {
         return Err(Error::trace("invalid memory checkpoint bounds"));
     }
-    let first = offset.min(len as u64) as usize;
-    let shown = limit.min(len - first);
+    let mut range_valid = true;
+    let mut shown = 0;
+    let mut pages = Vec::with_capacity(ranges.len());
+    for &(base, len) in ranges {
+        if !(1..=4096).contains(&len) || base.checked_add(len as u64).is_none() {
+            return Err(Error::trace("invalid memory checkpoint bounds"));
+        }
+        range_valid &= input.header.contains_data(base, len as u64);
+        let first = offset.min(len as u64) as usize;
+        let end = shown + limit.min(len - first);
+        if end > shown {
+            pages.push((base + first as u64, shown..end));
+        }
+        shown = end;
+    }
     if shown * checkpoints.len() > 4096 {
         return Err(Error::trace(
             "memory checkpoint page exceeds 4096 byte cells",
         ));
     }
-    let mut range_valid = input.header.contains_data(base, len as u64);
     let mut points: Vec<_> = checkpoints
         .iter()
         .map(|&checkpoint| CheckpointSnapshot {
@@ -132,7 +156,6 @@ pub fn snapshots<R: Read>(
     let last = checkpoints[*order.last().unwrap()].at;
     let mut next = 0;
     let mut cells = vec![None; shown];
-    let page_base = base + first as u64;
     let info = replay::read_evidence(input, |g, _| {
         while next < order.len()
             && checkpoints[order[next]].at == g.seq
@@ -141,8 +164,10 @@ pub fn snapshots<R: Read>(
             capture(&mut points[order[next]], &cells, &g);
             next += 1;
         }
-        if range_valid && shown != 0 && g.seq <= last {
-            observe(&mut cells, page_base, &g);
+        if range_valid && g.seq <= last && (g.gap || !g.accesses.is_empty()) {
+            for (base, indices) in &pages {
+                observe(&mut cells[indices.clone()], *base, &g);
+            }
         }
         while next < order.len() && checkpoints[order[next]].at == g.seq {
             capture(&mut points[order[next]], &cells, &g);
@@ -383,14 +408,23 @@ mod tests {
             count: count.clone(),
         })
         .unwrap();
-        let batch = snapshots(input, 0x2001, 16, &checkpoints, 1, 3).unwrap();
+        let batch = snapshots_for_ranges(
+            input,
+            &[(0x2001, 16), (0x2002, 4), (0x200e, 2)],
+            &checkpoints,
+            1,
+            3,
+        )
+        .unwrap();
         assert_eq!(count.get(), length);
         for (point, checkpoint) in batch.points.iter().zip(checkpoints) {
             assert_eq!(point.checkpoint, checkpoint);
             assert!(point.selected_event);
+            let whole = run(&records, checkpoint.at, checkpoint.phase);
+            let cells = &whole.cells;
             assert_eq!(
                 point.cells,
-                run(&records, checkpoint.at, checkpoint.phase).cells[1..4]
+                [&cells[1..4], &cells[2..5], &cells[14..15]].concat()
             );
         }
         assert_eq!(
@@ -400,7 +434,7 @@ mod tests {
                 .flatten()
                 .map(|o| o.value)
                 .collect::<Vec<_>>(),
-            vec![3, 4, 5]
+            vec![3, 4, 5, 4, 5, 6, 16]
         );
         assert_eq!(batch.points[4].gap_count, 1);
         assert_eq!(batch.points[4].gap_reasons, 2);
