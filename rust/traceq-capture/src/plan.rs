@@ -1,12 +1,15 @@
-//! Translation-time observation plans. Plans contain copied Capstone operands,
-//! never pointers into an iterator's transient instruction/detail storage.
+//! Translation-time observation plans. Capstone operands are normalized before
+//! the iterator advances. Callouts only keep execution fields.
+pub(crate) mod address;
+
 use crate::gum::*;
+use address::Address;
 use traceq_core::arm64_memory::{self, Width};
 pub use traceq_core::wire::Header;
 
 pub struct Plan {
     pub pc: u64,
-    pub mem: Arm64Op,
+    pub(crate) address: Address,
     pub sources: [u32; 4],
     pub width: u32,
     pub count: u32,
@@ -27,7 +30,7 @@ impl Default for Plan {
     fn default() -> Self {
         Self {
             pc: 0,
-            mem: Arm64Op::default(),
+            address: Address::Missing,
             sources: [0; 4],
             width: 0,
             count: 0,
@@ -44,6 +47,21 @@ impl Default for Plan {
             target_address: 0,
             transfer: 0,
         }
+    }
+}
+impl Plan {
+    fn set_address(&mut self, operand: &Arm64Op) {
+        self.address = Address::decode(operand);
+    }
+
+    pub(crate) fn effective_address(&self, cpu: &CpuContext) -> Option<u64> {
+        self.address.evaluate(cpu)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_address(mut self, operand: &Arm64Op) -> Self {
+        self.set_address(operand);
+        self
     }
 }
 pub fn contains(base: u64, length: u64, address: u64, size: u64) -> bool {
@@ -550,7 +568,7 @@ fn base_plan(
                 return p;
             }
             p.sources[0] = a.operands[0].reg();
-            p.mem = a.operands[1];
+            p.set_address(&a.operands[1]);
             p.width = d.width.bytes();
         } else {
             if n != 3 || header.profile != 2 {
@@ -575,7 +593,7 @@ fn base_plan(
             // count describes the address span, not the two observations of it.
             p.sources[0] = a.operands[0].reg();
             p.sources[1] = a.operands[1].reg();
-            p.mem = a.operands[2];
+            p.set_address(&a.operands[2]);
             p.width = d.width.bytes();
             p.atomic_width = Some(d.width);
         }
@@ -622,8 +640,9 @@ fn base_plan(
             }
             p.sources[i] = op.reg();
         }
-        p.mem = a.operands[count];
-        if !simple_memory(&p.mem) {
+        let memory = &a.operands[count];
+        p.set_address(memory);
+        if !simple_memory(memory) {
             return p;
         }
         p.load = ins.id == ARM64_INS_LD1;
@@ -669,8 +688,9 @@ fn base_plan(
             }
             p.sources[i] = op.reg();
         }
-        p.mem = a.operands[count];
-        if !simple_memory(&p.mem) {
+        let memory = &a.operands[count];
+        p.set_address(memory);
+        if !simple_memory(memory) {
             return p;
         }
         p.load = ins.id == ARM64_INS_LD4;
@@ -692,7 +712,8 @@ fn base_plan(
             p.unsupported = true;
             return p;
         }
-        p.mem = a.operands[count];
+        let memory = &a.operands[count];
+        p.set_address(memory);
         for i in 0..count {
             if a.operands[i].kind != ARM64_OP_REG {
                 p.unsupported = true;
@@ -707,7 +728,7 @@ fn base_plan(
         if ["strh", "sturh"].contains(&m) {
             p.width = 2
         }
-        if p.width == 0 || (pair && reg_width(p.sources[1]) != p.width) || !valid_memory(&p.mem) {
+        if p.width == 0 || (pair && reg_width(p.sources[1]) != p.width) || !valid_memory(memory) {
             p.unsupported = true;
             return p;
         }
@@ -813,7 +834,7 @@ pub unsafe fn make_in_scope(
             && a.operands[1].kind == ARM64_OP_IMM
             && a.writeback == 0
         {
-            p.mem = a.operands[1];
+            p.set_address(&a.operands[1]);
             p.sources[0] = a.operands[0].reg();
             p.width = if ins.id == ARM64_INS_LDRSW {
                 4
@@ -825,12 +846,13 @@ pub unsafe fn make_in_scope(
                 p.unsupported = false
             }
         } else if n > count && a.operands[count].kind == ARM64_OP_MEM {
-            p.mem = a.operands[count];
+            let memory = &a.operands[count];
+            p.set_address(memory);
             let mut valid = true;
             for i in 0..count {
                 valid &= a.operands[i].kind == ARM64_OP_REG;
                 p.sources[i] = a.operands[i].reg();
-                if a.writeback != 0 && p.sources[i] == p.mem.mem().base {
+                if a.writeback != 0 && p.sources[i] == memory.mem().base {
                     valid = false
                 }
             }
@@ -844,7 +866,7 @@ pub unsafe fn make_in_scope(
             if ["ldrsw", "ldursw", "ldpsw"].contains(&m) {
                 p.width = 4
             }
-            valid &= p.width > 0 && valid_memory(&p.mem);
+            valid &= p.width > 0 && valid_memory(memory);
             if count == 2 && p.sources[0] == p.sources[1] {
                 valid = false
             }
@@ -892,7 +914,7 @@ pub unsafe fn make_in_scope(
         };
     }
     if a.writeback != 0 && p.count != 0 {
-        let base = physical(p.mem.mem().base);
+        let base = p.address.base().map_or(-1, physical);
         for i in 0..p.count as usize {
             if base >= 0 && physical(p.sources[i]) == base {
                 p.unsupported = true
@@ -1315,7 +1337,8 @@ mod tests {
             false,
         );
         assert!(!p.unsupported && p.load && p.post);
-        assert_eq!((p.count, p.width, p.mem.imm()), (1, 16, 0x1550));
+        assert_eq!((p.count, p.width), (1, 16));
+        assert!(matches!(p.address, Address::Literal(0x1550)));
         let p = classify(
             ARM64_INS_LDRSW,
             "ldrsw",

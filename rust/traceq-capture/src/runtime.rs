@@ -548,31 +548,9 @@ fn memory_before(s: &mut Session, c: &CpuContext, p: &Plan, instruction: Instruc
     if p.count == 0 {
         return false;
     }
-    let address = if p.mem.kind == gum::ARM64_OP_IMM {
-        p.mem.imm() as u64
-    } else {
-        let mem = p.mem.mem();
-        let (Some(base), Some(index)) = (
-            plan::reg_value(mem.base, c),
-            if mem.index != 0 {
-                plan::reg_value(mem.index, c)
-            } else {
-                Some(0)
-            },
-        ) else {
-            gap(s, instruction.seq, p.pc, 1);
-            return false;
-        };
-        let mut ix = index as u64;
-        if p.mem.ext == gum::ARM64_EXT_UXTW {
-            ix = ix as u32 as u64;
-        }
-        if p.mem.ext == gum::ARM64_EXT_SXTW {
-            ix = ix as i32 as i64 as u64;
-        }
-        (base as u64)
-            .wrapping_add(ix.wrapping_shl(p.mem.shift.value))
-            .wrapping_add(mem.disp as u64)
+    let Some(address) = p.effective_address(c) else {
+        gap(s, instruction.seq, p.pc, 1);
+        return false;
     };
     if p.ordered_memory && !address.is_multiple_of(p.width as u64) {
         gap(s, instruction.seq, p.pc, 1);
@@ -1032,19 +1010,19 @@ mod tests {
                 ordered_memory: true,
                 atomic_width: Some(traceq_core::arm64_memory::Width::W32),
                 sources: [gum::ARM64_REG_W0, gum::ARM64_REG_W0, 0, 0],
-                mem: gum::Arm64Op {
-                    kind: gum::ARM64_OP_MEM,
-                    value: gum::OperandValue {
-                        mem: gum::Mem {
-                            base: gum::ARM64_REG_X0 + 1,
-                            index: 0,
-                            disp: 0,
-                        },
-                    },
-                    ..gum::Arm64Op::default()
-                },
                 ..Plan::default()
-            };
+            }
+            .with_address(&gum::Arm64Op {
+                kind: gum::ARM64_OP_MEM,
+                value: gum::OperandValue {
+                    mem: gum::Mem {
+                        base: gum::ARM64_REG_X0 + 1,
+                        index: 0,
+                        disp: 0,
+                    },
+                },
+                ..gum::Arm64Op::default()
+            });
             let mut c = CpuContext {
                 pc: 4096,
                 sp: 0,
