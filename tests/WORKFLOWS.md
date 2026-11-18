@@ -31,6 +31,33 @@ Mac 宿主采集器、普通 C／汇编对照、旧 C++ 参考和观察实验均
 采集改动按影响范围选择宿主与一加 11 验收。设备操作统一通过 `/Users/fanjiahao05/.local/bin/revkit-phone` 串行执行。
 构建、CLI 回归和评测入口检查不会自动启动模型评测或操作设备。
 
+## 已知坐标的取证
+
+同一份 trace 的坐标确定后，先列出需要保留的寄存器、访存和检查点事实，再合并查询。
+批量 `context` 已返回入口或返回点的所需寄存器时，直接复用这些值。核对完整现场时仍显式选择完整 65 槽，保留未观察到的 `post: null`。
+
+多个访存范围可共用一次 `mem-access`。读写筛选和分页作用于范围并集，每条重叠访问完整返回一次。
+当各范围需要不同方向时，取回并集后按范围和方向选择原始记录，保留访问宽度、来源及 `access_index`。
+
+```sh
+traceq mem-access FILE \
+  --range INPUT_BASE,INPUT_LEN --range OUTPUT_BASE,OUTPUT_LEN \
+  --limit 256 --access-index --compact --json
+```
+
+不同范围需要不同时间点时，用 `--range-checkpoint` 合并内存快照。将示例参数替换为已知坐标；`--limit` 按每个范围的每个检查点计算字节，整页仍受 4096 字节单元上限约束。
+
+```sh
+traceq mem-state FILE \
+  --range INPUT_BASE,INPUT_LEN --range-checkpoint RETURN_EV:pre \
+  --range OUTPUT_BASE,OUTPUT_LEN \
+  --range-checkpoint LAST_WRITE_EV:post --range-checkpoint RETURN_EV:pre \
+  --limit MAX_RANGE_LEN --compact --json
+```
+
+紧凑输出按当前响应的列、寄存器集合和来源表解释。合并前后逐项核对原始值、每字节来源、unknown、gap、边界和完成状态，保留双方 argv 与响应。
+查询组合的调用数和输出量单独记录；模型的决策、token 和任务耗时需要对应评测证据。
+
 ## Git 记录与发布
 
 产品、测试和评测源码都保留在同一个 Git 仓库，分别按 `feat`／`fix`、`test`、`build` 或 `chore` 提交具体改动。
