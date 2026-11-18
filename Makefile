@@ -48,7 +48,7 @@ check-cli: cli
 	$(PYTHON) tests/test_native_cli.py
 	$(PYTHON) tests/test_retired_formats.py
 	$(PYTHON) tests/test_scope_ranges.py
-	$(PYTHON) tests/test_chunk_stream.py
+	$(PYTHON) tools/rust_workspace.py test --locked -p traceq-core --test encode_capacity
 	$(PYTHON) tests/test_write_stream.py
 	$(PYTHON) tests/test_state_stream.py
 	$(PYTHON) tests/test_find_value_stream.py

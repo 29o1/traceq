@@ -41,3 +41,45 @@ fn independent_wire_and_capacity() {
     let overflow = vec![event; MAX_RECORDS + 1];
     assert!(encode_block_into(&overflow, &mut full).is_err());
 }
+
+#[test]
+fn decoder_checks_each_packed_field_and_exact_block_tail() {
+    for field in 0..7 {
+        for width in 0..=8u32 {
+            // Literal GTSC record: one write, one populated width nibble.
+            // Even delta bytes avoid signed zigzag when this is a seq or PC.
+            let mut raw = vec![2];
+            raw.extend_from_slice(&(width << (field * 4)).to_le_bytes());
+            raw.extend_from_slice(
+                &[0x42, 0x37, 0x13, 0x99, 0x22, 0x11, 0xcc, 0xaa][..width as usize],
+            );
+            let mut bytes = [0; 8];
+            bytes[..width as usize].copy_from_slice(&raw[5..]);
+            let mut expected = [0; 8];
+            expected[0] = 2;
+            expected[field + 1] = if field < 2 {
+                u64::from_le_bytes(bytes) >> 1
+            } else {
+                u64::from_le_bytes(bytes)
+            };
+            let mut aligned = vec![0xff];
+            aligned.extend_from_slice(&raw);
+            assert_eq!(decode_block(&aligned[1..], 1).unwrap()[0].words(), expected);
+            for tail in 0..raw.len() {
+                assert!(
+                    decode_block(&raw[..tail], 1).is_err(),
+                    "field {field}, width {width}, tail {tail}"
+                );
+            }
+            raw.push(0);
+            assert!(decode_block(&raw, 1).is_err());
+        }
+        for invalid_width in 9..=15u32 {
+            let mut raw = vec![2];
+            raw.extend_from_slice(&(invalid_width << (field * 4)).to_le_bytes());
+            raw.resize(5 + invalid_width as usize, 0);
+            assert!(decode_block(&raw, 1).is_err());
+        }
+    }
+    assert!(decode_block(&[2, 0, 0, 0, 0x80], 1).is_err());
+}

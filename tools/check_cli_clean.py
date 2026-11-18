@@ -32,10 +32,9 @@ def main():
         sys.exit('check-cli-clean requires macOS')
     files = [Path(name) for name in (
         'Makefile', 'cli/Makefile', 'tools/rust_workspace.py',
-        'rust/Cargo.toml', 'rust/Cargo.lock', 'tests/chunk_stream.cpp',
+        'rust/Cargo.toml', 'rust/Cargo.lock',
     )]
     files.extend(p.relative_to(ROOT) for p in (ROOT / 'tests').glob('test_*.py'))
-    files.extend(p.relative_to(ROOT) for p in (ROOT / 'cli/include').rglob('*.h'))
     for package in PACKAGES:
         directory = ROOT / 'rust' / package
         files.extend(p.relative_to(ROOT) for p in directory.rglob('*')

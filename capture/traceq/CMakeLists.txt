@@ -9,10 +9,6 @@ if(TRACEQ_GUM_ONLY)
     include(cmake/TraceqGum.cmake)
     return()
 endif()
-option(TRACEQ_CAPTURE_PERF "Deprecated C++ diagnostic collector" OFF)
-if(TRACEQ_CAPTURE_PERF)
-    message(FATAL_ERROR "The retired C++ diagnostic collector is isolated; use complete capture measurements")
-endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c" "/* Rust static library link container. */\n")
 add_library(traceq_capture SHARED "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c")
 if(ANDROID)
@@ -27,7 +23,6 @@ if(ANDROID)
     target_link_options(traceq_capture PRIVATE "-Wl,--exclude-libs,libtraceq-gum.a" "-Wl,--gc-sections")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(_traceq_rust_target aarch64-apple-ios)
-    set(_traceq_target_env "TRACEQ_RUST_TARGET=aarch64-apple-ios")
     set(TRACEQ_GUM_ARCHIVE "${CMAKE_CURRENT_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a")
     target_link_libraries(traceq_capture PRIVATE "-framework Foundation" "-framework CoreFoundation")
 else()
@@ -39,9 +34,9 @@ file(GLOB_RECURSE _traceq_rust_sources CONFIGURE_DEPENDS
     "${TRACEQ_RUST_ROOT}/rust/traceq-core/src/*.rs"
     "${TRACEQ_RUST_ROOT}/rust/traceq-observer/src/*.rs")
 add_custom_command(OUTPUT "${_traceq_rust_library}"
-    COMMAND "${CMAKE_COMMAND}" -E env "${_traceq_target_env}"
+    COMMAND "${CMAKE_COMMAND}" -E env ${_traceq_target_env}
         "${Python3_EXECUTABLE}" "${TRACEQ_RUST_ROOT}/tools/rust_workspace.py"
-        build --release -p traceq-capture --target "${_traceq_rust_target}"
+        build --locked --release -p traceq-capture --target "${_traceq_rust_target}"
     DEPENDS ${_traceq_rust_sources}
         "${TRACEQ_RUST_ROOT}/rust/traceq-capture/Cargo.toml"
         "${TRACEQ_RUST_ROOT}/rust/traceq-core/Cargo.toml"

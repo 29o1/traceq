@@ -1,19 +1,19 @@
 PYTHON ?= python3
 RUST_CLI := ../.deps/rust/target/release/traceq
-RUST_SOURCES := $(shell find ../rust/traceq-cli ../rust/traceq-query ../rust/traceq-core -type f \( -name '*.rs' -o -name '*.json' -o -name '*.txt' -o -name 'Cargo.toml' \))
-RUST_SOURCES += ../rust/Cargo.toml ../rust/Cargo.lock ../tools/rust_workspace.py
-
 all: traceq
 
-$(RUST_CLI): $(RUST_SOURCES)
+build-rust:
 	$(PYTHON) ../tools/rust_workspace.py build --locked --release -p traceq-cli
 
-traceq: $(RUST_CLI) Makefile
-	cp $(RUST_CLI) $@.new
-	chmod 755 $@.new
-	mv $@.new $@
+traceq: build-rust
+	@if ! test -x "$@" || ! cmp -s "$(RUST_CLI)" "$@"; then \
+		set -e; staged=$$(mktemp "$@.XXXXXX"); \
+		trap 'rm -f "$$staged"' EXIT; \
+		install -m 755 "$(RUST_CLI)" "$$staged"; \
+		mv "$$staged" "$@"; \
+	fi
 
 clean:
-	rm -f traceq gt
+	rm -f traceq
 
-.PHONY: all clean
+.PHONY: all build-rust clean
