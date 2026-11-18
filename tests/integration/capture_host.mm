@@ -1,10 +1,13 @@
 #include "Capture.h"
+#include "frida-gum.h"
 #include <dlfcn.h>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <sys/resource.h>
+#include <utility>
 
 using Target=uint64_t(*)(uint64_t,void*,uint64_t);
 static uint64_t ns() {
