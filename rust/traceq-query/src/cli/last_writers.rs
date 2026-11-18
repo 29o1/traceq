@@ -1,5 +1,8 @@
 use super::*;
-use std::io::{Cursor, Read};
+use std::{
+    fmt::Write as _,
+    io::{Cursor, Read},
+};
 use traceq_core::wire::{CHUNK_MAGIC, Event, FLAT_MAGIC};
 
 struct Selection {
@@ -9,6 +12,7 @@ struct Selection {
     pub limit: u64,
     pub offset: u64,
     pub compact: bool,
+    pub runs: bool,
 }
 
 struct Gap {
@@ -65,6 +69,12 @@ struct ObservedWrite {
     pc: u64,
     epoch: u64,
     first_gap: Option<Gap>,
+}
+
+impl ObservedWrite {
+    fn is_current(&self, info: &Info) -> bool {
+        self.first_gap.is_none() && !info.unpositioned_gap
+    }
 }
 
 struct History {
@@ -137,7 +147,7 @@ impl History {
         compact_gaps: Option<&mut CompactGaps>,
     ) -> Value {
         // A gap invalidates present knowledge while retaining historical evidence.
-        let current = observed.filter(|write| write.first_gap.is_none() && !info.unpositioned_gap);
+        let current = observed.filter(|write| write.is_current(info));
         let mut row = json!({
             "address": hx(address),
             "known": current.is_some(),
@@ -149,27 +159,65 @@ impl History {
             row["pc_offset"] = hx(write.pc.wrapping_sub(info.header.code_base));
         }
         row["last_observed_write"] = if let Some(write) = observed {
-            let gaps_since = self.epoch - write.epoch;
-            let mut evidence = json!({
-                "value": hx(write.value),
-                "writer_seq": write.seq,
-                "pc": hx(write.pc),
-                "pc_offset": hx(write.pc.wrapping_sub(info.header.code_base)),
-                "gaps_since": gaps_since,
-                "latest_gap_ev": (gaps_since != 0).then_some(self.last_gap_seq)
-            });
-            let gap = write.first_gap.as_ref();
-            if let Some(table) = compact_gaps {
-                let reference = gap.map(|gap| table.reference(gap, info));
-                evidence["first_located_gap_ref"] = json!(reference);
-            } else {
-                evidence["first_located_gap"] = gap.map_or(Value::Null, |gap| gap.render(info));
-            }
+            let mut evidence = self.evidence(write, info, compact_gaps);
+            evidence["value"] = hx(write.value);
             evidence
         } else {
             Value::Null
         };
         row
+    }
+
+    fn evidence(
+        &self,
+        write: &ObservedWrite,
+        info: &Info,
+        table: Option<&mut CompactGaps>,
+    ) -> Value {
+        let gaps_since = self.epoch - write.epoch;
+        let mut evidence = json!({
+            "writer_seq": write.seq,
+            "pc": hx(write.pc),
+            "pc_offset": hx(write.pc.wrapping_sub(info.header.code_base)),
+            "gaps_since": gaps_since,
+            "latest_gap_ev": (gaps_since != 0).then_some(self.last_gap_seq)
+        });
+        let gap = write.first_gap.as_ref();
+        if let Some(table) = table {
+            evidence["first_located_gap_ref"] = json!(gap.map(|gap| table.reference(gap, info)));
+        } else {
+            evidence["first_located_gap"] = gap.map_or(Value::Null, |gap| gap.render(info));
+        }
+        evidence
+    }
+
+    fn runs(&self, mut address: u64, info: &Info, gaps: &mut CompactGaps) -> Vec<Value> {
+        // Writes from the same event share the PC and the same subsequent gap
+        // history. Group only adjacent bytes and only within the current page.
+        let event = |byte: &Option<ObservedWrite>| byte.as_ref().map(|write| write.seq);
+        let mut rows = Vec::new();
+        for run in self.bytes.chunk_by(|a, b| event(a) == event(b)) {
+            let first = run[0].as_ref();
+            let evidence = if let Some(write) = first {
+                let mut hex = String::with_capacity(run.len() * 2);
+                for byte in run.iter().flatten() {
+                    write!(&mut hex, "{:02x}", byte.value).expect("write to a string");
+                }
+                let mut evidence = self.evidence(write, info, Some(gaps));
+                evidence["data_hex"] = Value::String(hex);
+                evidence
+            } else {
+                Value::Null
+            };
+            rows.push(json!({
+                "address": hx(address),
+                "size": run.len(),
+                "known": first.is_some_and(|write| write.is_current(info)),
+                "last_observed_write": evidence
+            }));
+            address += run.len() as u64;
+        }
+        rows
     }
 }
 
@@ -200,21 +248,30 @@ fn profile2(
             .into());
     }
     let mut gaps = CompactGaps::default();
-    let rows = history
-        .bytes
-        .iter()
-        .enumerate()
-        .map(|(i, write)| {
-            history.row(
-                page_base + i as u64,
-                write.as_ref(),
-                &info,
-                selection.compact.then_some(&mut gaps),
-            )
-        })
-        .collect::<Vec<_>>();
+    let rows = if selection.runs {
+        history.runs(page_base, &info, &mut gaps)
+    } else {
+        history
+            .bytes
+            .iter()
+            .enumerate()
+            .map(|(i, write)| {
+                history.row(
+                    page_base + i as u64,
+                    write.as_ref(),
+                    &info,
+                    selection.compact.then_some(&mut gaps),
+                )
+            })
+            .collect()
+    };
     let mut meta = capture_meta(&info);
-    meta.extend(page_meta(args, selection.len, rows.len(), selection.offset));
+    meta.extend(page_meta(
+        args,
+        selection.len,
+        history.bytes.len(),
+        selection.offset,
+    ));
     meta.insert(
         "as_of_ev".into(),
         json!(selection.at.or_else(|| info.instructions.checked_sub(1))),
@@ -223,13 +280,16 @@ fn profile2(
         "state_position".into(),
         json!("after_recorded_accesses_at_event"),
     );
-    if selection.compact {
+    if selection.runs {
+        meta.insert("last_writers_format".into(), json!("runs-v1"));
+    }
+    if selection.compact || selection.runs {
         meta.insert("located_gaps".into(), Value::Array(gaps.rows));
     }
     Ok(response(rows, Value::Object(meta), json))
 }
 
-const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--at-seq N] [--limit N] [--offset N] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  JSON meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n";
+const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--at-seq N] [--limit N] [--offset N] [--compact | --runs] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  JSON meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n  --runs --json sets meta.last_writers_format to runs-v1 for profile 2.\n  Each row has address, size, known and last_observed_write. Adjacent bytes from\n  one writer event share its provenance and a data_hex string in address order.\n  A null last_observed_write means no retained write. Only known runs have a\n  current value equal to data_hex. Gap refs are page-local. Limits, offsets,\n  meta.shown and meta.total count bytes, including unknowns.\n";
 fn p1_failure(code: &str, message: impl Into<String>, status: i32, json_output: bool) -> Response {
     let message = message.into();
     if json_output {
@@ -254,6 +314,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut use_at_ev = false;
     let (mut limit, mut offset) = (20, 0);
     let mut compact = false;
+    let mut runs = false;
     let mut i = 1;
     while i < args.len() {
         let flag = &args[i];
@@ -262,6 +323,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--help" | "-h" => return Ok(Response::text(HELP)),
             "--json" => {}
             "--compact" => compact = true,
+            "--runs" => runs = true,
             "--range" => {
                 let value = next(args, &mut i, flag)?;
                 if range.is_some() {
@@ -293,6 +355,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let Some((base, len)) = range else {
         return Err(format!("--range is required; {RANGE_HINT}").into());
     };
+    if runs && !json {
+        return Err("--runs requires last-writers --json (profile 2)"
+            .to_string()
+            .into());
+    }
     let Ok(file) = File::open(path) else {
         return Ok(p1_failure("OPEN", format!("cannot open {path}"), 1, json));
     };
@@ -308,6 +375,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         limit,
         offset,
         compact,
+        runs,
     };
     if &header[..8] == CHUNK_MAGIC
         || (&header[..8] == FLAT_MAGIC
@@ -326,6 +394,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             selection,
             json,
         );
+    }
+    if runs {
+        return Err("--runs requires last-writers --json (profile 2)"
+            .to_string()
+            .into());
     }
     if compact || use_at_ev {
         let flag = if compact { "--compact" } else { "--at-ev" };

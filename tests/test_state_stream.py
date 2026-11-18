@@ -164,6 +164,76 @@ class StateStreamChecks(unittest.TestCase):
             expanded['meta']['next']=default['meta']['next']
         self.assertEqual(expanded,default)
 
+    def expand_writer_runs(self, document):
+        meta = dict(document['meta'])
+        self.assertEqual(meta.pop('last_writers_format'), 'runs-v1')
+        meta['next'] = meta['next'].replace(' --runs ', ' --compact ')
+        data = []
+        for run in document['data']:
+            source = run['last_observed_write']
+            if source is None:
+                self.assertFalse(run['known'])
+                values = [None] * run['size']
+            else:
+                values = list(bytes.fromhex(source['data_hex']))
+                self.assertEqual(len(values), run['size'])
+            for offset, value in enumerate(values):
+                row = {'address': hex(int(run['address'], 0) + offset), 'known': run['known'],
+                       'value': None, 'writer_seq': None, 'pc': None, 'last_observed_write': None}
+                if source is not None:
+                    history = {k: v for k, v in source.items() if k != 'data_hex'}
+                    history['value'] = hex(value)
+                    row['last_observed_write'] = history
+                    if run['known']:
+                        row.update({k: history[k] for k in ('value', 'writer_seq', 'pc', 'pc_offset')})
+                data.append(row)
+        self.assertEqual(meta['shown'], len(data))
+        return {'data': data, 'meta': meta}
+
+    def test_writer_runs_roundtrip_for_cutoffs_and_byte_pagination(self):
+        for chunked in (False, True):
+            path = self.artifact(self.compact_events(), chunked)
+            base = ['--range', '0x2000,16']
+            for cutoff in (0, 1, 2, 3, 4, 5):
+                args = [*base, '--at-seq', str(cutoff)]
+                runs = self.query(path, 'last-writers', [*args, '--runs'])
+                compact = self.query(path, 'last-writers', [*args, '--compact'])
+                self.assertEqual(self.expand_writer_runs(runs), compact)
+                if cutoff == 0:
+                    self.assertEqual([(row['size'], row['known']) for row in runs['data']], [(8, True), (8, False)])
+                    self.assertEqual(runs['data'][0]['last_observed_write']['data_hex'], '0077665544332211')
+                    self.assertIsNone(runs['data'][1]['last_observed_write'])
+
+            args = [*base, '--at-seq', '0', '--limit', '3', '--offset', '2']
+            first = self.query(path, 'last-writers', [*args, '--runs'])
+            self.assertEqual(self.expand_writer_runs(first), self.query(path, 'last-writers', [*args, '--compact']))
+            self.assertEqual([(row['address'], row['size']) for row in first['data']], [('0x2002', 3)])
+            next_args = shlex.split(first['meta']['next'])
+            result = subprocess.run([str(ROOT/'cli/traceq'), *next_args[1:]],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            second = json.loads(result.stdout)
+            self.assertEqual(second['meta']['last_writers_format'], 'runs-v1')
+            self.assertEqual([(row['address'], row['size']) for row in second['data']], [('0x2005', 3)])
+
+    def test_writer_runs_keep_unpositioned_gaps_and_validate_empty_pages(self):
+        for chunked in (False, True):
+            events = self.compact_events()
+            events.insert(-1, (3, 6, 0, 0, 0, 0, 0, 4))
+            events[-1] = (4, 6, 0, 3, 3, 0, 3, 2)
+            path = self.artifact(events, chunked)
+            args = ['--range', '0x2000,16', '--at-seq', '0']
+            runs = self.query(path, 'last-writers', [*args, '--runs'])
+            self.assertTrue(runs['meta']['unpositioned_gap'])
+            self.assertTrue(all(not row['known'] for row in runs['data']))
+            self.assertEqual(self.expand_writer_runs(runs), self.query(path, 'last-writers', [*args, '--compact']))
+            raw = path.read_bytes()
+            empty = [*args, '--runs', '--offset', '16']
+            self.assertEqual(self.query(path, 'last-writers', empty)['data'], [])
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                self.assertEqual(self.query(path, 'last-writers', empty, ok=False)['error']['code'], 'TRACE_ERROR')
+
     def test_compact_gap_references_preserve_cutoffs_overwrites_and_all_facts(self):
         for chunked in [False,True]:
             path=self.artifact(self.compact_events(),chunked)
@@ -213,8 +283,9 @@ class StateStreamChecks(unittest.TestCase):
         self.assertEqual(result.returncode,2);self.assertEqual(result.stdout,'');self.assertIn('--json',result.stderr)
         legacy=self.out/'profile-one.gtsw'
         legacy.write_bytes(b'GTSW001\0'+struct.pack('<7Q',0x1000,0x100,0x2000,32,1,1,64)+struct.pack('<8Q',4,0,0,0,0,0,0,1))
-        bad=self.query(legacy,'last-writers',['--range','0x2000,8','--compact'],ok=False)
-        self.assertEqual(set(bad),{'error'});self.assertEqual(bad['error']['code'],'ARGUMENT')
+        for mode in ('--compact', '--runs'):
+            bad=self.query(legacy,'last-writers',['--range','0x2000,8',mode],ok=False)
+            self.assertEqual(set(bad),{'error'});self.assertEqual(bad['error']['code'],'ARGUMENT')
 
     def test_pre_post_and_unchanged_delta(self):
         p=self.artifact(self.base())
