@@ -190,7 +190,8 @@ Unsupported/unknown observations do not imply zero.
     write(work / 'tools.json', tool_manifest(work / 'traceq', traces, entry))
     write(work / 'training.json', [{k: r[k] for k in ['trace', 'seed', 'count', 'initial']} for r in captures])
     write(private / 'independent-capture.json', captures)
-    write(run / 'manifest.json', {'created_ns': time.time_ns(), 'gt_sha256': sha(work / 'traceq'), 'product_cli_sha256': sha(GT),
+    write(run / 'manifest.json', {'created_ns': time.time_ns(), 'gt_sha256': sha(work / 'traceq'),
+        'query_entry': entry, 'product_cli_sha256': sha(GT),
         'collector_sha256': sha(HOST), 'fixture_sha256': sha(LIB),
         'harness': {p.name: sha(p) for p in HERE.glob('*.py')},
         'evaluation': 'localized offline task experiment; not a general benchmark'})
@@ -261,8 +262,14 @@ def repeat(run, previous, entry=None):
         raise ValueError('No supported tasks with trace inputs to repeat')
     manifest = json.loads((previous / 'manifest.json').read_text())
     manifest.update({'repeated_from': str(previous), 'created_ns': time.time_ns(),
-                     'gt_sha256': sha(work / 'traceq'), 'product_cli_sha256': sha(GT), 'frozen_inputs': inputs,
+                     'query_entry': selected_entry, 'gt_sha256': sha(work / 'traceq'), 'frozen_inputs': inputs,
                      'harness': {p.name: sha(p) for p in HERE.glob('*.py')}})
+    # Rust repeats read through the packed evaluator. The product CLI was used
+    # to prepare the original inputs or is itself the packed tool in Python mode.
+    if selected_entry == 'python':
+        manifest['product_cli_sha256'] = manifest['gt_sha256']
+    else:
+        manifest.pop('product_cli_sha256', None)
     write(run / 'manifest.json', manifest)
     print(run, flush=True)
 

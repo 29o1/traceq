@@ -5,6 +5,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import bench
 import query
@@ -26,6 +27,35 @@ def fixture(path):
 
 
 class Entry(unittest.TestCase):
+    def test_repeat_records_the_packed_query_tool(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'fixture.gtsw'
+            fixture(path)
+            previous = root / 'previous'
+            original = bench.pack(previous, 'independent', {'test': {'path': str(path)}}, bench.COMMON)
+            (previous / 'grader').mkdir()
+            original_manifest = {'product_cli_sha256': 'previous-cli'}
+            bench.write(previous / 'manifest.json', original_manifest)
+
+            rust = root / 'rust-repeat'
+            with patch.object(bench, 'GT', root / 'absent-product-cli'):
+                bench.repeat(rust, previous)
+            python = root / 'python-repeat'
+            bench.repeat(python, previous, entry='python')
+
+            for run, entry, binary in [(rust, 'rust', bench.EVAL_CLI), (python, 'python', bench.GT)]:
+                manifest = json.loads((run / 'manifest.json').read_text())
+                self.assertEqual(manifest['query_entry'], entry)
+                self.assertEqual(manifest['gt_sha256'], bench.sha(binary))
+                self.assertEqual(manifest['frozen_inputs'], {'independent/test': bench.sha(path)})
+                if entry == 'python':
+                    self.assertEqual(manifest['product_cli_sha256'], manifest['gt_sha256'])
+                else:
+                    self.assertNotIn('product_cli_sha256', manifest)
+            self.assertEqual(json.loads((previous / 'manifest.json').read_text()), original_manifest)
+            self.assertEqual(bench.sha(original / 'traceq'), bench.sha(bench.EVAL_CLI))
+
     def test_root_manifest_error_is_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
