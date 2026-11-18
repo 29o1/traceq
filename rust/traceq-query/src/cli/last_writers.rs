@@ -523,7 +523,8 @@ fn profile1(
                 }
             }
             Kind::Gap => {
-                if e.seq > instructions
+                if [e.address, e.size, e.low, e.high] != [0; 4]
+                    || e.seq > instructions
                     || (e.seq < instructions && e.seq != instructions - 1)
                     || e.detail < 1
                     || e.detail > 5

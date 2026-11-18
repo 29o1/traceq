@@ -408,6 +408,14 @@ fn read_impl<
     let mut site_words = SiteWords::new();
     loop {
         let e = input.next_event()?;
+        if e.kind == Kind::Gap {
+            // GAP carries a reason and position, never memory data. Validate
+            // both positioned and global gaps before applying any selection.
+            require(
+                [e.address, e.size, e.low, e.high] == [0; 4],
+                "invalid gap payload",
+            )?;
+        }
         match e.kind {
             Kind::Features => {
                 let explicit = e.address == 3;
