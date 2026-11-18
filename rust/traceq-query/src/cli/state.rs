@@ -1,6 +1,5 @@
 use super::*;
 use std::fmt::Write as _;
-use std::io::Read;
 struct View<'a> {
     seq: u64,
     pc: u64,
@@ -93,29 +92,12 @@ struct Instruction {
 fn instruction_row(g: &Instruction, info: &Info) -> Value {
     json!({"ev":g.seq,"pc":hx(g.pc),"off":hx(g.pc.wrapping_sub(info.header.code_base)),"opcode":hx(g.word),"text":text(info,g.pc),"completion":if g.committed {"confirmed"} else {"unobserved"},"post_observed":g.committed,"gap":g.gap})
 }
-fn profile2(path: &str) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
-    };
-    let mut b = [0; 64];
-    file.read_exact(&mut b).is_ok()
-        && (&b[..8] == b"GTSC001\0"
-            || (&b[..8] == b"GTSW001\0" && u64::from_le_bytes(b[48..56].try_into().unwrap()) == 2))
-}
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let name = args[0].as_str();
     let json = args.iter().any(|s| s == "--json");
-    if name == "last-writers" {
-        let positional = args
-            .iter()
-            .skip(1)
-            .find(|s| !s.starts_with('-') && File::open(s).is_ok());
-        if positional.is_none_or(|p| !profile2(p)) {
-            return super::find::profile1(args);
-        }
-    }
-    let memory_query = matches!(name, "mem-state" | "last-writers");
-    let memory_range_hint = "use --range BASE,LEN (LEN is bytes), e.g. --range 0x1000,16";
+    let memory_query = name == "mem-state";
+    let event_window = matches!(name, "instructions" | "find-pc" | "boundaries");
+    let point_query = matches!(name, "mem-state" | "reg-state");
     let mut path = String::new();
     let mut phase = if name == "reg-state" {
         Phase::Pre
@@ -146,19 +128,15 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--json" => {}
             "--compact" => compact = true,
             "--gaps" => gaps_only = true,
-            "--range" => {
+            "--range" if memory_query => {
                 let value = next(args, &mut i, a)?;
-                let Some((b, l)) = value.split_once(',') else {
-                    return Err("one --range BASE,LEN is required".to_string().into());
-                };
                 if has_range {
                     return Err("one --range BASE,LEN is required".to_string().into());
                 }
-                base = parse_u64(b, false)?;
-                len = parse_u64(l, false)?;
+                (base, len) = parse_range(value)?;
                 has_range = true;
             }
-            "--at-ev" | "--at-seq" => {
+            "--at-ev" | "--at-seq" if point_query => {
                 at = parse_u64(next(args, &mut i, a)?, false)?;
                 has_at = true;
             }
@@ -179,9 +157,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                     },
                 });
             }
-            "--from" => from = parse_u64(next(args, &mut i, a)?, false)?,
-            "--to" => to = parse_u64(next(args, &mut i, a)?, false)?,
-            "--limit" => limit = parse_u64(next(args, &mut i, a)?, false)?,
+            "--from" if event_window => from = parse_u64(next(args, &mut i, a)?, false)?,
+            "--to" if event_window => to = parse_u64(next(args, &mut i, a)?, false)?,
+            "--limit" => limit = parse_page_number(name, next(args, &mut i, a)?)?,
             "--offset" => offset = parse_u64(next(args, &mut i, a)?, false)?,
             "--phase" => {
                 if name == "boundaries" {
@@ -190,6 +168,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                             .to_string()
                             .into(),
                     );
+                }
+                if !point_query {
+                    return Err(format!("--phase does not apply to {name}").into());
                 }
                 phase = match next(args, &mut i, a)? {
                     "pre" => Phase::Pre,
@@ -200,7 +181,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             }
             "--reg" => registers.push(reg(next(args, &mut i, a)?)?),
             "--addr" | "--len" | "--size" if memory_query => {
-                return Err(format!("unsupported memory selector {a}; {memory_range_hint}").into());
+                return Err(format!("unsupported memory selector {a}; {RANGE_HINT}").into());
             }
             "--addr" => pcs.push(parse_u64(next(args, &mut i, a)?, false)?),
             "--off" => offs.push(parse_u64(next(args, &mut i, a)?, false)?),
@@ -213,13 +194,8 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     if path.is_empty() || limit == 0 || limit > 4096 || from > to || read_only && write_only {
         return Err("invalid file, limits, window or phase".to_string().into());
     }
-    if has_range && (len == 0 || len > 4096 || base.checked_add(len).is_none()) {
-        return Err("range length must be 1..4096 without overflow"
-            .to_string()
-            .into());
-    }
     if memory_query && !has_range {
-        return Err(format!("--range is required; {memory_range_hint}").into());
+        return Err(format!("--range is required; {RANGE_HINT}").into());
     }
     if matches!(name, "mem-state" | "reg-state") && !has_at && checkpoints.is_empty() {
         return Err("--at-ev is required".to_string().into());
@@ -234,13 +210,6 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         return Err("checkpoint page exceeds 4096 byte cells; reduce --limit"
             .to_string()
             .into());
-    }
-    if name == "boundaries" && (has_range || has_at) {
-        return Err(
-            "boundaries uses --from/--to exit events; --range and --at-ev/--at-seq do not apply"
-                .to_string()
-                .into(),
-        );
     }
     if name == "find-pc" && pcs.is_empty() && offs.is_empty() {
         return Err("--addr or --off is required".to_string().into());
@@ -262,14 +231,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     if gaps_only && name != "instructions" {
         return Err("--gaps applies to instructions".to_string().into());
     }
-    if compact && (!matches!(name, "last-writers" | "mem-state") || !json) {
+    if compact && (name != "mem-state" || !json) {
         return Err(
             "--compact requires last-writers, mem-access or mem-state --json (profile 2)"
                 .to_string()
                 .into(),
         );
     }
-    if registers.is_empty() {
+    if registers.is_empty() && matches!(name, "reg-state" | "boundaries") {
         for n in ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"] {
             registers.push(reg(n)?);
         }
@@ -371,37 +340,13 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         }
         return Ok(response(rows, Value::Object(meta), json));
     }
-    if name == "last-writers" {
-        return super::last_writers::run(
-            args,
-            input(&path)?,
-            super::last_writers::Selection {
-                base,
-                len,
-                at: has_at.then_some(at),
-                limit,
-                offset,
-                compact,
-            },
-            json,
-        );
-    }
     let mut selected: Option<Group> = None;
     let mut instruction_rows = vec![];
     let mut rows = vec![];
     let mut total = 0u64;
-    let mut range_ok = true;
     let mut spans: Vec<(Group, Option<Group>)> = vec![];
     let mut pending: Option<Group> = None;
     let mut on_group = |g: View<'_>, state: &Info| {
-        if has_range
-            && (base < state.header.data_base
-                || len > state.header.data_size
-                || base - state.header.data_base > state.header.data_size - len)
-        {
-            range_ok = false;
-            return;
-        }
         if name == "reg-state" && g.seq == at {
             selected = Some(g.full.unwrap().clone());
         }
@@ -455,11 +400,6 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     } else {
         replay::read_evidence(stream, |g, info| on_group(View::from_evidence(g), info))?
     };
-    if !range_ok {
-        return Err("query extends outside declared data range"
-            .to_string()
-            .into());
-    }
     if has_at && at >= info.instructions {
         return Err("requested instruction is outside the capture"
             .to_string()

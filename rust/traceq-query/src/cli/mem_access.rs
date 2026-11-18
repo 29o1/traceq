@@ -1,7 +1,6 @@
 use super::*;
 use std::ops::{Range, RangeInclusive};
 
-const RANGE_HINT: &str = "use --range BASE,LEN (LEN is bytes), e.g. --range 0x1000,16";
 const COLUMNS: [&str; 8] = ["ev", "pc", "off", "rw", "addr", "size", "known", "val"];
 
 struct Options<'a> {
@@ -9,7 +8,6 @@ struct Options<'a> {
     addresses: Range<u64>,
     events: RangeInclusive<u64>,
     direction: Option<Kind>,
-    at: Option<u64>,
     limit: usize,
     offset: u64,
     compact: bool,
@@ -21,10 +19,8 @@ impl<'a> Options<'a> {
         let json = args.iter().any(|a| a == "--json");
         let mut path = "";
         let mut range = None;
-        let mut at = None;
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
-        let (mut checkpoint, mut registers, mut pc, mut gaps) = (false, 0, false, false);
         let invalid = || "invalid file, limits, window or phase".to_string();
         let mut i = 1;
         while i < args.len() {
@@ -35,15 +31,14 @@ impl<'a> Options<'a> {
                 "--json" => {}
                 "--range" => {
                     let value = next(args, &mut i, flag)?;
-                    let Some((base, len)) = value.split_once(',').filter(|_| range.is_none())
-                    else {
+                    if range.is_some() {
                         return Err("one --range BASE,LEN is required".to_string().into());
-                    };
-                    range = Some((parse_u64(base, false)?, parse_u64(len, false)?));
+                    }
+                    range = Some(parse_range(value)?);
                 }
                 "--from" => from = parse_u64(next(args, &mut i, flag)?, false)?,
                 "--to" => to = parse_u64(next(args, &mut i, flag)?, false)?,
-                "--limit" => limit = parse_u64(next(args, &mut i, flag)?, false)?,
+                "--limit" => limit = parse_page_number("mem-access", next(args, &mut i, flag)?)?,
                 "--offset" => offset = parse_u64(next(args, &mut i, flag)?, false)?,
                 "--read" => read = true,
                 "--write" => write = true,
@@ -51,34 +46,9 @@ impl<'a> Options<'a> {
                 "--addr" | "--len" | "--size" => {
                     return Err(format!("unsupported memory selector {flag}; {RANGE_HINT}").into());
                 }
-                // Preserve the shared state parser's accepted legacy flags
-                // and diagnostics for selectors that belong to other queries.
-                "--at-ev" | "--at-seq" => at = Some(parse_u64(next(args, &mut i, flag)?, false)?),
-                "--phase" => {
-                    if !matches!(next(args, &mut i, flag)?, "pre" | "post") {
-                        return Err(invalid().into());
-                    }
+                "--at-ev" | "--at-seq" | "--phase" | "--checkpoint" => {
+                    return Err(format!("{flag} does not apply to mem-access; use --from/--to for events or mem-state for a checkpoint").into());
                 }
-                "--checkpoint" => {
-                    let value = next(args, &mut i, flag)?;
-                    let Some((seq, _)) = value
-                        .split_once(':')
-                        .filter(|(_, phase)| matches!(*phase, "pre" | "post"))
-                    else {
-                        return Err("--checkpoint requires E:pre or E:post".to_string().into());
-                    };
-                    parse_u64(seq, false)?;
-                    checkpoint = true;
-                }
-                "--reg" => {
-                    reg(next(args, &mut i, flag)?)?;
-                    registers += 1;
-                }
-                "--off" => {
-                    parse_u64(next(args, &mut i, flag)?, false)?;
-                    pc = true;
-                }
-                "--gaps" => gaps = true,
                 _ if !flag.starts_with('-') && path.is_empty() => path = flag,
                 _ => return Err(format!("unsupported argument: {flag}").into()),
             }
@@ -90,28 +60,6 @@ impl<'a> Options<'a> {
         let Some((base, len)) = range else {
             return Err(format!("--range is required; {RANGE_HINT}").into());
         };
-        let Some(end) = base.checked_add(len).filter(|_| (1..=4096).contains(&len)) else {
-            return Err("range length must be 1..4096 without overflow"
-                .to_string()
-                .into());
-        };
-        if checkpoint {
-            return Err("1..64 checkpoints apply only to mem-state and cannot mix with --at-ev/--at-seq/--phase".to_string().into());
-        }
-        if registers > 65 {
-            return Err("at most 65 registers per query".to_string().into());
-        }
-        if registers != 0 {
-            return Err("--reg applies to reg-state or boundaries"
-                .to_string()
-                .into());
-        }
-        if pc {
-            return Err("PC selectors apply to find-pc".to_string().into());
-        }
-        if gaps {
-            return Err("--gaps applies to instructions".to_string().into());
-        }
         if compact && !json {
             return Err(
                 "--compact requires last-writers, mem-access or mem-state --json (profile 2)"
@@ -128,10 +76,9 @@ impl<'a> Options<'a> {
         };
         Ok(Some(Self {
             path,
-            addresses: base..end,
+            addresses: base..base + len,
             events: from..=to,
             direction,
-            at,
             limit: limit as usize,
             offset,
             compact,
@@ -147,20 +94,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut rows = Vec::new();
     let mut sources = Vec::new();
     let mut total = 0;
-    let mut range_ok = true;
     let base = options.addresses.start;
     let end = options.addresses.end;
     let len = end - base;
-    let info = replay::read_evidence(input(options.path)?, |g, state| {
-        let header = &state.header;
-        if base < header.data_base
-            || len > header.data_size
-            || base - header.data_base > header.data_size - len
-        {
-            range_ok = false;
-            return;
-        }
-        if !options.events.contains(&g.seq) {
+    let stream = input(options.path)?;
+    let header = stream.header;
+    let range_ok = data_contains(header, base, len);
+    let info = replay::read_evidence(stream, |g, _| {
+        if !range_ok || !options.events.contains(&g.seq) {
             return;
         }
         for a in g.accesses {
@@ -193,11 +134,6 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     })?;
     if !range_ok {
         return Err("query extends outside declared data range"
-            .to_string()
-            .into());
-    }
-    if options.at.is_some_and(|at| at >= info.instructions) {
-        return Err("requested instruction is outside the capture"
             .to_string()
             .into());
     }

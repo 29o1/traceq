@@ -77,6 +77,31 @@ pub(crate) fn parse_u64(text: &str, decimal: bool) -> Result<u64, CliError> {
     u64::from_str_radix(digits, base)
         .map_err(|_| format!("invalid unsigned integer: '{text}'").into())
 }
+// Search pages use decimal counts; state commands retain their radix syntax.
+pub(crate) fn parse_page_number(command: &str, literal: &str) -> Result<u64, CliError> {
+    parse_u64(literal, command == "find-value")
+}
+
+fn parse_range(text: &str) -> Result<(u64, u64), CliError> {
+    let (base, len) = text
+        .split_once(',')
+        .ok_or_else(|| CliError("one --range BASE,LEN is required".into(), 2))?;
+    let (base, len) = (parse_u64(base, false)?, parse_u64(len, false)?);
+    if !(1..=4096).contains(&len) || base.checked_add(len).is_none() {
+        return Err("range length must be 1..4096 without overflow"
+            .to_string()
+            .into());
+    }
+    Ok((base, len))
+}
+
+const RANGE_HINT: &str = "use --range BASE,LEN (LEN is bytes), e.g. --range 0x1000,16";
+
+fn data_contains(header: traceq_core::wire::Header, base: u64, len: u64) -> bool {
+    base >= header.data_base
+        && len <= header.data_size
+        && base - header.data_base <= header.data_size - len
+}
 pub(crate) fn number128(text: &str) -> Result<u128, CliError> {
     let (base, digits) = if text.starts_with("0x") || text.starts_with("0X") {
         (16, &text[2..])
@@ -428,7 +453,7 @@ fn context(args: &[String]) -> Result<Response, CliError> {
             "--at-ev" => anchors.push(parse_u64(next(args, &mut i, a)?, false)?),
             "--before" => before = parse_u64(next(args, &mut i, a)?, false)?,
             "--after" => after = parse_u64(next(args, &mut i, a)?, false)?,
-            "--limit" => limit = parse_u64(next(args, &mut i, a)?, false)?,
+            "--limit" => limit = parse_page_number("context", next(args, &mut i, a)?)?,
             "--offset" => offset = parse_u64(next(args, &mut i, a)?, false)?,
             "--reg" => registers.push(reg(next(args, &mut i, a)?)?),
             _ if !a.starts_with('-') && path.is_empty() => path = a.clone(),
@@ -594,8 +619,10 @@ pub(crate) fn run_with_backend(args: &[String], backend: Option<&str>) -> Respon
         "context" => context(args),
         "find-value" => find::run(args),
         "mem-access" => mem_access::run(args),
-        "instructions" | "reg-state" | "mem-state" | "last-writers" | "find-pc" | "boundaries"
-        | "stat" => state::run(args),
+        "last-writers" => last_writers::run(args),
+        "instructions" | "reg-state" | "mem-state" | "find-pc" | "boundaries" | "stat" => {
+            state::run(args)
+        }
         _ => Err(CliError(
             format!(
                 "unsupported command: {command}; use traceq --help. Historical text/GTB2 commands have been retired."

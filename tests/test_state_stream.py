@@ -98,6 +98,60 @@ class StateStreamChecks(unittest.TestCase):
             path.write_bytes(data)
             self.assertEqual(set(self.query(path,'last-writers',['--range','0x2000,8','--at-seq','0'],ok=False)),{'error'})
 
+    def test_memory_commands_reject_ignored_time_filters(self):
+        path = self.artifact(self.compact_events(), chunked=True)
+        args = ['--range','0x2000,1']
+        pre = self.query(path,'mem-state',[*args,'--checkpoint','2:pre'])
+        self.assertFalse(pre['data'][0]['data'][0]['known'])
+        after = self.query(path,'last-writers',[*args,'--at-seq','2'])
+        self.assertEqual(after['data'][0]['value'],'0x55')
+        for command, options in [
+            ('last-writers',['--at-ev','2','--phase','pre']),
+            ('last-writers',['--from','2']),
+            ('mem-access',['--at-ev','2']),
+            ('mem-access',['--phase','pre']),
+        ]:
+            result = self.query(path,command,[*args,*options],ok=False)
+            self.assertEqual(result['error']['code'],'ARGUMENT')
+
+    def test_empty_trace_range_checks_follow_full_validation(self):
+        for chunked in [False,True]:
+            path = self.artifact([(4,0,0,0,0,0,0,2)],chunked)
+            original = path.read_bytes()
+            for command in ['mem-access','last-writers']:
+                outside = ['--range','0x9999,4','--offset','99']
+                self.assertEqual(self.query(path,command,outside,ok=False)['error']['code'],'ARGUMENT')
+                for bad in [original[:-1],original+b'x']:
+                    path.write_bytes(bad)
+                    self.assertEqual(self.query(path,command,outside,ok=False)['error']['code'],'TRACE_ERROR')
+                path.write_bytes(original)
+
+    def test_last_writers_does_not_probe_an_option_value_as_a_trace_path(self):
+        path = self.artifact(self.compact_events(),chunked=True)
+        (self.out/'1').write_text('an unrelated numeric filename')
+        result = subprocess.run([str(ROOT/'cli/traceq'),'last-writers','--limit','1',str(path),
+                                 '--range','0x2000,8','--compact','--json'],
+                                cwd=self.out,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stdout)
+        self.assertEqual(json.loads(result.stdout)['meta']['shown'],1)
+
+    def test_agent_recent_hits_and_cli_radix_use_the_same_page_rules(self):
+        path = self.artifact(self.compact_events(),chunked=True)
+        manifest = self.out/'page-tools.json'
+        manifest.write_text(json.dumps({'traceq':str(ROOT/'cli/traceq'),'traces':{'test':{'path':str(path)}}}))
+        def agent(command, *options):
+            result = subprocess.run([str(ROOT/'cli/traceq'),'agent-query','--manifest',str(manifest),
+                                     'test',command,*options,'--json'],capture_output=True,text=True,timeout=10)
+            return result.returncode,json.loads(result.stdout)
+        code, result = agent('find-value','--value','0xaabb','--write','--last','2')
+        self.assertEqual(code,0,result)
+        self.assertEqual([row['ev'] for row in result['data']],[4])
+        self.assertEqual(agent('find-value','--value','0xaabb','--last','257')[0],2)
+        self.assertEqual(agent('find-value','--value','0xaabb','--last','2','--limit','2')[0],2)
+        code, result = agent('context','--at-ev','0','--limit','0x2')
+        self.assertEqual(code,0,result)
+        self.assertEqual(result['meta']['shown'],2)
+
     def compact_events(self):
         def pre(ev,pc):return [(5,ev,pc,i,8 if i<33 else 16,0,0,1) for i in range(65)]
         name=b'external.so';a,b,c=struct.unpack('<3Q',name.ljust(24,b'\0'))
