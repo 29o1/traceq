@@ -545,6 +545,30 @@ fn base_plan(
     };
     let m = ins.mnemonic();
     let n = a.op_count as usize;
+    if ins.id == ARM64_INS_DC {
+        p.unsupported = true;
+        let word = u32::from_le_bytes(ins.bytes[..4].try_into().unwrap());
+        if header.profile != 2 || a.writeback != 0 || n != 2 {
+            return p;
+        }
+        let Some(register) = arm64_memory::dc_zva_register(word) else {
+            return p;
+        };
+        if a.operands[0].kind != ARM64_OP_SYS
+            || a.operands[0].reg() != ARM64_DC_ZVA
+            || !ordered_gpr(&a.operands[1], 8, register)
+        {
+            return p;
+        }
+        p.address = Address::CacheZero {
+            register: a.operands[1].reg(),
+        };
+        p.sources = [ARM64_REG_XZR; 4];
+        p.width = 16;
+        p.count = 4;
+        p.unsupported = false;
+        return p;
+    }
     if [
         ARM64_INS_CASH,
         ARM64_INS_CASAH,
@@ -1108,6 +1132,54 @@ mod tests {
         ins.mnemonic[..mnemonic.len()].copy_from_slice(mnemonic.as_bytes());
         (ins, detail)
     }
+    #[test]
+    fn cache_zero_plan_preserves_tags_and_rejects_other_system_operations() {
+        let ops = [
+            Arm64Op {
+                kind: ARM64_OP_SYS,
+                value: OperandValue { reg: ARM64_DC_ZVA },
+                ..Arm64Op::default()
+            },
+            operand(ARM64_REG_X0 + 3, ARM64_VAS_INVALID),
+        ];
+        let (mut ins, mut detail) = instruction(ARM64_INS_DC, "dc", &ops, false);
+        ins.bytes[..4].copy_from_slice(&0xd50b_7423u32.to_le_bytes());
+        let p = unsafe { make(&ins, header()) };
+        assert!(!p.unsupported && p.post && !p.load);
+        assert_eq!((p.width, p.count), (16, 4));
+        let mut cpu = CpuContext {
+            pc: 0,
+            sp: 0,
+            nzcv: 0,
+            x: [0; 29],
+            fp: 0,
+            lr: 0,
+            vectors: [[0; 16]; 32],
+        };
+        for raw in [0x2000, 0x203f, 0xb400_0000_0000_203f] {
+            cpu.x[3] = raw;
+            assert_eq!(p.effective_address(&cpu), Some(raw & !63));
+            let mut values = [1; 4];
+            assert!(store_values(&cpu, &p, &mut values));
+            assert_eq!(values, [0; 4]);
+        }
+        let mut legacy = header();
+        legacy.profile = 1;
+        assert!(unsafe { make(&ins, legacy) }.unsupported);
+        detail.arm64.operands[1].value = OperandValue {
+            reg: ARM64_REG_W0 + 3,
+        };
+        assert!(unsafe { make(&ins, header()) }.unsupported);
+        detail.arm64.operands[1] = ops[1];
+        detail.arm64.operands[0].value = OperandValue {
+            reg: ARM64_DC_ZVA + 1,
+        };
+        assert!(unsafe { make(&ins, header()) }.unsupported);
+        detail.arm64.operands[0] = ops[0];
+        ins.bytes[..4].copy_from_slice(&0xd50b_7523u32.to_le_bytes());
+        assert!(unsafe { make(&ins, header()) }.unsupported);
+    }
+
     fn classify(id: u32, m: &str, ops: &[Arm64Op], writeback: bool) -> Plan {
         let (ins, _detail) = instruction(id, m, ops, writeback);
         unsafe { make(&ins, header()) }

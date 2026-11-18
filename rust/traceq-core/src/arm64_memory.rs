@@ -1,4 +1,4 @@
-//! Narrow product-shared descriptions of the qualified A64 ordered accesses.
+//! Narrow product-shared descriptions of qualified A64 memory operations.
 //! The native instruction executes unchanged; these describe its observations.
 //! LDADD semantics: Arm DDI0602 (2024), LDADD family, operation and encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,9 +159,33 @@ pub fn atomic_write_source(word: u32) -> Option<&'static str> {
     }
 }
 
+/// Exact system encodings; the low five bits name an X register (31 is XZR).
+pub fn dc_zva_register(word: u32) -> Option<u8> {
+    (word & !31 == 0xd50b_7420).then_some((word & 31) as u8)
+}
+pub fn dczid_register(word: u32) -> Option<u8> {
+    (word & !31 == 0xd53b_00e0).then_some((word & 31) as u8)
+}
+pub const DC_ZVA_WRITE_SOURCE: &str =
+    "DC ZVA architectural zero fill; observed DCZID_EL0 and post callback confirmed";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zero_by_address_encodings_do_not_accept_other_system_operations() {
+        for register in 0..32 {
+            assert_eq!(
+                dc_zva_register(0xd50b_7420 | register),
+                Some(register as u8)
+            );
+            assert_eq!(dczid_register(0xd53b_00e0 | register), Some(register as u8));
+        }
+        for bit in 5..32 {
+            assert_eq!(dc_zva_register(0xd50b_7423 ^ (1 << bit)), None);
+            assert_eq!(dczid_register(0xd53b_00e5 ^ (1 << bit)), None);
+        }
+    }
     #[test]
     fn halfword_ordering_fields_and_failure_uncertainty() {
         for acquire in [false, true] {

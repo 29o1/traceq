@@ -17,6 +17,9 @@ pub(crate) enum Address {
     #[default]
     Missing,
     Literal(u64),
+    CacheZero {
+        register: u32,
+    },
     Indexed {
         base: u32,
         index: u32,
@@ -59,6 +62,9 @@ impl Address {
         match self {
             Self::Missing => None,
             Self::Literal(address) => Some(address),
+            // Only a captured DCZID_EL0 == 4 qualifies this 64-byte plan at
+            // execution time. Preserve any address tag; do not rewrite aliases.
+            Self::CacheZero { register } => Some(reg_value(register, cpu)? as u64 & !63),
             Self::Indexed {
                 base,
                 index,

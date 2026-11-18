@@ -61,6 +61,9 @@ struct Session {
     exclusive: bool,
     pending: Option<Pending>,
     memory: PreparedMemory,
+    // Actual completed target MRS observation, not an SDK hardware probe.
+    // Any loss of execution continuity invalidates this qualification.
+    dczid: Option<u64>,
     outside: bool,
     return_exit: bool,
     exit_seq: u64,
@@ -151,6 +154,7 @@ fn gap(s: &mut Session, seq: u64, pc: u64, reason: u64) {
     emit_to(s, event(Kind::Gap, seq, pc, 0, 0, 0, 0, reason));
     s.known.fill(false);
     s.complete = false;
+    s.dczid = None;
 }
 fn fragments(s: &mut Session, kind: Kind, pc: u64, address: u64, bytes: &[u8]) {
     for (i, b) in bytes.chunks(24).enumerate() {
@@ -295,6 +299,7 @@ pub fn begin_scoped(
         exclusive: false,
         pending: None,
         memory: PreparedMemory::default(),
+        dczid: None,
         outside: false,
         return_exit: false,
         exit_seq: 0,
@@ -555,6 +560,12 @@ fn memory_before(s: &mut Session, c: &CpuContext, p: &Plan, instruction: Instruc
     if p.count == 0 {
         return false;
     }
+    if traceq_core::arm64_memory::dc_zva_register(p.word).is_some() && s.dczid != Some(4) {
+        // Other sizes, prohibited zeroing and absent/stale observations remain
+        // explicit gaps. Four existing 16-byte records describe only 64 bytes.
+        gap(s, instruction.seq, p.pc, 1);
+        return false;
+    }
     let Some(address) = p.effective_address(c) else {
         gap(s, instruction.seq, p.pc, 1);
         return false;
@@ -595,6 +606,14 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &Plan) {
     else {
         return;
     };
+    if let Some(register) = traceq_core::arm64_memory::dczid_register(p.word) {
+        s.dczid = match register {
+            0..=28 => Some(c.x[register as usize]),
+            29 => Some(c.fp),
+            30 => Some(c.lr),
+            _ => None,
+        };
+    }
     if memory_valid {
         let address = s.memory.address;
         if let Some(operation) = p.atomic {
@@ -806,6 +825,162 @@ pub unsafe fn shared_boundary(c: *mut CpuContext, previous: *const Plan, current
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_zero_requires_completed_observation_and_continuity() {
+        use super::*;
+        use crate::plan::address::Address;
+        use traceq_core::wire::Input;
+        for mode in [Mode::Flat, Mode::Chunked] {
+            for case in 0..8 {
+                let path = std::env::temp_dir().join(format!(
+                    "traceq-zva-{}-{}-{}",
+                    std::process::id(),
+                    mode as u32,
+                    case
+                ));
+                let base = if case == 7 {
+                    0xb400_0000_0000_2000
+                } else {
+                    0x2000
+                };
+                let header = Header {
+                    code_base: 0x1000,
+                    code_size: 64,
+                    data_base: base,
+                    data_size: if case == 6 { 32 } else { 64 },
+                    thread_id: 1,
+                    profile: 2,
+                };
+                let scope = CodeScope::single(header.code_base, header.code_size);
+                let mut s = Session {
+                    header,
+                    code_scope: CodeScope::single(header.code_base, header.code_size),
+                    observation: 2,
+                    storage: Storage::open(&path, header, mode).unwrap(),
+                    counts: Summary::default(),
+                    state: [0; 65],
+                    known: [false; 65],
+                    gpr_bank: [0; 29],
+                    complete: false,
+                    sites: Sites::new(&scope).unwrap(),
+                    failed: false,
+                    exclusive: false,
+                    pending: None,
+                    memory: PreparedMemory::default(),
+                    dczid: None,
+                    outside: false,
+                    return_exit: false,
+                    exit_seq: 0,
+                    exit_pc: 0,
+                };
+                for (pc, word, text) in [
+                    (0x1000, 0xd53b_00e5, b"mrs x5, dczid_el0".as_slice()),
+                    (0x1004, 0xd503_201f, b"nop".as_slice()),
+                    (0x1008, 0xd53b_00ff, b"mrs xzr, dczid_el0".as_slice()),
+                    (0x100c, 0xd50b_7423, b"dc zva, x3".as_slice()),
+                ] {
+                    fragments(&mut s, Kind::Site, pc, word, text);
+                }
+                let mut cpu = CpuContext {
+                    pc: 0,
+                    sp: 0x4000,
+                    nzcv: 0,
+                    x: [0; 29],
+                    fp: 0,
+                    lr: 0,
+                    vectors: [[0xa5; 16]; 32],
+                };
+                cpu.x[3] = base + 63;
+                cpu.x[5] = 4;
+                let read = Plan {
+                    pc: 0x1000,
+                    word: 0xd53b_00e5,
+                    post: true,
+                    ..Plan::default()
+                };
+                if case != 0 {
+                    before_state(&mut s, &cpu, &read, false);
+                    cpu.x[5] = match case {
+                        3 => 5,
+                        4 => 0x14,
+                        _ => 4,
+                    };
+                    after_state(&mut s, &cpu, &read);
+                }
+                if case == 2 {
+                    let unknown = Plan {
+                        pc: 0x1004,
+                        word: 0xd503_201f,
+                        unsupported: true,
+                        ..Plan::default()
+                    };
+                    before_state(&mut s, &cpu, &unknown, false);
+                }
+                if case == 5 {
+                    let discarded = Plan {
+                        pc: 0x1008,
+                        word: 0xd53b_00ff,
+                        post: true,
+                        ..Plan::default()
+                    };
+                    before_state(&mut s, &cpu, &discarded, false);
+                    after_state(&mut s, &cpu, &discarded);
+                }
+                let zero = Plan {
+                    pc: 0x100c,
+                    word: 0xd50b_7423,
+                    address: Address::CacheZero {
+                        register: gum::ARM64_REG_X0 + 3,
+                    },
+                    sources: [gum::ARM64_REG_XZR; 4],
+                    width: 16,
+                    count: 4,
+                    post: true,
+                    ..Plan::default()
+                };
+                before_state(&mut s, &cpu, &zero, false);
+                after_state(&mut s, &cpu, &zero);
+                let qualified = case == 1 || case == 7;
+                assert_eq!(s.counts.writes, if qualified { 4 } else { 0 });
+                let n = s.counts;
+                emit_to(
+                    &mut s,
+                    event(
+                        Kind::End,
+                        n.instructions,
+                        0,
+                        n.writes,
+                        n.gaps,
+                        n.reads,
+                        n.commits,
+                        2,
+                    ),
+                );
+                s.storage.finish().unwrap();
+                let info = traceq_core::replay::read(
+                    Input::new(std::fs::File::open(&path).unwrap()).unwrap(),
+                    |g, _| {
+                        if g.word == u64::from(zero.word) {
+                            assert!(g.committed);
+                            assert_eq!(g.gap, !qualified);
+                            assert_eq!(g.accesses.len(), if qualified { 4 } else { 0 });
+                            for (i, a) in g.accesses.iter().enumerate() {
+                                assert_eq!(
+                                    (a.kind, a.address, a.size, a.low, a.high, a.detail),
+                                    (Kind::Write, base + i as u64 * 16, 16, 0, 0, 1)
+                                );
+                            }
+                            assert!(g.pre.all_known());
+                            assert!(g.post.all_known());
+                        }
+                    },
+                )
+                .unwrap();
+                assert_eq!(info.writes, n.writes);
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    }
     use super::*;
     use traceq_core::wire::Input;
     fn set(cpu: &mut CpuContext, slot: usize, value: u128) {
@@ -914,6 +1089,7 @@ mod tests {
                 exclusive: false,
                 pending: None,
                 memory: PreparedMemory::default(),
+                dczid: None,
                 outside: false,
                 return_exit: false,
                 exit_seq: 0,
@@ -1002,6 +1178,7 @@ mod tests {
                 exclusive: false,
                 pending: None,
                 memory: PreparedMemory::default(),
+                dczid: None,
                 outside: false,
                 return_exit: false,
                 exit_seq: 0,
