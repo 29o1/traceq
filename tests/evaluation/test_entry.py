@@ -3,9 +3,13 @@ import json
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'evaluation'))
 
 import bench
 import query
@@ -27,6 +31,30 @@ def fixture(path):
 
 
 class Entry(unittest.TestCase):
+    def test_extended_adapter_check_requires_its_frozen_trace(self):
+        result = subprocess.run(
+            [sys.executable, Path(__file__).with_name('check_adapter.py')],
+            cwd=ROOT, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'--trace is required', result.stderr)
+        self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_model_runner_requires_an_explicit_task_directory(self):
+        result = subprocess.run(
+            [sys.executable, ROOT / 'evaluation/run_product_evaluation.py'],
+            cwd=ROOT, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'--artifact-dir', result.stderr)
+        self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_native_failure_logs_are_separate_from_harness_logs(self):
+        from check_adapter import validate_evaluation_logs
+
+        with tempfile.TemporaryDirectory() as directory:
+            validate_evaluation_logs((Path(directory) / 'logs').resolve())
+
     def test_repeat_records_the_packed_query_tool(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

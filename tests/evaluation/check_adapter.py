@@ -13,10 +13,11 @@ import sys
 import time
 import uuid
 
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'evaluation'))
+
 import bench
 import query
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def validate_evaluation_logs(out):
@@ -73,10 +74,9 @@ def validate_evaluation_logs(out):
     print('Native child failure logs retained; harness logs separate; duplicate write rejected', flush=True)
 
 
-def validate_evaluation_scope(out, entry='python', query_kind='context'):
+def validate_evaluation_scope(out, original, entry='python', query_kind='context'):
     """Exercise the actual local Codex filesystem policy without a model call."""
     out.mkdir(parents=True, exist_ok=False)
-    original = ROOT / 'artifacts/iteration-083-rust-product-1794822967638482000/agent-inputs/captures/sample1.gtsw'
     packed = out / 'fresh'
     work = bench.pack(packed, 'independent', {'sample': {'path': str(original)}}, 'Read the captured evidence.')
     prompt = packed / 'independent/prompt.txt'
@@ -193,13 +193,12 @@ print(json.dumps({'writes': writes, 'temporary': temporary,
     print('Evaluation temporary-write scope and actual query passed', flush=True)
 
 
-def validate(out, entry='python'):
+def validate(out, original, entry='python'):
     out.mkdir(parents=True, exist_ok=False)
     work = out / 'work'
     work.mkdir()
     shutil.copy2(Path(query.__file__), work / 'query.py')
     actual = bench.EVAL_CLI if entry == 'rust' else bench.GT
-    original = ROOT / 'artifacts/iteration-083-rust-product-1794822967638482000/agent-inputs/captures/sample1.gtsw'
     marker = work / 'launches.jsonl'
     launcher = work / 'launch.py'
     launcher.write_text('#!' + sys.executable + '\nimport os,sys,json\n'
@@ -575,6 +574,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', type=Path, default=ROOT / 'artifacts' / ('adapter-check-' + str(time.time_ns())))
     parser.add_argument('--entry', choices=['python', 'rust'], default='python')
+    parser.add_argument('--trace', type=Path,
+                        help='Frozen iteration-083 sample1.gtsw fixture required by the adapter assertions')
     parser.add_argument('--scope-query', choices=['context', 'instructions', 'mem-state'])
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--evaluation-scope-only', action='store_true')
@@ -582,10 +583,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.scope_query is not None and not args.evaluation_scope_only:
         parser.error('--scope-query requires --evaluation-scope-only')
+    if not args.evaluation_logs_only and args.trace is None:
+        parser.error('--trace is required except with --evaluation-logs-only')
+    if args.trace is not None and not args.trace.is_file():
+        parser.error('--trace must point to the frozen sample1.gtsw file')
     if args.evaluation_logs_only:
         validate_evaluation_logs(args.out.resolve())
     else:
         if args.evaluation_scope_only:
-            validate_evaluation_scope(args.out.resolve(), args.entry, args.scope_query or 'context')
+            validate_evaluation_scope(args.out.resolve(), args.trace.resolve(), args.entry,
+                                      args.scope_query or 'context')
         else:
-            validate(args.out.resolve(), args.entry)
+            validate(args.out.resolve(), args.trace.resolve(), args.entry)

@@ -6,6 +6,6 @@ eval-cli:
 
 check-eval: cli eval-cli
 	$(PYTHON) tools/rust_workspace.py test --locked --manifest-path ../evaluation/runner/Cargo.toml
-	$(PYTHON) evaluation/test_entry.py
+	$(PYTHON) tests/evaluation/test_entry.py
 
 .PHONY: eval-cli check-eval

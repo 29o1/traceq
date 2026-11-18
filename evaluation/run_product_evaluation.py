@@ -27,10 +27,10 @@ def write_harness_logs(destination, action, result):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--artifact-dir', type=Path,
-                        help='Read evaluation packs and save steps here; defaults to the active run')
+    parser.add_argument('--artifact-dir', type=Path, required=True,
+                        help='Directory containing Agent-evaluation-packs.json; saves step records here')
     args = parser.parse_args()
-    out = args.artifact_dir or Path(json.loads((ROOT / 'experiments/self_iteration/state.json').read_text())['active_run']['artifact_dir'])
+    out = args.artifact_dir.resolve()
     harness = ROOT / 'evaluation/bench.py'
     packs = json.loads((out / 'Agent-evaluation-packs.json').read_text())
     steps = []
