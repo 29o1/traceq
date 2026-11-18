@@ -49,6 +49,55 @@ class StateStreamChecks(unittest.TestCase):
                 (1,2,0x1008,0x91000400,0,0,0,1),(9,2,0x1008,0,0,0,0,1),
                 (4,3,0,0,0,0,2,2)]
 
+    def test_halfword_atomic_sources_stay_precise_in_mixed_pages(self):
+        cas, swap = 0x48e07c23, 0x78608020
+        events = [
+            (1,0,0x1000,cas,0,0,0,1),
+            (5,0,0x1000,0,8,0,0,1),(5,0,0x1000,1,8,0x2000,0,1),(5,0,0x1000,3,8,1,0,1),
+            (7,0,0x1000,0x2000,2,0,0,1),(2,0,0x1000,0x2000,2,1,0,1),
+            (6,0,0x1000,0,8,0,0,1),(9,0,0x1000,0,0,0,0,1),
+            (1,1,0x1004,swap,0,0,0,1),
+            (7,1,0x1004,0x2000,2,1,0,1),(2,1,0x1004,0x2000,2,0,0,1),
+            (6,1,0x1004,0,8,1,0,1),(9,1,0x1004,0,0,0,0,1),(4,2,0,2,0,2,2,2),
+        ]
+        for chunked in [False, True]:
+            path = self.artifact(events, chunked, {0x1000:(cas,b'casah w0, w3, [x1]'),0x1004:(swap,b'swplh w0, w0, [x1]')})
+            args = ['--range','0x2000,2','--access-index']
+            named = self.query(path,'mem-access',args)
+            self.assertEqual([(r['ev'],r['rw'],r['val'],r['access_index']) for r in named['data']],
+                             [(0,'r','0x0',0),(0,'w','0x1',1),(1,'r','0x1',0),(1,'w','0x0',1)])
+            self.assertIn('compare-and-swap',named['data'][1]['value_source'])
+            self.assertIn('atomic swap',named['data'][3]['value_source'])
+            compact = self.query(path,'mem-access',[*args,'--compact'])
+            self.assertEqual(compact['data'],named['data'])
+            self.assertEqual(compact['meta']['compact_fallback'],'mixed_write_sources')
+            frames = self.query(path,'mem-state',['--range','0x2000,2','--checkpoint','0:post',
+                                                 '--checkpoint','1:post','--access-source'])['data']
+            self.assertEqual([[r['value'] for r in f['data']] for f in frames], [['0x1','0x0'],['0x0','0x0']])
+            self.assertTrue(all(r['observed_rw']=='w' and r['observed_access_index']==1 for f in frames for r in f['data']))
+
+    def test_failed_compare_exposes_read_and_uncertain_write_without_a_writer(self):
+        word = 0x48e07c23
+        events = [
+            (1,0,0x1000,0x79000020,0,0,0,1),(2,0,0x1000,0x2000,2,3,0,1),(9,0,0x1000,0,0,0,0,1),
+            (1,1,0x1004,word,0,0,0,1),(5,1,0x1004,0,8,0,0,1),
+            (5,1,0x1004,1,8,0x2000,0,1),(5,1,0x1004,3,8,7,0,1),
+            (7,1,0x1004,0x2000,2,3,0,1),(3,1,0x1004,0,0,0,0,2),
+            (6,1,0x1004,0,8,3,0,1),(9,1,0x1004,0,0,0,0,1),(4,2,0,1,1,1,2,2),
+        ]
+        for chunked in [False, True]:
+            path = self.artifact(events,chunked,{0x1000:(0x79000020,b'strh w0, [x1]'),0x1004:(word,b'casah w0, w3, [x1]')})
+            ctx = self.query(path,'context',['--at-ev','1','--before','0','--after','0','--reg','x0'])['data'][0]
+            self.assertEqual(ctx['post'],{'x0':'0x3'})
+            self.assertEqual(ctx['gap_reasons'],['unconfirmed_store'])
+            writes = self.query(path,'mem-access',['--range','0x2000,2','--from','1','--write'])
+            self.assertEqual(writes['data'],[])
+            self.assertEqual(writes['meta']['capture_gaps'],1)
+            writers = self.query(path,'last-writers',['--range','0x2000,2'])['data']
+            self.assertTrue(all(not r['known'] for r in writers))
+            self.assertTrue(all(r['last_observed_write']['writer_seq']==0 for r in writers))
+            self.assertTrue(all(r['last_observed_write']['first_located_gap']['reasons']==['unconfirmed_store'] for r in writers))
+
     def test_memory_selector_errors_show_range_repair_without_accepting_aliases(self):
         events=self.base();events.insert(2,(2,0,0x1000,0x2000,1,0xab,0,1));events[-1]=(4,3,0,1,0,0,2,2)
         for chunked in [False,True]:
