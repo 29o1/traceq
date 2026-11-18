@@ -31,7 +31,7 @@ def main():
     if platform.system() != 'Darwin':
         sys.exit('check-cli-clean requires macOS')
     files = [Path(name) for name in (
-        'Makefile', 'cli/Makefile', 'tools/rust_workspace.py',
+        'Makefile', 'cli/Makefile', 'tests/Makefile', 'tools/rust_workspace.py',
         'rust/Cargo.toml', 'rust/Cargo.lock',
     )]
     files.extend(p.relative_to(ROOT) for p in (ROOT / 'tests').glob('test_*.py'))

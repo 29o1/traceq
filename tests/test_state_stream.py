@@ -135,23 +135,6 @@ class StateStreamChecks(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout)
         self.assertEqual(json.loads(result.stdout)['meta']['shown'],1)
 
-    def test_agent_recent_hits_and_cli_radix_use_the_same_page_rules(self):
-        path = self.artifact(self.compact_events(),chunked=True)
-        manifest = self.out/'page-tools.json'
-        manifest.write_text(json.dumps({'traceq':str(ROOT/'cli/traceq'),'traces':{'test':{'path':str(path)}}}))
-        def agent(command, *options):
-            result = subprocess.run([str(ROOT/'cli/traceq'),'agent-query','--manifest',str(manifest),
-                                     'test',command,*options,'--json'],capture_output=True,text=True,timeout=10)
-            return result.returncode,json.loads(result.stdout)
-        code, result = agent('find-value','--value','0xaabb','--write','--last','2')
-        self.assertEqual(code,0,result)
-        self.assertEqual([row['ev'] for row in result['data']],[4])
-        self.assertEqual(agent('find-value','--value','0xaabb','--last','257')[0],2)
-        self.assertEqual(agent('find-value','--value','0xaabb','--last','2','--limit','2')[0],2)
-        code, result = agent('context','--at-ev','0','--limit','0x2')
-        self.assertEqual(code,0,result)
-        self.assertEqual(result['meta']['shown'],2)
-
     def compact_events(self):
         def pre(ev,pc):return [(5,ev,pc,i,8 if i<33 else 16,0,0,1) for i in range(65)]
         name=b'external.so';a,b,c=struct.unpack('<3Q',name.ljust(24,b'\0'))

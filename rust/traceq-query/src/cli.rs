@@ -94,6 +94,11 @@ pub(crate) fn parse_page_number(command: &str, literal: &str) -> Result<u64, Cli
     parse_u64(literal, command == "find-value")
 }
 
+/// Parse a page count with the same radix rules as the named command.
+pub fn page_number(command: &str, literal: &str) -> Option<u64> {
+    parse_page_number(command, literal).ok()
+}
+
 fn parse_range(text: &str) -> Result<(u64, u64), CliError> {
     let (base, len) = text
         .split_once(',')
@@ -676,11 +681,8 @@ impl From<traceq_core::Error> for CliError {
 }
 // Query implementations use a small local error type for argument propagation.
 
-const USAGE: &str = "traceq: structured execution trace queries\nusage: traceq COMMAND FILE [options]\n  agent-query [--manifest tools.json] TRACE_ID COMMAND [options]\n  context       --at-ev E [--at-ev E ...] [--before N --after N]\n  instructions  [--from E --to E] [--limit N --offset N]\n  reg-state     --at-ev E [--phase pre|post] [--reg x0 ...]\n  mem-state     --range BASE,LEN (--at-ev E | --checkpoint E:pre ...)\n  mem-access    --range BASE,LEN [--read|--write] [--from E --to E]\n  last-writers  --range BASE,LEN [--at-seq E]\n  find-pc       (--off OFFSET | --addr ADDRESS)...\n  find-value    VALUE FILE | FILE --value VALUE... | FILE --bytes HEX...\n  boundaries    [--from E --to E] [--reg x0 ...]\n  stat          [--json]\nUse traceq COMMAND --help for command-specific options.\nInput: structured GTSW/GTSC captures; execution-state queries require profile 2.\nNumeric values use hexadecimal strings; unknown, gaps, boundaries and completion stay explicit.\nQueries validate the complete stream through END and its suffix.\n\n";
+const USAGE: &str = "traceq: structured execution trace queries\nusage: traceq COMMAND FILE [options]\n  context       --at-ev E [--at-ev E ...] [--before N --after N]\n  instructions  [--from E --to E] [--limit N --offset N]\n  reg-state     --at-ev E [--phase pre|post] [--reg x0 ...]\n  mem-state     --range BASE,LEN (--at-ev E | --checkpoint E:pre ...)\n  mem-access    --range BASE,LEN [--read|--write] [--from E --to E]\n  last-writers  --range BASE,LEN [--at-seq E]\n  find-pc       (--off OFFSET | --addr ADDRESS)...\n  find-value    VALUE FILE | FILE --value VALUE... | FILE --bytes HEX...\n  boundaries    [--from E --to E] [--reg x0 ...]\n  stat          [--json]\nUse traceq COMMAND --help for command-specific options.\nInput: structured GTSW/GTSC captures; execution-state queries require profile 2.\nNumeric values use hexadecimal strings; unknown, gaps, boundaries and completion stay explicit.\nQueries validate the complete stream through END and its suffix.\n\n";
 pub fn run(args: &[String]) -> Response {
-    run_with_backend(args, std::env::var("TRACEQ_QUERY_BACKEND").ok().as_deref())
-}
-pub(crate) fn run_with_backend(args: &[String], backend: Option<&str>) -> Response {
     if args.is_empty() {
         let mut r = Response::text(USAGE);
         r.status = 2;
@@ -690,14 +692,6 @@ pub(crate) fn run_with_backend(args: &[String], backend: Option<&str>) -> Respon
     let json = args.iter().any(|s| s == "--json");
     if matches!(command, "help" | "--help" | "-h") {
         return Response::text(USAGE);
-    }
-    if matches!(
-        command,
-        "context" | "instructions" | "reg-state" | "mem-state"
-    ) && backend.is_some_and(|value| value != "rust" && value != "cpp")
-        && !args.iter().any(|s| s == "--help" || s == "-h")
-    {
-        return failure(command, "TRACEQ_QUERY_BACKEND must be rust or cpp", 2, json);
     }
     let result = match command {
         "context" => context(args),

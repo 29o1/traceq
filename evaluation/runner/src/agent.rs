@@ -123,7 +123,7 @@ fn execute_native(args: Vec<String>, backend: Option<String>, timeout: Duration)
     let (sender, receiver) = mpsc::channel();
     if let Err(error) = thread::Builder::new().spawn(move || {
         let result =
-            std::panic::catch_unwind(|| crate::cli::run_with_backend(&args, backend.as_deref()));
+            std::panic::catch_unwind(|| crate::run_compatible_query(&args, backend.as_deref()));
         let _ = sender.send(result);
     }) {
         return Outcome::launch_failure(&error.to_string());
@@ -427,7 +427,7 @@ impl Entry {
                 .iter()
                 .position(|v| v == page_flag)
                 .and_then(|at| self.options.get(at + 1))
-                .and_then(|value| crate::cli::parse_page_number(command, value).ok());
+                .and_then(|value| traceq_query::cli::page_number(command, value));
             let Some(limit) = limit else {
                 return self.reject(
                     &format!("{page_flag} requires an integer from 1 to {maximum}"),

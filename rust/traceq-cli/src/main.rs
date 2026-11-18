@@ -17,9 +17,6 @@ fn main() {
             std::process::exit(if result.is_ok() { 2 } else { 74 });
         }
     };
-    if args.first().is_some_and(|s| s == "agent-query") {
-        std::process::exit(traceq_query::agent_main(args[1..].to_vec()));
-    }
     let response = traceq_query::cli::run(&args);
     let ok = std::io::stdout().write_all(&response.stdout).is_ok()
         && std::io::stderr().write_all(&response.stderr).is_ok();

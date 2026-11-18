@@ -1,0 +1,17 @@
+[package]
+name = "traceq-eval"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+
+[profile.release]
+opt-level = 2
+debug = 1
+panic = "unwind"
+
+[dependencies]
+traceq-query = { path = "../../rust/traceq-query" }
+serde_json = "=1.0.154"
