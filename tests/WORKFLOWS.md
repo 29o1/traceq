@@ -42,6 +42,13 @@ Mac 宿主采集器、普通 C／汇编对照、旧 C++ 参考和观察实验均
 采集改动按影响范围选择宿主与一加 11 验收。设备操作统一通过 `/Users/fanjiahao05/.local/bin/revkit-phone` 串行执行。
 构建、CLI 回归和评测入口检查不会自动启动模型评测或操作设备。
 
+`DC ZVA` 的 64 字节写入观察要求此前已捕获目标代码完成的 `MRS DCZID_EL0`，值为 4，且此后没有 gap。
+缺少观察、值不匹配、读取被丢弃或连续性丢失时，清零访存继续保持 unknown；原始指令仍由目标执行。
+地址按实际操作数对齐，保留原始标签位，不自动合并带标签地址与无标签地址。
+相关最小回归为 `traceq-capture` 中的两个 `cache_zero` 单元测试、`traceq-core` 的系统编码测试，以及
+`tests/test_state_stream.py` 的 `test_cache_zero_preserves_all_accesses_and_precise_mixed_sources`。
+原生验收需独立核对完整缓冲、范围外保护字节、65 槽现场及实际返回边界；后续 SDK／脱离调用的边界不能替代目标返回点。
+
 ## 已知坐标的取证
 
 同一份 trace 的坐标确定后，先列出需要保留的寄存器、访存和检查点事实，再合并查询。

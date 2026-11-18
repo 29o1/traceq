@@ -15,9 +15,9 @@ class StateStreamChecks(unittest.TestCase):
     def setUpClass(cls):
         cls.out=ROOT/'artifacts'/('state-unit-'+str(time.time_ns()));cls.out.mkdir(parents=True);cls.n=0
 
-    def artifact(self,events,chunked=False,codes=None):
+    def artifact(self,events,chunked=False,codes=None,data_size=32):
         type(self).n+=1;path=self.out/(str(self.n)+'.gtsw')
-        header=(b'GTSC001\0' if chunked else b'GTSW001\0')+struct.pack('<7Q',0x1000,0x100,0x2000,32,1,2,64)
+        header=(b'GTSC001\0' if chunked else b'GTSW001\0')+struct.pack('<7Q',0x1000,0x100,0x2000,data_size,1,2,64)
         sites=[]
         for pc in sorted({e[2] for e in events if e[0]==1}):
             opcode,text=(codes or {}).get(pc,(0x91000400,b'add x0, x0, #1'));part=text.ljust(24,b'\0');a,b,c=struct.unpack('<3Q',part)
@@ -48,6 +48,33 @@ class StateStreamChecks(unittest.TestCase):
                 (1,1,0x1004,0x91000400,0,0,0,0),
                 (1,2,0x1008,0x91000400,0,0,0,1),(9,2,0x1008,0,0,0,0,1),
                 (4,3,0,0,0,0,2,2)]
+
+    def test_cache_zero_preserves_all_accesses_and_precise_mixed_sources(self):
+        zero, ordinary = 0xd50b7423, 0x79000020
+        events = [
+            (1,0,0x1000,zero,0,0,0,1),
+            (5,0,0x1000,3,8,0x203f,0,1),
+            *[(2,0,0x1000,0x2000+16*i,16,0,0,1) for i in range(4)],
+            (9,0,0x1000,0,0,0,0,1),
+            (1,1,0x1004,ordinary,0,0,0,1),(2,1,0x1004,0x2000,2,0xbeef,0,1),
+            (9,1,0x1004,0,0,0,0,1),(4,2,0,5,0,0,2,2),
+        ]
+        for chunked in (False, True):
+            path = self.artifact(events,chunked,{0x1000:(zero,b'dc zva, x3'),0x1004:(ordinary,b'strh w0, [x1]')},data_size=64)
+            whole = self.query(path,'mem-access',['--range','0x2000,64','--to','0','--access-index'])
+            self.assertEqual([(r['addr'],r['size'],r['val'],r['access_index']) for r in whole['data']],
+                             [(hex(0x2000+16*i),16,'0x0',i) for i in range(4)])
+            args = ['--range','0x2000,32','--access-index','--limit','16']
+            named = self.query(path,'mem-access',args)
+            self.assertEqual([(r['addr'],r['size'],r['val'],r['access_index']) for r in named['data']],
+                             [('0x2000',16,'0x0',0),('0x2010',16,'0x0',1),('0x2000',2,'0xbeef',0)])
+            self.assertTrue(all('DC ZVA' in r['value_source'] for r in named['data'][:2]))
+            packed = self.query(path,'mem-access',[*args,'--compact'])
+            self.assertEqual(packed['data'],named['data'])
+            self.assertEqual(packed['meta']['compact_fallback'],'mixed_write_sources')
+            state = self.query(path,'mem-state',['--range','0x2000,64','--checkpoint','0:post','--access-source','--limit','64'])
+            self.assertTrue(all(r['known'] and r['value']=='0x0' and r['observed_rw']=='w' for r in state['data'][0]['data']))
+            self.assertEqual([r['observed_access_index'] for r in state['data'][0]['data']],[i for i in range(4) for _ in range(16)])
 
     def test_halfword_atomic_sources_stay_precise_in_mixed_pages(self):
         cas, swap = 0x48e07c23, 0x78608020

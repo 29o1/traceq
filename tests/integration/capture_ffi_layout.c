@@ -14,6 +14,8 @@
 _Static_assert(_Generic(&gum_malloc, void *(*)(size_t): 1, default: 0), "gum_malloc signature");
 _Static_assert(_Generic(&gum_free, void (*)(void *): 1, default: 0), "gum_free signature");
 _Static_assert(_Alignof(max_align_t) >= 8, "callout record allocator alignment");
+_Static_assert(ARM64_INS_DC==1286 && ARM64_INS_MRS==662 && ARM64_OP_SYS==68 && ARM64_DC_ZVA==206,
+               "cache zero system instruction constants");
 _Static_assert(ARM64_INS_CASH==104 && ARM64_INS_CASAH==99 && ARM64_INS_CASALH==102 && ARM64_INS_CASLH==107,
                "halfword compare-and-swap ids");
 _Static_assert(ARM64_INS_SWPH==1107 && ARM64_INS_SWPAH==1102 && ARM64_INS_SWPALH==1105 && ARM64_INS_SWPLH==1110,
