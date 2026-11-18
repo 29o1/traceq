@@ -51,6 +51,7 @@ _Static_assert(ARM64_INS_AESE==22,"ARM64_INS_AESE");
 _Static_assert(ARM64_INS_AESIMC==23,"ARM64_INS_AESIMC");
 _Static_assert(ARM64_INS_AESMC==24,"ARM64_INS_AESMC");
 _Static_assert(ARM64_INS_B==47,"ARM64_INS_B");
+_Static_assert(ARM64_INS_BIF==66,"ARM64_INS_BIF");
 _Static_assert(ARM64_INS_BL==68,"ARM64_INS_BL");
 _Static_assert(ARM64_INS_BLR==69,"ARM64_INS_BLR");
 _Static_assert(ARM64_INS_BR==74,"ARM64_INS_BR");

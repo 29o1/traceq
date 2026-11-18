@@ -392,6 +392,10 @@ fn special_register_only(id: u32, a: &Arm64) -> bool {
     let q = (ARM64_REG_Q0, ARM64_REG_Q31, ARM64_VAS_INVALID);
     let s = (ARM64_REG_S0, ARM64_REG_S31, ARM64_VAS_INVALID);
     match id {
+        ARM64_INS_BIF => {
+            let vas = a.operands[0].vas;
+            [ARM64_VAS_8B, ARM64_VAS_16B].contains(&vas) && vector_form(a, 3, &[vector(vas); 3])
+        }
         ARM64_INS_TRN1 | ARM64_INS_TRN2 => {
             let vas = a.operands[0].vas;
             [
@@ -1597,6 +1601,27 @@ mod tests {
             ops[3].vector_index = lane;
             ops[2] = operand(ARM64_REG_V0 + 2, vas);
             assert!(classify(ARM64_INS_ST4, "st4", &ops, false).unsupported);
+        }
+    }
+    #[test]
+    fn bif_requires_matching_full_vector_operands() {
+        for vas in [ARM64_VAS_8B, ARM64_VAS_16B] {
+            let ops = [
+                operand(ARM64_REG_V0, vas),
+                operand(ARM64_REG_V0 + 1, vas),
+                operand(ARM64_REG_V31, vas),
+            ];
+            let p = classify(ARM64_INS_BIF, "bif", &ops, false);
+            assert!(!p.unsupported && p.post && p.count == 0);
+            assert!(classify(ARM64_INS_BIF, "bif", &ops[..2], false).unsupported);
+            assert!(classify(ARM64_INS_BIF, "bif", &ops, true).unsupported);
+
+            let mut indexed = ops;
+            indexed[2].vector_index = 0;
+            assert!(classify(ARM64_INS_BIF, "bif", &indexed, false).unsupported);
+            let mut mismatched = ops;
+            mismatched[1] = operand(ARM64_REG_V0 + 1, ARM64_VAS_4S);
+            assert!(classify(ARM64_INS_BIF, "bif", &mismatched, false).unsupported);
         }
     }
     #[test]

@@ -15,6 +15,7 @@ pub const ARM64_INS_AESE: u32 = 22;
 pub const ARM64_INS_AESIMC: u32 = 23;
 pub const ARM64_INS_AESMC: u32 = 24;
 pub const ARM64_INS_B: u32 = 47;
+pub const ARM64_INS_BIF: u32 = 66;
 pub const ARM64_INS_BL: u32 = 68;
 pub const ARM64_INS_BLR: u32 = 69;
 pub const ARM64_INS_BR: u32 = 74;
