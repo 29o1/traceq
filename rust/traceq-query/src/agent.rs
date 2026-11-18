@@ -1,16 +1,16 @@
 //! Recorded read entry for Agents. Query semantics remain in the existing CLI.
 use serde_json::{Value, json};
 use std::{
-    ffi::c_int,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
-    os::unix::process::{CommandExt, ExitStatusExt},
+    io::{self, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+mod process;
+use process::execute;
 
 const TIMEOUT: Duration = Duration::from_secs(90);
 const HELP: &str = "traceq agent-query [--manifest tools.json] TRACE_ID COMMAND [options]\n\
@@ -24,7 +24,7 @@ Relative executable/trace paths and queries/ logs are relative to the manifest.\
 Help/capabilities are recorded with an explicit --manifest; neither reads a trace.\n\
 All supported queries use the linked Rust core and presentation in this process\n\
 when the manifest selects this executable. Backend names are compatibility labels.\n\
-Other executable selections launch a CLI child.\n\
+Other executable selections launch a CLI child with 32 MiB stdout and 1 MiB stderr budgets.\n\
 Every trace query retains its normal full validation; the log records its execution path.\n";
 
 fn policy() -> Value {
@@ -104,140 +104,6 @@ impl Outcome {
             launched: false,
             in_process: false,
         }
-    }
-}
-
-unsafe extern "C" {
-    fn killpg(group: c_int, signal: c_int) -> c_int;
-}
-fn execute(argv: &[String], backend: Option<&str>, directory: &Path, timeout: Duration) -> Outcome {
-    let mut command = Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .current_dir(directory)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(backend) = backend {
-        command.env("TRACEQ_QUERY_BACKEND", backend);
-    }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return Outcome::launch_failure(&error.to_string()),
-    };
-    let (sender, receiver) = mpsc::channel();
-    let mut readers = Vec::new();
-    for (index, mut pipe) in [
-        Box::new(child.stdout.take().expect("stdout pipe")) as Box<dyn Read + Send>,
-        Box::new(child.stderr.take().expect("stderr pipe")),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let sender = sender.clone();
-        readers.push(thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let result = pipe.read_to_end(&mut bytes);
-            let _ = sender.send((index, bytes, result.map(|_| ())));
-        }));
-    }
-    drop(sender);
-    let started = Instant::now();
-    let mut streams: [Option<Vec<u8>>; 2] = [None, None];
-    let mut status = None;
-    let mut failure = None;
-    let mut timed_out = false;
-    loop {
-        while let Ok((index, bytes, result)) = receiver.try_recv() {
-            streams[index] = Some(bytes);
-            if let Err(error) = result {
-                failure = Some(error.to_string());
-            }
-        }
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(value) => status = value,
-                Err(error) => {
-                    failure = Some(error.to_string());
-                    break;
-                }
-            }
-        }
-        if status.is_some() && streams.iter().all(Option::is_some) {
-            break;
-        }
-        if started.elapsed() >= timeout {
-            timed_out = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
-    if timed_out || failure.is_some() {
-        // process_group(0) gives this child its own group. Terminate only that
-        // group, including a wrapper's children which might retain pipe fds.
-        if let Ok(group) = c_int::try_from(child.id()) {
-            // SAFETY: group is the positive pid assigned to our own child;
-            // SIGKILL has the POSIX value9 on the supported Unix targets.
-            unsafe {
-                killpg(group, 9);
-            }
-        }
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    for reader in readers {
-        if reader.join().is_err() {
-            failure = Some("query stream reader failed".into());
-        }
-    }
-    for (index, bytes, result) in receiver {
-        streams[index] = Some(bytes);
-        if let Err(error) = result {
-            failure = Some(error.to_string());
-        }
-    }
-    let stdout = streams[0].take().unwrap_or_default();
-    let stderr = streams[1].take().unwrap_or_default();
-    if timed_out {
-        return Outcome {
-            stdout: error_document(
-                "QUERY_TIMEOUT",
-                "timeout",
-                "traceq exceeded 90 seconds",
-                None,
-            ),
-            stderr,
-            partial_stdout: stdout,
-            status: 124,
-            origin: Some("timeout"),
-            launched: true,
-            in_process: false,
-        };
-    }
-    if let Some(error) = failure {
-        return Outcome {
-            stdout: error_document("QUERY_OUTPUT", "cli", &error, None),
-            stderr,
-            partial_stdout: stdout,
-            status: 1,
-            origin: Some("cli"),
-            launched: true,
-            in_process: false,
-        };
-    }
-    let status = status.expect("completed child status");
-    let code = status
-        .code()
-        .unwrap_or_else(|| -status.signal().unwrap_or(1));
-    Outcome {
-        stdout,
-        stderr,
-        partial_stdout: vec![],
-        status: code,
-        origin: (code != 0).then_some("cli"),
-        launched: true,
-        in_process: false,
     }
 }
 
