@@ -5,7 +5,7 @@ const COLUMNS: [&str; 8] = ["ev", "pc", "off", "rw", "addr", "size", "known", "v
 
 struct Options<'a> {
     path: &'a str,
-    addresses: Range<u64>,
+    ranges: Vec<Range<u64>>,
     events: RangeInclusive<u64>,
     direction: Option<Kind>,
     limit: usize,
@@ -18,7 +18,7 @@ impl<'a> Options<'a> {
     fn parse(args: &'a [String]) -> Result<Option<Self>, CliError> {
         let json = args.iter().any(|a| a == "--json");
         let mut path = "";
-        let mut range = None;
+        let mut ranges = Vec::new();
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
         let mut i = 1;
@@ -30,10 +30,11 @@ impl<'a> Options<'a> {
                 "--json" => {}
                 "--range" => {
                     let value = next(args, &mut i, flag)?;
-                    if range.is_some() {
-                        return Err("one --range BASE,LEN is required".to_string().into());
+                    if ranges.len() == 64 {
+                        return Err("mem-access accepts at most 64 ranges".to_string().into());
                     }
-                    range = Some(parse_range(value)?);
+                    let (base, len) = parse_range(value)?;
+                    ranges.push(base..base + len);
                 }
                 "--from" => from = parse_u64(next(args, &mut i, flag)?, false)?,
                 "--to" => to = parse_u64(next(args, &mut i, flag)?, false)?,
@@ -56,9 +57,9 @@ impl<'a> Options<'a> {
         if path.is_empty() || !(1..=4096).contains(&limit) || from > to || read && write {
             return Err("invalid file, limits, window or phase".to_string().into());
         }
-        let Some((base, len)) = range else {
+        if ranges.is_empty() {
             return Err(format!("--range is required; {RANGE_HINT}").into());
-        };
+        }
         if compact && !json {
             return Err(
                 "--compact requires last-writers, mem-access or mem-state --json (profile 2)"
@@ -75,7 +76,7 @@ impl<'a> Options<'a> {
         };
         Ok(Some(Self {
             path,
-            addresses: base..base + len,
+            ranges,
             events: from..=to,
             direction,
             limit: limit as usize,
@@ -93,20 +94,22 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut rows = Vec::new();
     let mut sources = Vec::new();
     let mut total = 0;
-    let base = options.addresses.start;
-    let end = options.addresses.end;
-    let len = end - base;
     let stream = input(options.path)?;
     let header = stream.header;
-    let range_ok = header.contains_data(base, len);
+    let range_ok = options
+        .ranges
+        .iter()
+        .all(|r| header.contains_data(r.start, r.end - r.start));
     let info = replay::read_evidence(stream, |g, _| {
         if !range_ok || !options.events.contains(&g.seq) {
             return;
         }
         for a in g.accesses {
             if options.direction.is_some_and(|kind| a.kind != kind)
-                || a.address >= end
-                || a.address + a.size <= base
+                || !options
+                    .ranges
+                    .iter()
+                    .any(|r| a.address < r.end && a.address + a.size > r.start)
             {
                 continue;
             }

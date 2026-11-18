@@ -4,7 +4,9 @@ execution-state stream queries (profile 2):
   traceq boundaries FILE [--from E --to E] [--reg x0]... [--limit N --offset N] [--json]
   traceq find-pc FILE (--off O | --addr A)... [--limit N] [--json]
   traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
-  traceq mem-access FILE --range BASE,LEN [--read|--write] [--from E --to E] [--compact] [--json]
+  traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--compact] [--json]
+    Up to 64 ranges share one validated scan. Each matching recorded access is
+    returned whole and once, in trace order. Filters and pagination apply to the union.
     --compact --json uses columns-v1 arrays, with columns and rw-indexed value_sources in meta.
     Rows retain ev/pc/off/rw/addr/size/known/val; unknown values stay null.
     Each page is self-contained; limits still count actual accesses and validate the full stream.
@@ -36,7 +38,7 @@ execution-state stream queries (profile 2):
     Scope-exit memory effects remain unobserved; global unpositioned gaps are reported in meta.
     meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture.
   Profile2 memory ranges use --range BASE,LEN; LEN is 1..4096 bytes.
-  mem-access and last-writers accept one range per query.
+  last-writers accepts one range per query.
     Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
     --addr selects instruction PCs in find-pc; --len and --size are unsupported.
 

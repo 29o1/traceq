@@ -367,6 +367,54 @@ class StateStreamChecks(unittest.TestCase):
                     self.assertEqual(r.returncode,0,r.stdout);page=json.loads(r.stdout)
                 self.assertEqual(all_rows,full['data'])
 
+    def test_mem_access_multiple_ranges_return_one_ordered_union(self):
+        for chunked in [False, True]:
+            path = self.artifact(self.memory_access_events(), chunked)
+            ranges = ['--range', '0x200c,2', '--range', '0x2000,1', '--range', '0x200d,2']
+            full = self.query(path, 'mem-access', ranges)
+            broad = self.query(path, 'mem-access', ['--range', '0x2000,16'])
+            self.assertEqual(full['data'], broad['data'][:4])
+            self.assertEqual(full['meta']['total'], 4)
+            self.assertEqual([(r['ev'], r['rw'], r['size']) for r in full['data']],
+                             [(0, 'r', 16), (0, 'w', 8), (2, 'r', 8), (2, 'w', 1)])
+            unknown = self.query(path, 'mem-access', [*ranges, '--read', '--from', '2'])
+            self.assertEqual(unknown['data'], [full['data'][2]])
+            self.assertIsNone(unknown['data'][0]['val'])
+
+            args = [*ranges, '--limit', '2']
+            first = self.query(path, 'mem-access', [*args, '--compact'])
+            self.assert_mem_access_expands(first, self.query(path, 'mem-access', args))
+            self.assertEqual(first['meta']['total'], 4)
+            next_argv = shlex.split(first['meta']['next'])
+            result = subprocess.run([str(ROOT/'cli/traceq'), *next_argv[1:]],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            second = json.loads(result.stdout)
+            named = self.query(path, 'mem-access', [*args, '--offset', '2'])
+            self.assert_mem_access_expands(second, named)
+            self.assertEqual(named['data'], full['data'][2:])
+            self.assertFalse(second['meta']['truncated'])
+
+            single = ['--range', '0x2000,1']
+            self.assertEqual(self.query(path, 'mem-access', single * 64),
+                             self.query(path, 'mem-access', single))
+            over = self.query(path, 'mem-access', single * 65, ok=False)
+            self.assertEqual(over['error']['code'], 'ARGUMENT')
+
+    def test_mem_access_multiple_ranges_validate_even_when_outside_and_empty(self):
+        for chunked in [False, True]:
+            path = self.artifact(self.memory_access_events(), chunked)
+            raw = path.read_bytes()
+            valid = ['--range', '0x2000,1', '--range', '0x200d,2', '--offset', '99']
+            outside = [*valid, '--range', '0x9999,1']
+            self.assertEqual(self.query(path, 'mem-access', valid)['data'], [])
+            self.assertEqual(self.query(path, 'mem-access', outside, ok=False)['error']['code'], 'ARGUMENT')
+            for damage in [raw[:-1], raw + b'x']:
+                path.write_bytes(damage)
+                for args in [valid, outside]:
+                    error = self.query(path, 'mem-access', [*args, '--compact'], ok=False)
+                    self.assertEqual(error['error']['code'], 'TRACE_ERROR')
+
     def test_mem_access_compact_validates_empty_pages_and_corrupt_suffix(self):
         for chunked in [False,True]:
             path=self.artifact(self.memory_access_events(),chunked);original=path.read_bytes()

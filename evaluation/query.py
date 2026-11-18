@@ -21,7 +21,8 @@ MEM_ACCESS_COLUMNS = ('ev', 'pc', 'off', 'rw', 'addr', 'size', 'known', 'val')
 COMPACT_MEMORY_GUIDANCE = ('Profile2 mem-access supports optional --compact --json: columns-v1 arrays with meta.columns '
                            'and rw-indexed meta.value_sources. Each page retains all access facts, unknown nulls, '
                            'pagination and full-input validation. Resolve row fields and value sources using meta.columns and meta.value_sources. Default named JSON; tiny pages may grow. Mixed write-source pages '
-                           'return named rows with meta.compact_fallback=mixed_write_sources to preserve provenance.')
+                           'return named rows with meta.compact_fallback=mixed_write_sources to preserve provenance. '
+                           'Repeat --range up to 64 times for a union in one scan. Each matching access appears once in trace order with shared filters and pagination.')
 METADATA_GUIDANCE = ('Reuse fields already present in results.meta for the same unchanged trace (e.g. code_base/data_base/scope). '
                      'Use stat for missing metadata or detailed format/profile/gap diagnostics. '
                      'Keep addresses tied to their trace; unknown or absent fields are not zero.')
