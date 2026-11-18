@@ -408,8 +408,8 @@ const MEMORY_WRITE_SOURCE: &str = "store source bits; post callback confirmed";
 fn memory_source(kind: Kind, word: u64) -> &'static str {
     if kind == Kind::Read {
         MEMORY_READ_SOURCE
-    } else if traceq_core::arm64_memory::atomic_add(word as u32).is_some() {
-        traceq_core::arm64_memory::ATOMIC_WRITE_SOURCE
+    } else if let Some(source) = traceq_core::arm64_memory::atomic_write_source(word as u32) {
+        source
     } else {
         MEMORY_WRITE_SOURCE
     }

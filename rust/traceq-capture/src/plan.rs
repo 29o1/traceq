@@ -4,7 +4,7 @@ pub(crate) mod address;
 
 use crate::gum::*;
 use address::Address;
-use traceq_core::arm64_memory::{self, Width};
+use traceq_core::arm64_memory::{self, AtomicOp};
 pub use traceq_core::wire::Header;
 
 pub struct Plan {
@@ -19,7 +19,7 @@ pub struct Plan {
     pub load: bool,
     pub post: bool,
     pub ordered_memory: bool,
-    pub atomic_width: Option<Width>,
+    pub atomic: Option<AtomicOp>,
     pub word: u32,
     pub check_target: bool,
     pub target_register: u32,
@@ -40,7 +40,7 @@ impl Default for Plan {
             load: false,
             post: false,
             ordered_memory: false,
-            atomic_width: None,
+            atomic: None,
             word: 0,
             check_target: false,
             target_register: 0,
@@ -546,6 +546,63 @@ fn base_plan(
     let m = ins.mnemonic();
     let n = a.op_count as usize;
     if [
+        ARM64_INS_CASH,
+        ARM64_INS_CASAH,
+        ARM64_INS_CASALH,
+        ARM64_INS_CASLH,
+        ARM64_INS_SWPH,
+        ARM64_INS_SWPAH,
+        ARM64_INS_SWPALH,
+        ARM64_INS_SWPLH,
+    ]
+    .contains(&ins.id)
+    {
+        p.unsupported = true;
+        if header.profile != 2 || a.writeback != 0 || n != 3 {
+            return p;
+        }
+        let word = u32::from_le_bytes(ins.bytes[..4].try_into().unwrap());
+        let Some(d) = arm64_memory::halfword_atomic(word) else {
+            return p;
+        };
+        let ids = if d.operation == AtomicOp::CompareSwapHalfword {
+            [
+                ARM64_INS_CASH,
+                ARM64_INS_CASAH,
+                ARM64_INS_CASLH,
+                ARM64_INS_CASALH,
+            ]
+        } else {
+            [
+                ARM64_INS_SWPH,
+                ARM64_INS_SWPAH,
+                ARM64_INS_SWPLH,
+                ARM64_INS_SWPALH,
+            ]
+        };
+        let (source, result) = if d.operation == AtomicOp::CompareSwapHalfword {
+            (1, 0)
+        } else {
+            (0, 1)
+        };
+        if ins.id != ids[d.acquire as usize + 2 * d.release as usize]
+            || !ordered_gpr(&a.operands[source], 4, d.source)
+            || !ordered_gpr(&a.operands[result], 4, d.result)
+            || !ordered_address(&a.operands[2], d.base)
+        {
+            return p;
+        }
+        p.sources[0] = a.operands[source].reg();
+        p.sources[1] = a.operands[result].reg();
+        p.set_address(&a.operands[2]);
+        p.width = 2;
+        p.count = 1;
+        p.ordered_memory = true;
+        p.atomic = Some(d.operation);
+        p.unsupported = false;
+        return p;
+    }
+    if [
         ARM64_INS_LDADD,
         ARM64_INS_LDADDA,
         ARM64_INS_LDADDAL,
@@ -599,7 +656,7 @@ fn base_plan(
             p.sources[1] = a.operands[1].reg();
             p.set_address(&a.operands[2]);
             p.width = d.width.bytes();
-            p.atomic_width = Some(d.width);
+            p.atomic = Some(AtomicOp::Add(d.width));
         }
         p.count = 1;
         p.ordered_memory = true;
@@ -1056,6 +1113,73 @@ mod tests {
         unsafe { make(&ins, header()) }
     }
     #[test]
+    fn halfword_atomics_validate_register_roles_and_ordering() {
+        for (word, ids, ops, operation) in [
+            (
+                0x48a0_7c41u32,
+                [
+                    ARM64_INS_CASH,
+                    ARM64_INS_CASAH,
+                    ARM64_INS_CASLH,
+                    ARM64_INS_CASALH,
+                ],
+                [
+                    operand(ARM64_REG_W0, 0),
+                    operand(ARM64_REG_W0 + 1, 0),
+                    memory(ARM64_REG_X0 + 2),
+                ],
+                AtomicOp::CompareSwapHalfword,
+            ),
+            (
+                0x7820_8020u32,
+                [
+                    ARM64_INS_SWPH,
+                    ARM64_INS_SWPAH,
+                    ARM64_INS_SWPLH,
+                    ARM64_INS_SWPALH,
+                ],
+                [
+                    operand(ARM64_REG_W0, 0),
+                    operand(ARM64_REG_W0, 0),
+                    memory(ARM64_REG_X0 + 1),
+                ],
+                AtomicOp::SwapHalfword,
+            ),
+        ] {
+            for (index, id) in ids.into_iter().enumerate() {
+                let word = word
+                    | ((index as u32 & 1)
+                        << if operation == AtomicOp::CompareSwapHalfword {
+                            22
+                        } else {
+                            23
+                        })
+                    | ((index as u32 >> 1)
+                        << if operation == AtomicOp::CompareSwapHalfword {
+                            15
+                        } else {
+                            22
+                        });
+                let (mut ins, mut detail) = instruction(id, "atomic", &ops, false);
+                ins.bytes[..4].copy_from_slice(&word.to_le_bytes());
+                let p = unsafe { make(&ins, header()) };
+                assert!(!p.unsupported && p.post && p.ordered_memory);
+                assert_eq!((p.width, p.count, p.atomic), (2, 1, Some(operation)));
+                let mut legacy = header();
+                legacy.profile = 1;
+                assert!(unsafe { make(&ins, legacy) }.unsupported);
+                detail.arm64.writeback = 1;
+                assert!(unsafe { make(&ins, header()) }.unsupported);
+                detail.arm64.writeback = 0;
+                detail.arm64.operands[0] = operand(ARM64_REG_X0, 0);
+                assert!(unsafe { make(&ins, header()) }.unsupported);
+                detail.arm64.operands[0] = ops[0];
+                ins.bytes[3] ^= 0xc0; // Another element width cannot use halfword semantics.
+                assert!(unsafe { make(&ins, header()) }.unsupported);
+            }
+        }
+    }
+    #[test]
     fn ordered_words_require_matching_operands_and_recoverable_old_value() {
         for (word, id, m, first, width) in [
             (0xb8200020u32, ARM64_INS_LDADD, "ldadd", ARM64_REG_W0, 4),
@@ -1074,7 +1198,7 @@ mod tests {
                 (p.count, p.width, p.sources[0], p.sources[1]),
                 (1, width, first, first)
             );
-            assert!(p.atomic_width.is_some());
+            assert!(p.atomic.is_some());
             let mut legacy = header();
             legacy.profile = 1;
             assert!(unsafe { make(&ins, legacy) }.unsupported);
@@ -1094,7 +1218,7 @@ mod tests {
         let (mut ins, mut detail) = instruction(ARM64_INS_STLR, "stlr", &ops, false);
         ins.bytes[..4].copy_from_slice(&0x889ffd1fu32.to_le_bytes());
         let p = unsafe { make(&ins, header()) };
-        assert!(!p.unsupported && p.post && p.ordered_memory && p.atomic_width.is_none());
+        assert!(!p.unsupported && p.post && p.ordered_memory && p.atomic.is_none());
         assert_eq!((p.count, p.width, p.sources[0]), (1, 4, ARM64_REG_WZR));
         detail.arm64.writeback = 1;
         assert!(unsafe { make(&ins, header()) }.unsupported);

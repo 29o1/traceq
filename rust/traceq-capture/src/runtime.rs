@@ -576,6 +576,13 @@ fn memory_before(s: &mut Session, c: &CpuContext, p: &Plan, instruction: Instruc
         gap(s, instruction.seq, p.pc, 1);
         return false;
     }
+    if p.atomic == Some(traceq_core::arm64_memory::AtomicOp::CompareSwapHalfword) {
+        let Some(compare) = plan::reg_value(p.sources[1], c) else {
+            gap(s, instruction.seq, p.pc, 1);
+            return false;
+        };
+        s.memory.values[1] = compare;
+    }
     s.memory.address = address;
     true
 }
@@ -590,17 +597,23 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &Plan) {
     };
     if memory_valid {
         let address = s.memory.address;
-        if let Some(width) = p.atomic_width {
+        if let Some(operation) = p.atomic {
+            let width = operation.width();
             // The completed destination is the actual atomic old value. The
             // saved source survives Rs==Rt; never sample the raced memory.
             if let Some(old) = plan::reg_value(p.sources[1], c) {
+                let write = operation.confirmed_write(
+                    old as u64,
+                    s.memory.values[0] as u64,
+                    s.memory.values[1] as u64,
+                );
                 for (kind, value) in [
-                    (Kind::Read, width.mask(old as u64)),
-                    (
-                        Kind::Write,
-                        width.add(old as u64, s.memory.values[0] as u64),
-                    ),
-                ] {
+                    Some((Kind::Read, width.mask(old as u64))),
+                    write.map(|v| (Kind::Write, v)),
+                ]
+                .into_iter()
+                .flatten()
+                {
                     emit_to(
                         s,
                         event(
@@ -616,7 +629,13 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &Plan) {
                     );
                 }
                 s.counts.reads += 1;
-                s.counts.writes += 1;
+                if write.is_some() {
+                    s.counts.writes += 1;
+                } else {
+                    // A failed compare still returns actual old bits. Arm permits
+                    // redundant old-value writeback, which registers cannot prove.
+                    gap(s, instruction.seq, p.pc, 2);
+                }
             } else {
                 gap(s, instruction.seq, p.pc, 1);
             }
@@ -1015,7 +1034,9 @@ mod tests {
                 count: 1,
                 post: true,
                 ordered_memory: true,
-                atomic_width: Some(traceq_core::arm64_memory::Width::W32),
+                atomic: Some(traceq_core::arm64_memory::AtomicOp::Add(
+                    traceq_core::arm64_memory::Width::W32,
+                )),
                 sources: [gum::ARM64_REG_W0, gum::ARM64_REG_W0, 0, 0],
                 ..Plan::default()
             }

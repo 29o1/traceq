@@ -53,3 +53,5 @@ mem-access --compact hoists one value source per read/write direction.
 Mixed ordinary/atomic write-source pages retain named rows with
 meta.compact_fallback=mixed_write_sources; precise sources are preserved.
 Atomic add writes use returned old bits plus the saved addend, not a memory peek.
+Halfword CAS/SWP accesses use returned old bits and saved inputs.
+Failed CAS retains an unconfirmed-store gap; whether an old-value writeback occurred remains unknown.
