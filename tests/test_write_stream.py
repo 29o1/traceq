@@ -85,6 +85,23 @@ class StreamChecks(unittest.TestCase):
         self.assertFalse(any(r['known'] for r in q['data']))
         self.assertEqual(q['meta']['selected_gaps'],1)
 
+    def test_gap_data_fields_are_checked_after_historical_and_empty_selection(self):
+        for global_gap in (False,True):
+            events=self.base()[:-1]
+            events.append((3,3 if global_gap else 2,0 if global_gap else 0x1008,0,0,0,0,4 if global_gap else 1))
+            gap=len(events)-1
+            events.append((4,3,0,3,1,0,0,1))
+            valid=self.query(self.artifact(events),'--at-seq','0')
+            self.assertEqual(valid['data'][0]['known'],not global_gap)
+            for field in range(3,7):
+                damaged=list(events);record=list(damaged[gap]);record[field]=1;damaged[gap]=tuple(record)
+                path=self.artifact(damaged)
+                for options in ([],['--at-seq','0','--limit','1'],['--at-seq','0','--offset','32']):
+                    with self.subTest(global_gap=global_gap,field=field,options=options):
+                        result=self.query(path,*options,ok=False)
+                        self.assertEqual(result['error']['code'],'FORMAT')
+                        self.assertEqual(set(result),{'error'})
+
     def test_vector_high_half_survives_query(self):
         events=[(1,0,0x1000,0,0,0,0,0),(2,0,0x1000,0x2000,16,0x11,0x8877665544332211,1),(4,1,0,1,0,0,0,1)]
         q=self.query(self.artifact(events))

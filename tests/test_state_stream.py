@@ -76,6 +76,28 @@ class StateStreamChecks(unittest.TestCase):
             self.assertTrue(all(r['known'] and r['value']=='0x0' and r['observed_rw']=='w' for r in state['data'][0]['data']))
             self.assertEqual([r['observed_access_index'] for r in state['data'][0]['data']],[i for i in range(4) for _ in range(16)])
 
+    def test_gap_data_fields_are_checked_outside_selected_events_and_pages(self):
+        for chunked in (False,True):
+            for global_gap in (False,True):
+                events=self.base()[:-1]
+                gap=len(events) if global_gap else 5
+                events.insert(gap,(3,3 if global_gap else 1,0 if global_gap else 0x1004,0,0,0,0,4 if global_gap else 1))
+                events.append((4,3,0,0,1,0,2,2))
+                valid=self.artifact(events,chunked)
+                self.query(valid,'stat',[])
+                for field in range(3,7):
+                    damaged=list(events);record=list(damaged[gap]);record[field]=1;damaged[gap]=tuple(record)
+                    path=self.artifact(damaged,chunked)
+                    for command,options in [
+                        ('stat',[]),
+                        ('context',['--at-ev','0','--before','0','--after','0','--limit','1','--offset','1','--compact']),
+                        ('mem-state',['--range','0x2000,32','--checkpoint','0:post','--offset','32','--limit','1','--compact']),
+                    ]:
+                        with self.subTest(chunked=chunked,global_gap=global_gap,field=field,command=command):
+                            result=self.query(path,command,options,ok=False)
+                            self.assertEqual(result['error']['code'],'TRACE_ERROR')
+                            self.assertEqual(set(result),{'error'})
+
     def test_halfword_atomic_sources_stay_precise_in_mixed_pages(self):
         cas, swap = 0x48e07c23, 0x78608020
         events = [

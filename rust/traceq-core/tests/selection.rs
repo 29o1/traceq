@@ -181,6 +181,41 @@ fn unselected_and_suffix_records_still_block_success() {
 }
 
 #[test]
+fn gap_data_fields_validate_in_every_reader_even_without_selection() {
+    for chunked in [false, true] {
+        for global in [false, true] {
+            let mut original = fixture();
+            let gap = if global {
+                let index = original.len() - 1;
+                original.insert(index, event(Kind::Gap, 4, 0, 0, 0, 0, 0, 4));
+                original.last_mut().unwrap().size += 1;
+                index
+            } else {
+                original.iter().position(|e| e.kind == Kind::Gap).unwrap()
+            };
+            let valid = bytes(&original, chunked);
+            assert!(replay::read(Input::new(Cursor::new(valid)).unwrap(), |_, _| {}).is_ok());
+            for field in 0..4 {
+                let mut rows = original.clone();
+                let record = &mut rows[gap];
+                match field {
+                    0 => record.address = 1,
+                    1 => record.size = 1,
+                    2 => record.low = 1,
+                    _ => record.high = 1,
+                }
+                let data = bytes(&rows, chunked);
+                let input = || Input::new(Cursor::new(&data)).unwrap();
+                assert!(replay::read(input(), |_, _| {}).is_err());
+                assert!(replay::read_selected(input(), |_| false, |_, _| {}).is_err());
+                assert!(replay::read_observations(input(), |_, _| {}).is_err());
+                assert!(replay::read_evidence(input(), |_, _| {}).is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn fixed_site_words_repeated_and_colliding_pcs_still_validate() {
     let rows = vec![
         event(
