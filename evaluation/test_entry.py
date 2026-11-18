@@ -98,6 +98,13 @@ class Entry(unittest.TestCase):
                 [bench.GT, 'context', path, '--at-ev', '0', '--limit', '0x2', '--json'], timeout=10,
             )
             self.assertEqual((result.returncode, result.stdout), (0, expected))
+            for options, fmt, index in [((), 'columns-v1', None), (('--access-index',), 'columns-v2', 0)]:
+                result = agent('mem-access', '--range', '0x2000,2', '--compact', *options)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                doc = json.loads(result.stdout)
+                self.assertEqual(doc['meta']['mem_access_format'], fmt)
+                row, = query.expand_mem_access(doc)['data']
+                self.assertEqual((row['val'], row.get('access_index')), ('0xaabb', index))
             record = json.loads((work / 'queries/calls.jsonl').read_text().splitlines()[-1])
             self.assertEqual(record['execution_path'], 'in_process')
 

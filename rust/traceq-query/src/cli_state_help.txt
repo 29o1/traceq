@@ -14,6 +14,8 @@ execution-state stream queries (profile 2):
     --compact --json uses columns-v1 arrays, with columns and rw-indexed value_sources in meta.
     Rows retain ev/pc/off/rw/addr/size/known/val; unknown values stay null.
     Each page is self-contained; limits still count actual accesses and validate the full stream.
+    --access-index --json adds the zero-based index within the instruction before filtering.
+    With --compact it selects columns-v2, with access_index appended to each row.
   traceq mem-state FILE --range BASE,LEN --at-ev E [--phase pre|post] [--compact] [--json]
   traceq mem-state FILE --range BASE,LEN --checkpoint E:pre --checkpoint E2:post [--json]
     Profile2 checkpoints share one validated scan; 1..64 requests, input order retained.
@@ -47,7 +49,7 @@ execution-state stream queries (profile 2):
     Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
     --addr selects instruction PCs in find-pc; --len and --size are unsupported.
 
-mem-access --compact: columns-v1 hoists one value source per read/write direction.
+mem-access --compact hoists one value source per read/write direction.
 Mixed ordinary/atomic write-source pages retain named rows with
 meta.compact_fallback=mixed_write_sources; precise sources are preserved.
 Atomic add writes use returned old bits plus the saved addend, not a memory peek.

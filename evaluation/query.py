@@ -22,7 +22,8 @@ COMPACT_MEMORY_GUIDANCE = ('Profile2 mem-access supports optional --compact --js
                            'and rw-indexed meta.value_sources. Each page retains all access facts, unknown nulls, '
                            'pagination and full-input validation. Resolve row fields and value sources using meta.columns and meta.value_sources. Default named JSON; tiny pages may grow. Mixed write-source pages '
                            'return named rows with meta.compact_fallback=mixed_write_sources to preserve provenance. '
-                           'Repeat --range up to 64 times for a union in one scan. Each matching access appears once in trace order with shared filters and pagination.')
+                           'Repeat --range up to 64 times for a union in one scan. Each matching access appears once in trace order with shared filters and pagination. '
+                           '--access-index --json adds the zero-based index within the instruction before filtering. With --compact it selects columns-v2 with access_index appended.')
 METADATA_GUIDANCE = ('Reuse fields already present in results.meta for the same unchanged trace (e.g. code_base/data_base/scope). '
                      'Use stat for missing metadata or detailed format/profile/gap diagnostics. '
                      'Keep addresses tied to their trace; unknown or absent fields are not zero.')
@@ -106,11 +107,13 @@ def expand_mem_access(document):
         if meta.get('compact_fallback') == 'mixed_write_sources':
             return {**document, 'meta': {k: v for k, v in meta.items() if k != 'compact_fallback'}}
         return document
-    if meta['mem_access_format'] != 'columns-v1':
+    indexed = meta['mem_access_format'] == 'columns-v2'
+    if not indexed and meta['mem_access_format'] != 'columns-v1':
         raise ValueError('Unsupported mem_access_format')
+    expected = (*MEM_ACCESS_COLUMNS, 'access_index') if indexed else MEM_ACCESS_COLUMNS
     columns, sources = meta.get('columns'), meta.get('value_sources')
-    if not isinstance(columns, list) or len(columns) != len(MEM_ACCESS_COLUMNS) or \
-            any(not isinstance(c, str) for c in columns) or set(columns) != set(MEM_ACCESS_COLUMNS):
+    if not isinstance(columns, list) or len(columns) != len(expected) or \
+            any(not isinstance(c, str) for c in columns) or set(columns) != set(expected):
         raise ValueError('Invalid memory access columns')
     if not isinstance(sources, dict) or set(sources) != {'r', 'w'} or \
             any(not isinstance(v, str) for v in sources.values()) or not isinstance(document.get('data'), list):
@@ -122,6 +125,8 @@ def expand_mem_access(document):
         row = dict(zip(columns, cells))
         if not isinstance(row['rw'], str) or row['rw'] not in sources:
             raise ValueError('Invalid memory access rw')
+        if indexed and (type(row['access_index']) is not int or row['access_index'] < 0):
+            raise ValueError('Invalid memory access index')
         row['value_source'] = sources[row['rw']]
         rows.append(row)
     return {**document, 'data': rows,

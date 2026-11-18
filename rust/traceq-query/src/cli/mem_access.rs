@@ -1,7 +1,17 @@
 use super::*;
 use std::ops::{Range, RangeInclusive};
 
-const COLUMNS: [&str; 8] = ["ev", "pc", "off", "rw", "addr", "size", "known", "val"];
+const COLUMNS: [&str; 9] = [
+    "ev",
+    "pc",
+    "off",
+    "rw",
+    "addr",
+    "size",
+    "known",
+    "val",
+    "access_index",
+];
 
 struct Options<'a> {
     path: &'a str,
@@ -11,6 +21,7 @@ struct Options<'a> {
     limit: usize,
     offset: u64,
     compact: bool,
+    access_index: bool,
     json: bool,
 }
 
@@ -21,6 +32,7 @@ impl<'a> Options<'a> {
         let mut ranges = Vec::new();
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
+        let mut access_index = false;
         let mut i = 1;
         while i < args.len() {
             let flag = &args[i];
@@ -43,6 +55,7 @@ impl<'a> Options<'a> {
                 "--read" => read = true,
                 "--write" => write = true,
                 "--compact" => compact = true,
+                "--access-index" => access_index = true,
                 "--addr" | "--len" | "--size" => {
                     return Err(format!("unsupported memory selector {flag}; {RANGE_HINT}").into());
                 }
@@ -67,6 +80,11 @@ impl<'a> Options<'a> {
                     .into(),
             );
         }
+        if access_index && !json {
+            return Err("--access-index requires mem-access --json"
+                .to_string()
+                .into());
+        }
         let direction = if read {
             Some(Kind::Read)
         } else if write {
@@ -82,6 +100,7 @@ impl<'a> Options<'a> {
             limit: limit as usize,
             offset,
             compact,
+            access_index,
             json,
         }))
     }
@@ -104,7 +123,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         if !range_ok || !options.events.contains(&g.seq) {
             return;
         }
-        for a in g.accesses {
+        for (ordinal, a) in g.accesses.iter().enumerate() {
             if options.direction.is_some_and(|kind| a.kind != kind)
                 || !options
                     .ranges
@@ -126,7 +145,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             } else {
                 Value::Null
             };
-            rows.push(if options.compact {
+            let mut row = if options.compact {
                 sources.push(source);
                 json!([
                     g.seq,
@@ -150,7 +169,15 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                     "val": value,
                     "value_source": source
                 })
-            });
+            };
+            if options.access_index {
+                if let Value::Array(cells) = &mut row {
+                    cells.push(json!(ordinal));
+                } else {
+                    row["access_index"] = json!(ordinal);
+                }
+            }
+            rows.push(row);
         }
     })?;
     if !range_ok {
@@ -161,12 +188,22 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total, rows.len(), options.offset));
     if options.compact {
-        compact_page(&mut rows, sources, &mut meta);
+        compact_page(&mut rows, sources, options.access_index, &mut meta);
     }
     Ok(response(rows, Value::Object(meta), options.json))
 }
 
-fn compact_page(rows: &mut [Value], sources: Vec<&'static str>, meta: &mut Map<String, Value>) {
+fn compact_page(
+    rows: &mut [Value],
+    sources: Vec<&'static str>,
+    indexed: bool,
+    meta: &mut Map<String, Value>,
+) {
+    let columns = if indexed {
+        &COLUMNS[..]
+    } else {
+        &COLUMNS[..COLUMNS.len() - 1]
+    };
     let mut writes = rows
         .iter()
         .zip(&sources)
@@ -174,13 +211,14 @@ fn compact_page(rows: &mut [Value], sources: Vec<&'static str>, meta: &mut Map<S
         .map(|(_, &source)| source);
     let write_source = writes.next().unwrap_or(MEMORY_WRITE_SOURCE);
     if writes.any(|source| source != write_source) {
-        // columns-v1 has one source per direction. Mixed pages retain named rows.
+        // Column pages have one source per direction. Mixed pages retain named rows.
         for (row, source) in rows.iter_mut().zip(sources) {
             let Value::Array(cells) = std::mem::take(row) else {
                 unreachable!()
             };
-            let mut fields: Map<String, Value> = COLUMNS
-                .into_iter()
+            let mut fields: Map<String, Value> = columns
+                .iter()
+                .copied()
                 .zip(cells)
                 .map(|(key, value)| (key.into(), value))
                 .collect();
@@ -189,8 +227,9 @@ fn compact_page(rows: &mut [Value], sources: Vec<&'static str>, meta: &mut Map<S
         }
         meta.insert("compact_fallback".into(), json!("mixed_write_sources"));
     } else {
-        meta.insert("mem_access_format".into(), json!("columns-v1"));
-        meta.insert("columns".into(), json!(COLUMNS));
+        let format = if indexed { "columns-v2" } else { "columns-v1" };
+        meta.insert("mem_access_format".into(), json!(format));
+        meta.insert("columns".into(), json!(columns));
         meta.insert(
             "value_sources".into(),
             json!({"r":MEMORY_READ_SOURCE,"w":write_source}),

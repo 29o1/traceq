@@ -436,6 +436,35 @@ class StateStreamChecks(unittest.TestCase):
                 q=self.query(path,'mem-access',['--range','0x2000,4','--offset','99','--compact'],ok=False)
                 self.assertEqual(set(q),{'error'});self.assertEqual(q['error']['code'],'TRACE_ERROR')
 
+    def test_mem_access_indices_precede_filtering_and_survive_paging(self):
+        for chunked in (False, True):
+            path = self.atomic_access_artifact(chunked)
+            args = ['--range', '0x2000,4', '--range', '0x2001,1', '--write', '--access-index']
+            named = self.query(path, 'mem-access', args)
+            self.assertEqual([(row['ev'], row['access_index']) for row in named['data']], [(0, 1), (1, 0)])
+            mixed = self.query(path, 'mem-access', [*args, '--compact'])
+            self.assertEqual(mixed['meta']['compact_fallback'], 'mixed_write_sources')
+            self.assertEqual(mixed['data'], named['data'])
+
+            first = self.query(path, 'mem-access', [*args, '--compact', '--limit', '1'])
+            self.assertEqual(first['meta']['mem_access_format'], 'columns-v2')
+            self.assertEqual(first['meta']['columns'][-1], 'access_index')
+            self.assertEqual(first['data'][0][-1], 1)
+            next_argv = shlex.split(first['meta']['next'])
+            self.assertIn('--access-index', next_argv)
+            result = subprocess.run([str(ROOT/'cli/traceq'), *next_argv[1:]],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            second = json.loads(result.stdout)
+            self.assertEqual(second['data'][0][-1], 0)
+            self.assertFalse(second['meta']['truncated'])
+
+            raw = path.read_bytes()
+            for damaged in (raw[:-1], raw + b'x'):
+                path.write_bytes(damaged)
+                error = self.query(path, 'mem-access', [*args, '--offset', '99', '--compact'], ok=False)['error']
+                self.assertEqual(error['code'], 'TRACE_ERROR')
+
     def assert_mem_access_expands(self,packed,named):
         columns=['ev','pc','off','rw','addr','size','known','val']
         write_sources={r['value_source'] for r in named['data'] if r['rw']=='w'}
