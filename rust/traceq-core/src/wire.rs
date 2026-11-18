@@ -136,6 +136,11 @@ fn decode_block_into(bytes: &[u8], count: usize, out: &mut Vec<Event>) -> Result
     }
     out.clear();
     out.reserve(count);
+    // Packed width nibbles, from sequence delta through detail. These common
+    // layouts can use fixed reads, independent of the event kind.
+    const DETAIL_BYTE: u32 = 0x0100_0000; // [0, 0, 0, 0, 0, 0, 1]
+    const STEP_AND_ADDRESS: u32 = 0x0100_0411; // [1, 1, 4, 0, 0, 0, 1]
+    const RANGE_AND_LOW: u32 = 0x0104_1100; // [0, 0, 1, 1, 4, 0, 1]
     let (mut pos, mut seq, mut pc) = (0, 0u64, 0u64);
     for _ in 0..count {
         if bytes.len() - pos < 5 {
@@ -149,25 +154,45 @@ fn decode_block_into(bytes: &[u8], count: usize, out: &mut Vec<Event>) -> Result
         pos += 5;
         let mut w = [0u64; 8];
         w[0] = kind;
-        for j in 0..7 {
-            let width = ((widths >> (4 * j)) & 15) as usize;
-            if width > 8 || width > bytes.len() - pos {
-                return Err(Error::trace("invalid field width"));
+        match (widths, &bytes[pos..]) {
+            (DETAIL_BYTE, [detail, ..]) => {
+                w[7] = u64::from(*detail);
+                pos += 1;
             }
-            if width != 0 {
-                if bytes.len() - pos >= 8 {
-                    // Load within this block, then mask off bytes belonging to
-                    // later fields. width==8 shifts by zero, never by 64.
-                    w[j + 1] = u64le(&bytes[pos..]) & (u64::MAX >> ((8 - width) * 8));
-                } else {
-                    // The block tail has no readable padding. No overread or
-                    // unsafe load is needed for these final at most7 bytes.
-                    for (shift, byte) in bytes[pos..pos + width].iter().enumerate() {
-                        w[j + 1] |= u64::from(*byte) << (shift * 8);
+            (STEP_AND_ADDRESS, [seq, pc, a, b, c, d, detail, ..]) => {
+                w[1] = u64::from(*seq);
+                w[2] = u64::from(*pc);
+                w[3] = u64::from(u32::from_le_bytes([*a, *b, *c, *d]));
+                w[7] = u64::from(*detail);
+                pos += 7;
+            }
+            (RANGE_AND_LOW, [address, size, a, b, c, d, detail, ..]) => {
+                w[3] = u64::from(*address);
+                w[4] = u64::from(*size);
+                w[5] = u64::from(u32::from_le_bytes([*a, *b, *c, *d]));
+                w[7] = u64::from(*detail);
+                pos += 7;
+            }
+            _ => {
+                for j in 0..7 {
+                    let width = ((widths >> (4 * j)) & 15) as usize;
+                    if width > 8 || width > bytes.len() - pos {
+                        return Err(Error::trace("invalid field width"));
                     }
+                    if width != 0 {
+                        if bytes.len() - pos >= 8 {
+                            // Mask bytes belonging to later fields in the block.
+                            w[j + 1] = u64le(&bytes[pos..]) & (u64::MAX >> ((8 - width) * 8));
+                        } else {
+                            // The block tail has no readable padding.
+                            for (shift, byte) in bytes[pos..pos + width].iter().enumerate() {
+                                w[j + 1] |= u64::from(*byte) << (shift * 8);
+                            }
+                        }
+                    }
+                    pos += width;
                 }
             }
-            pos += width;
         }
         seq = seq.wrapping_add(unzigzag(w[1]));
         pc = pc.wrapping_add(unzigzag(w[2]));

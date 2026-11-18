@@ -83,3 +83,29 @@ fn decoder_checks_each_packed_field_and_exact_block_tail() {
     }
     assert!(decode_block(&[2, 0, 0, 0, 0x80], 1).is_err());
 }
+
+#[test]
+fn decoder_preserves_fields_across_common_packed_layouts() {
+    let bytes = [
+        &[9, 0, 0, 0, 1, 0xfd][..],
+        &[1, 0x11, 4, 0, 1, 2, 9, 0x65, 0x43, 0x21, 1, 200],
+        &[6, 0, 0x11, 4, 1, 32, 8, 3, 2, 1, 0x80, 254],
+    ]
+    .concat();
+    let words: Vec<_> = decode_block(&bytes, 3)
+        .unwrap()
+        .into_iter()
+        .map(Event::words)
+        .collect();
+    assert_eq!(
+        words,
+        [
+            [9, 0, 0, 0, 0, 0, 0, 0xfd],
+            [1, 1, u64::MAX - 4, 0x0121_4365, 0, 0, 0, 200],
+            [6, 1, u64::MAX - 4, 32, 8, 0x8001_0203, 0, 254],
+        ]
+    );
+    for end in 0..bytes.len() {
+        assert!(decode_block(&bytes[..end], 3).is_err(), "prefix {end}");
+    }
+}
