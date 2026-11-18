@@ -142,15 +142,9 @@ unsafe extern "C" {
     );
     pub fn gum_module_get_name(module: *mut Module) -> *const c_char;
     pub fn gum_module_get_range(module: *mut Module) -> *const MemoryRange;
-    #[cfg_attr(
-        any(target_os = "android", target_os = "ios"),
-        link_name = "_frida_g_object_unref"
-    )]
+    #[cfg_attr(target_os = "android", link_name = "_frida_g_object_unref")]
     pub fn g_object_unref(object: *mut c_void);
-    #[cfg_attr(
-        any(target_os = "android", target_os = "ios"),
-        link_name = "_frida_g_usleep"
-    )]
+    #[cfg_attr(target_os = "android", link_name = "_frida_g_usleep")]
     pub fn g_usleep(microseconds: usize);
     pub fn gum_stalker_new() -> *mut Stalker;
     pub fn gum_stalker_set_trust_threshold(stalker: *mut Stalker, threshold: c_int);

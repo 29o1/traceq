@@ -16,7 +16,7 @@ def elfword(raw,va):
   if typ==1 and start<=va and va+4<=start+length:return struct.unpack_from('<I',raw,pos+va-start)[0]
  raise AssertionError('opcode outside ELF')
 def check(out,ndk,library,cli,probe=False):
- out.mkdir(parents=True,exist_ok=False);host='darwin-x86_64' if platform.system()=='Darwin' else 'linux-x86_64';cc=ndk/'toolchains/llvm/prebuilt'/host/'bin/aarch64-linux-android24-clang';fixture=ROOT/'tests/integration/fixtures/invoke_instance.c';include=ROOT/'capture/traceq/src'
+ out.mkdir(parents=True,exist_ok=False);host='darwin-x86_64' if platform.system()=='Darwin' else 'linux-x86_64';cc=ndk/'toolchains/llvm/prebuilt'/host/'bin/aarch64-linux-android24-clang';fixture=ROOT/'tests/integration/fixtures/invoke_instance.c';include=ROOT/'capture/traceq/include'
  for image,tag in [('a','0x13579bdfu'),('b','0x2468ace0u')]:
   (out/image).mkdir();run([cc,'-shared','-fPIC','-O2','-fno-stack-protector','-fomit-frame-pointer','-Wl,-soname,libtraceq-instance.so','-DINSTANCE_TAG='+tag,fixture,'-o',out/image/'libtraceq-instance.so'])
  driver=out/'instance-check';run([str(cc)+'++','-std=c++17','-O2','-static-libstdc++','-I'+str(include),ROOT/'tests/integration/invoke_instance_android.cpp','-ldl','-o',driver])

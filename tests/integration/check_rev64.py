@@ -32,7 +32,7 @@ def assembly(c,name):
  return '.p2align 2\n.globl _'+name+'\n.globl _'+name+'_end\n_'+name+':\n    '+'\n    '.join(setup+[f'rev64 v{d}.{c["shape"]}, v{n}.{c["shape"]}',f'str q{d}, [x1]',f'umov x0, v{d}.d[0]','ret'])+'\n_'+name+'_end:\n'
 def check(out,runner,cli):
  out.mkdir(parents=True,exist_ok=False);sys.path.insert(0,str(ROOT/'tools'));import dependencies;sdk=dependencies.host();classifier=out/'rev64-classification'
- run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'capture/traceq/src'),'-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'rev64_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
+ run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'rev64_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
  cases=list(specs());assert len(cases)==len({(c['shape'],c['d'],c['n']) for c in cases})==24
  frozen=[]
  for c in cases:

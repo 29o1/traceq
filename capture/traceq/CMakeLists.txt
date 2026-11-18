@@ -11,23 +11,17 @@ if(TRACEQ_GUM_ONLY)
 endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c" "/* Rust static library link container. */\n")
 add_library(traceq_capture SHARED "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c")
-if(ANDROID)
-    if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
-        message(FATAL_ERROR "The pinned capture ABI supports ARM64")
-    endif()
-    include(cmake/TraceqGum.cmake)
-    set(_traceq_rust_target aarch64-linux-android)
-    set(_traceq_rust_linker "${CMAKE_C_COMPILER}")
-    set(_traceq_target_env "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${_traceq_rust_linker}")
-    target_link_libraries(traceq_capture PRIVATE log dl m z)
-    target_link_options(traceq_capture PRIVATE "-Wl,--exclude-libs,libtraceq-gum.a" "-Wl,--gc-sections")
-elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    set(_traceq_rust_target aarch64-apple-ios)
-    set(TRACEQ_GUM_ARCHIVE "${CMAKE_CURRENT_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a")
-    target_link_libraries(traceq_capture PRIVATE "-framework Foundation" "-framework CoreFoundation")
-else()
+if(NOT ANDROID)
     message(FATAL_ERROR "Use tools/build_capture.py host for the independent macOS native lab")
 endif()
+if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR "The pinned capture ABI supports Android ARM64")
+endif()
+include(cmake/TraceqGum.cmake)
+set(_traceq_rust_target aarch64-linux-android)
+set(_traceq_target_env "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CMAKE_C_COMPILER}")
+target_link_libraries(traceq_capture PRIVATE log dl m z)
+target_link_options(traceq_capture PRIVATE "-Wl,--exclude-libs,libtraceq-gum.a" "-Wl,--gc-sections")
 set(_traceq_rust_library "${TRACEQ_RUST_ROOT}/.deps/rust/target/${_traceq_rust_target}/release/libtraceq_capture.a")
 file(GLOB_RECURSE _traceq_rust_sources CONFIGURE_DEPENDS
     "${TRACEQ_RUST_ROOT}/rust/traceq-capture/src/*.rs"
@@ -49,17 +43,12 @@ add_custom_target(traceq_rust_capture DEPENDS "${_traceq_rust_library}")
 add_dependencies(traceq_capture traceq_rust_capture)
 # Explicit undefined roots retain only public SDK functions; Rust std and Gum
 # symbols remain hidden on Android through the version script.
-if(ANDROID)
-    # A version script exports exactly the stable capture ABI from the archive.
-    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map"
-        "{ global: traceq_capture_invoke; traceq_capture_invoke_at; traceq_capture_invoke_ranges_at; local: *; };\n")
-    target_link_options(traceq_capture PRIVATE
-        "-Wl,-u,traceq_capture_invoke" "-Wl,-u,traceq_capture_invoke_at" "-Wl,-u,traceq_capture_invoke_ranges_at"
-        "-Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map")
-    # --exclude-libs must not localize SDK roots themselves; the version script
-    # hides all other Rust internals, and embedded Gum is separately localized.
-    target_link_libraries(traceq_capture PRIVATE "${_traceq_rust_library}" "${TRACEQ_GUM_ARCHIVE}")
-else()
-    target_link_options(traceq_capture PRIVATE "-Wl,-u,_traceq_capture_invoke" "-Wl,-u,_traceq_capture_invoke_at" "-Wl,-u,_traceq_capture_invoke_ranges_at")
-    target_link_libraries(traceq_capture PRIVATE "${_traceq_rust_library}" "${TRACEQ_GUM_ARCHIVE}")
-endif()
+# A version script exports exactly the stable capture ABI from the archive.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map"
+    "{ global: traceq_capture_invoke; traceq_capture_invoke_at; traceq_capture_invoke_ranges_at; local: *; };\n")
+target_link_options(traceq_capture PRIVATE
+    "-Wl,-u,traceq_capture_invoke" "-Wl,-u,traceq_capture_invoke_at" "-Wl,-u,traceq_capture_invoke_ranges_at"
+    "-Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map")
+# --exclude-libs must not localize SDK roots themselves; the version script
+# hides all other Rust internals, and embedded Gum is separately localized.
+target_link_libraries(traceq_capture PRIVATE "${_traceq_rust_library}" "${TRACEQ_GUM_ARCHIVE}")

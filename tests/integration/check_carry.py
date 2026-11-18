@@ -53,7 +53,7 @@ def assembly(c,name):
  return '.p2align 2\n.globl _'+name+'\n.globl _'+name+'_end\n_'+name+':\n    '+'\n    '.join(body)+'\n_'+name+'_end:\n'
 def check(out,runner,cli):
  out.mkdir(parents=True,exist_ok=False);sys.path.insert(0,str(ROOT/'tools'));import dependencies;sdk=dependencies.host();classifier=out/'carry-classification'
- run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'capture/traceq/src'),'-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'carry_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
+ run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'carry_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
  cases=list(specs());assert len(cases)==len({(c['op'],c['width'],c['d'],c['n'],c['m']) for c in cases})==104
  frozen=[]
  for c in cases:

@@ -17,7 +17,7 @@ HOSTS = {
     ('Linux', 'aarch64'): 'aarch64-unknown-linux-gnu',
     ('Linux', 'x86_64'): 'x86_64-unknown-linux-gnu',
 }
-DEVICE_TARGETS = {'aarch64-linux-android', 'aarch64-apple-ios'}
+ANDROID_TARGET = 'aarch64-linux-android'
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
     cache = ROOT / '.deps/rust'
     local = cache / 'toolchain'
     device_toolchain = cache / 'android-rustup/toolchains' / label
-    is_device = any(arg.removeprefix('--target=') in DEVICE_TARGETS for arg in args)
+    is_device = any(arg.removeprefix('--target=') == ANDROID_TARGET for arg in args)
     preferred = device_toolchain if is_device and device_toolchain.exists() else local
     fallback = Path.home() / '.rustup/toolchains' / label
     toolchain = Path(os.environ.get('TRACEQ_RUST_TOOLCHAIN', preferred if preferred.exists() else fallback))

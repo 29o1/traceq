@@ -36,6 +36,4 @@ __pycache__/
 # Imported auxiliary tools; canonical builds use tools/build_capture.py.
 /capture/traceq/src/taint/
 /capture/traceq/build_android.sh
-/capture/traceq/build_ios.sh
 /capture/traceq/example.js
-/capture/traceq/example_ios.js

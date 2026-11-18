@@ -36,9 +36,6 @@ capture-host:
 capture-android:
 	$(PYTHON) tools/build_capture.py android
 
-capture-ios:
-	$(PYTHON) tools/build_capture.py ios
-
 check-capture-build:
 	$(PYTHON) tests/test_capture_build.py
 
@@ -112,7 +109,8 @@ check: check-cli check-capture-build
 check-gum-context-android: capture-android
 	$(PYTHON) tests/integration/check_gum_context.py
 
-.PHONY: deps-cli deps-host capture-host capture-android capture-ios
+.PHONY: deps-cli deps-host capture-host capture-android
 .PHONY: check check-cli check-cli-clean check-capture-build check-find-value
-.PHONY: check-multiply check-literal check-registers check-transpose check-polymul +	check-aes check-bitops check-prefetch check-st2 check-structure check-simd
+.PHONY: check-multiply check-literal check-registers check-transpose check-polymul
+.PHONY: check-aes check-bitops check-prefetch check-st2 check-structure check-simd
 .PHONY: check-invoke-android check-gum-context-android

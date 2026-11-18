@@ -28,7 +28,7 @@ def assembly(c,name):
  return '.p2align 2\n.globl _'+name+'\n.globl _'+name+'_end\n_'+name+':\n    '+'\n    '.join(setup+[instruction(c['op'],d,n,m),f'str q{d}, [x1]',f'umov x0, v{d}.d[0]','ret'])+'\n_'+name+'_end:\n'
 def check(out,runner,cli):
  out.mkdir(parents=True,exist_ok=False);sys.path.insert(0,str(ROOT/'tools'));import dependencies;sdk=dependencies.host()
- classifier=out/'transpose-classification';run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'capture/traceq/src'),'-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'transpose_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
+ classifier=out/'transpose-classification';run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'cli/include'),'-I'+str(sdk),HERE/'transpose_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
  # Check the algebraic oracle against a separate untraced assembly library.
  oracle_source=out/'native-oracle.S';oracle_source.write_text('.text\n'+''.join('.p2align 2\n.globl _oracle_'+op+'\n_oracle_'+op+':\n ldr q1,[x0]\n ldr q2,[x0,#16]\n '+instruction(op,0,1,2)+'\n str q0,[x1]\n ret\n' for op in OPS));oracle_lib=out/'libnative-oracle.dylib';run(['clang','-arch','arm64','-march=armv8-a','-dynamiclib',oracle_source,'-o',oracle_lib]);native=ctypes.CDLL(str(oracle_lib));functions={}
  for op in OPS:

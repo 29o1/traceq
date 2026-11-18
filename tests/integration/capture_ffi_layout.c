@@ -7,7 +7,7 @@
 #define TRACEQ_GUM_HEADER "frida-gum.h"
 #endif
 #include TRACEQ_GUM_HEADER
-#include "../../capture/traceq/src/AndroidCapture.h"
+#include "../../capture/traceq/include/AndroidCapture.h"
 #define CHECK_SIZE(T, N) _Static_assert(sizeof(T)==(N), #T " size")
 #define CHECK_ALIGN(T, N) _Static_assert(_Alignof(T)==(N), #T " alignment")
 #define CHECK_OFFSET(T, F, N) _Static_assert(offsetof(T,F)==(N), #T "." #F " offset")

@@ -45,7 +45,7 @@ def host(with_tests=False):
     compile_flags = [
         'clang++', '-arch', 'arm64', '-std=c++17', '-O2', '-Wall', '-Wextra',
         '-Wno-unused-parameter', '-Wno-deprecated-declarations',
-        f'-I{CAPTURE / "src"}', f'-I{sdk}', '-x', 'objective-c++',
+        f'-I{sdk}', '-x', 'objective-c++',
     ]
     link_flags = [
         '-x', 'none', f'-Wl,-force_load,{rust}', archive,
@@ -59,28 +59,17 @@ def host(with_tests=False):
     return out
 
 
-def device(target):
-    out = ROOT / 'build' / f'traceq-{target}'
-    args = ['cmake', '-S', CAPTURE, '-B', out, '-DCMAKE_BUILD_TYPE=Release']
-    if target == 'android':
-        ndk = os.environ.get('ANDROID_NDK_HOME')
-        if not ndk or not (Path(ndk) / 'build/cmake/android.toolchain.cmake').is_file():
-            raise RuntimeError('ANDROID_NDK_HOME must point to an installed NDK')
-        sdk = dependencies.gum('android-arm64')
-        args.extend([
-            f'-DTRACEQ_GUM_DEVKIT_DIR={sdk}',
-            f'-DCMAKE_TOOLCHAIN_FILE={Path(ndk) / "build/cmake/android.toolchain.cmake"}',
-            '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-24',
-        ])
-    else:
-        sdk = subprocess.check_output(
-            ['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, timeout=30,
-        ).strip()
-        dependencies.legacy(platform='ios')
-        args.extend([
-            '-DCMAKE_SYSTEM_NAME=iOS', f'-DCMAKE_OSX_SYSROOT={sdk}',
-            '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0',
-        ])
+def android():
+    ndk = os.environ.get('ANDROID_NDK_HOME')
+    if not ndk or not (toolchain := Path(ndk) / 'build/cmake/android.toolchain.cmake').is_file():
+        raise RuntimeError('ANDROID_NDK_HOME must point to an installed NDK')
+    sdk = dependencies.gum('android-arm64')
+    out = ROOT / 'build/traceq-android'
+    args = [
+        'cmake', '-S', CAPTURE, '-B', out, '-DCMAKE_BUILD_TYPE=Release',
+        f'-DTRACEQ_GUM_DEVKIT_DIR={sdk}', f'-DCMAKE_TOOLCHAIN_FILE={toolchain}',
+        '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-24',
+    ]
     out.mkdir(parents=True, exist_ok=True)
     run(args)
     run(['cmake', '--build', out, '--config', 'Release'])
@@ -89,13 +78,13 @@ def device(target):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('platform', choices=['host', 'android', 'ios'])
+    parser.add_argument('platform', choices=['host', 'android'])
     parser.add_argument('--tests', action='store_true',
                         help='build the host thread-ownership regression executable')
     args = parser.parse_args()
     if args.tests and args.platform != 'host':
         parser.error('--tests applies to the host build')
-    print(host(args.tests) if args.platform == 'host' else device(args.platform))
+    print(host(args.tests) if args.platform == 'host' else android())
 
 
 if __name__ == '__main__':

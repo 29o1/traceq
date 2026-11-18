@@ -18,7 +18,7 @@ def check(out,source=None):
         return
     sdk=dependencies.host();out.mkdir(parents=True,exist_ok=True)
     command=['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB',
-             '-I'+str(ROOT/'capture/traceq/src'),'-I'+str(ROOT/'cli/include'),'-I'+str(sdk)]
+             '-I'+str(ROOT/'cli/include'),'-I'+str(sdk)]
     if source:command.append('-DTRACEQ_OBSERVER_SOURCE="'+str(source.resolve())+'"')
     binary=out/'register-observation'
     command += [str(ROOT/'tests/integration/register_observation.mm'),str(sdk/'libfrida-gum.a'),

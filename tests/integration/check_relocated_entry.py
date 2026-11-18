@@ -15,7 +15,7 @@ def push(f,dst):
 def check(out,ndk,library,expanded,observation=3,smoke=False):
  out.mkdir(parents=True,exist_ok=False);sys.path.insert(0,str(ROOT/'tools'));import dependencies
  sdk=dependencies.gum('android-arm64');cc=ndk/'toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android24-clang';tests=ROOT/'tests/integration'
- commands=[[cc,'-shared','-fPIC',tests/'fixtures/relocated_entry.S',tests/'fixtures/relocated_algorithm.c','-O2','-fno-stack-protector','-fomit-frame-pointer','-o',out/'librelocated.so'],[cc,'-O2','-I'+str(sdk),'-I'+str(ROOT/'capture/traceq/src'),tests/'relocated_entry.c',tests/'fixtures/relocated_adapter.S',ROOT/'build/traceq-android/gum/libtraceq-gum.a','-ldl','-llog','-lm','-lz','-o',out/'driver']]
+ commands=[[cc,'-shared','-fPIC',tests/'fixtures/relocated_entry.S',tests/'fixtures/relocated_algorithm.c','-O2','-fno-stack-protector','-fomit-frame-pointer','-o',out/'librelocated.so'],[cc,'-O2','-I'+str(sdk),'-I'+str(ROOT/'capture/traceq/include'),tests/'relocated_entry.c',tests/'fixtures/relocated_adapter.S',ROOT/'build/traceq-android/gum/libtraceq-gum.a','-ldl','-llog','-lm','-lz','-o',out/'driver']]
  (out/'commands.json').write_text(json.dumps([[str(x)for x in c]for c in commands],indent=2)+'\n')
  for i,c in enumerate(commands):
   r=run(c);(out/('build-'+str(i)+'.stderr')).write_bytes(r.stderr);r.check_returncode()

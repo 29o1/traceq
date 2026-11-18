@@ -1,4 +1,4 @@
-#include "Capture.h"
+#include "capture_lab.h"
 #include "frida-gum.h"
 #include <future>
 #include <thread>
