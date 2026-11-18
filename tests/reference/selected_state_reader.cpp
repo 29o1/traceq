@@ -1,6 +1,6 @@
 // Compare sparse replay with full replay, including all65 slots and gaps.
 // Historical comparison only. Build with the isolated reference state_stream.cpp
-// and -Iexperiments/retired_cpp_product108/cli/src -Icli/include; pass trace paths.
+// and -Iexperiments/retired_cpp_product108/cli/src -Itests/reference/include; pass trace paths.
 #include "state_stream.h"
 #include <deque>
 #include <iostream>

@@ -14,14 +14,17 @@ def check(out,source=None):
     if platform.system()!='Darwin' or platform.machine()!='arm64':
         raise RuntimeError('register observation check requires macOS ARM64')
     if source is None:
-        subprocess.run([sys.executable, str(ROOT/'tools/rust_workspace.py'), 'test', '-p', 'traceq-capture', '-p', 'traceq-observer'], check=True, timeout=60)
+        cargo = [sys.executable, str(ROOT/'tools/rust_workspace.py'), 'test', '--locked']
+        subprocess.run([*cargo, '-p', 'traceq-capture'], check=True, timeout=60)
+        subprocess.run([*cargo, '--manifest-path', str(ROOT/'tests/observer/Cargo.toml')],
+                       check=True, timeout=60)
         return
     sdk=dependencies.host();out.mkdir(parents=True,exist_ok=True)
     command=['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB',
-             '-I'+str(ROOT/'cli/include'),'-I'+str(sdk)]
+             '-I'+str(ROOT/'tests/reference/include'),'-I'+str(sdk)]
     if source:command.append('-DTRACEQ_OBSERVER_SOURCE="'+str(source.resolve())+'"')
     binary=out/'register-observation'
-    command += [str(ROOT/'tests/integration/register_observation.mm'),str(sdk/'libfrida-gum.a'),
+    command += [str(ROOT/'tests/reference/register_observation.mm'),str(sdk/'libfrida-gum.a'),
                 '-framework','Foundation','-lresolv','-lm','-ldl','-o',str(binary)]
     subprocess.run(command,check=True)
     subprocess.run([str(binary)],check=True)

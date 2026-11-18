@@ -2,7 +2,10 @@
 *.o
 *.a
 *.dSYM/
-cli/traceq
+/cli/traceq
+/rust/target/
+/evaluation/runner/target/
+/tests/observer/target/
 cli/gt
 cli/traceq-test
 cli/gt-test
@@ -15,7 +18,7 @@ cli/gt-test
 /traceq-architecture*
 
 # stray top-level build dir (ad-hoc artifacts)
-build/
+/build/
 
 # macOS
 .DS_Store
@@ -26,6 +29,8 @@ build/
 __pycache__/
 
 # Local research, measurements and development notes.
+/rust/traceq-engine/
+/rust/.gitignore
 /experiments/
 /docs/
 /WORKSPACE.md

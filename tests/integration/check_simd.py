@@ -54,7 +54,7 @@ def check(out,runner,cli):
  out.mkdir(parents=True,exist_ok=False)
  sys.path.insert(0,str(ROOT/'tools'));import dependencies
  sdk=dependencies.host();classifier=out/'simd-classification'
- run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(ROOT/'cli/include'),'-I'+str(sdk),ROOT/'tests/integration/simd_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
+ run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB','-I'+str(sdk),ROOT/'tests/integration/simd_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation','-lresolv','-lm','-ldl','-o',classifier]);print(run([classifier]).strip(),flush=True)
  specs=list(cases());source=out/'simd.S';source.write_text('.text\n'+''.join(assembly(c,'simd_'+str(i)) for i,c in enumerate(specs)));lib=out/'libsimd.dylib';run(['clang','-arch','arm64','-dynamiclib',source,'-o',lib])
  def invoke(lib,name,mode,path,seed,count,initial):return json.loads(run([runner,lib,name,mode,path,hex(seed),count,hex(initial)]))
  def query(path,cmd,*args):return json.loads(run([cli,cmd,path,*map(str,args),'--json']))

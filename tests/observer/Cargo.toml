@@ -1,0 +1,14 @@
+[package]
+name = "traceq-observer-lab"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+traceq-observer = { path = "../../rust/traceq-observer" }

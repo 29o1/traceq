@@ -1,4 +1,4 @@
-use traceq_observer::{CpuContext, Event, StateView, traceq_observer_delta};
+use traceq_observer_lab::{CpuContext, Event, StateView, traceq_observer_delta};
 const ZERO: Event = Event {
     kind: 0,
     seq: 0,

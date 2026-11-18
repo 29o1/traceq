@@ -51,7 +51,7 @@ def check(out,runner,cli):
     sys.path.insert(0,str(ROOT/'tools'));import dependencies
     sdk=dependencies.host();classifier=out/'bitops-classification'
     run(['clang++','-arch','arm64','-std=c++17','-O2','-DTRACEQ_HOST_LAB',
-         '-I'+str(ROOT/'cli/include'),'-I'+str(sdk),
+         '-I'+str(sdk),
          FIXTURES.parent/'bitops_classification.mm',classifier_archive(),sdk/'libfrida-gum.a','-framework','Foundation',
          '-lresolv','-lm','-ldl','-o',classifier])
     print(run([classifier]).strip(),flush=True)
