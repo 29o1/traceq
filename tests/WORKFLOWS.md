@@ -15,6 +15,7 @@ Mac 宿主采集器、普通 C／汇编对照、旧 C++ 参考和观察实验均
 | --- | --- | --- |
 | 查询语义 | `make check-cli` | 正式 CLI 与固定输入的回归 |
 | 构建或工具链 | `make check-cli-clean` | Mac ARM64 临时空缓存构建与 CLI 回归 |
+| 分配器采集 | `ANDROID_NDK_HOME=/path/to/ndk make check-allocator-android` | 一加 11 上自有原生进程的完整 libc 分配／复制采集、查询和两次 11 秒延迟存活，不操作 App |
 | 评测适配器 | `make check-eval` | Rust 入口单元测试和 `tests/evaluation/test_entry.py`，无模型调用、无设备调用 |
 | 扩展适配器验证 | `python3 tests/evaluation/check_adapter.py --entry rust --trace /path/to/frozen/sample1.gtsw` | 显式提供第 83 轮冻结输入，保留现有断言和成本口径 |
 | 评测日志验证 | `python3 tests/evaluation/check_adapter.py --evaluation-logs-only` | 本地假子进程的原始日志与退出状态，无模型调用 |

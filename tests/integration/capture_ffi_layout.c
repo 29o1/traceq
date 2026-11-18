@@ -11,6 +11,9 @@
 #define CHECK_SIZE(T, N) _Static_assert(sizeof(T)==(N), #T " size")
 #define CHECK_ALIGN(T, N) _Static_assert(_Alignof(T)==(N), #T " alignment")
 #define CHECK_OFFSET(T, F, N) _Static_assert(offsetof(T,F)==(N), #T "." #F " offset")
+_Static_assert(_Generic(&gum_malloc, void *(*)(size_t): 1, default: 0), "gum_malloc signature");
+_Static_assert(_Generic(&gum_free, void (*)(void *): 1, default: 0), "gum_free signature");
+_Static_assert(_Alignof(max_align_t) >= 8, "callout record allocator alignment");
 CHECK_SIZE(TraceqCodeRange,16);
 CHECK_ALIGN(TraceqCodeRange,8);
 CHECK_OFFSET(TraceqCodeRange,size,8);

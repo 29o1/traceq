@@ -68,6 +68,9 @@ check-simd: cli capture-host
 check-invoke-android: cli capture-android
 	$(PYTHON) tests/integration/check_invoke.py
 
+check-allocator-android: cli capture-android
+	$(PYTHON) tests/integration/check_allocator.py
+
 check: check-cli check-capture-build
 	$(PYTHON) tests/integration/build_host.py --tests
 	$(PYTHON) tests/integration/check_capture.py
@@ -91,4 +94,4 @@ check-gum-context-android: capture-android
 .PHONY: check check-cli check-cli-clean check-source-release source-release check-capture-build check-find-value
 .PHONY: check-multiply check-literal check-registers check-transpose check-polymul
 .PHONY: check-aes check-bitops check-prefetch check-st2 check-structure check-simd
-.PHONY: check-invoke-android check-gum-context-android
+.PHONY: check-invoke-android check-allocator-android check-gum-context-android
