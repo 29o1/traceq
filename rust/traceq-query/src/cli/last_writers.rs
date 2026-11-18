@@ -41,6 +41,24 @@ impl Gap {
     }
 }
 
+#[derive(Default)]
+struct CompactGaps {
+    index_by_event: BTreeMap<u64, usize>,
+    rows: Vec<Value>,
+}
+
+impl CompactGaps {
+    fn reference(&mut self, gap: &Gap, info: &Info) -> usize {
+        // Each finalized event has a single first-gap record. Render it only
+        // when the first byte on this page references it.
+        *self.index_by_event.entry(gap.seq).or_insert_with(|| {
+            let index = self.rows.len();
+            self.rows.push(gap.render(info));
+            index
+        })
+    }
+}
+
 struct ObservedWrite {
     value: u8,
     seq: u64,
@@ -116,7 +134,7 @@ impl History {
         address: u64,
         observed: Option<&ObservedWrite>,
         info: &Info,
-        compact_gaps: Option<&mut Vec<Value>>,
+        compact_gaps: Option<&mut CompactGaps>,
     ) -> Value {
         // A gap invalidates present knowledge while retaining historical evidence.
         let current = observed.filter(|write| write.first_gap.is_none() && !info.unpositioned_gap);
@@ -140,20 +158,12 @@ impl History {
                 "gaps_since": gaps_since,
                 "latest_gap_ev": (gaps_since != 0).then_some(self.last_gap_seq)
             });
-            let gap = write.first_gap.as_ref().map(|gap| gap.render(info));
+            let gap = write.first_gap.as_ref();
             if let Some(table) = compact_gaps {
-                let reference = gap.map(|value| {
-                    table
-                        .iter()
-                        .position(|other| *other == value)
-                        .unwrap_or_else(|| {
-                            table.push(value);
-                            table.len() - 1
-                        })
-                });
+                let reference = gap.map(|gap| table.reference(gap, info));
                 evidence["first_located_gap_ref"] = json!(reference);
             } else {
-                evidence["first_located_gap"] = gap.unwrap_or(Value::Null);
+                evidence["first_located_gap"] = gap.map_or(Value::Null, |gap| gap.render(info));
             }
             evidence
         } else {
@@ -189,7 +199,7 @@ fn profile2(
             .to_string()
             .into());
     }
-    let mut gaps = Vec::new();
+    let mut gaps = CompactGaps::default();
     let rows = history
         .bytes
         .iter()
@@ -214,7 +224,7 @@ fn profile2(
         json!("after_recorded_accesses_at_event"),
     );
     if selection.compact {
-        meta.insert("located_gaps".into(), json!(gaps));
+        meta.insert("located_gaps".into(), Value::Array(gaps.rows));
     }
     Ok(response(rows, Value::Object(meta), json))
 }
