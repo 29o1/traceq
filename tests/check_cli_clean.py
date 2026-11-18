@@ -10,7 +10,6 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ('traceq-cli', 'traceq-core', 'traceq-query', 'traceq-observer', 'traceq-capture')
 
 
 def run(args, workspace, env):
@@ -28,18 +27,14 @@ def run(args, workspace, env):
 
 
 def main():
-    if platform.system() != 'Darwin':
-        sys.exit('check-cli-clean requires macOS')
-    files = [Path(name) for name in (
-        'Makefile', 'cli/Makefile', 'tests/Makefile', 'tools/rust_workspace.py',
-        'rust/Cargo.toml', 'rust/Cargo.lock',
-    )]
-    files.extend(p.relative_to(ROOT) for p in (ROOT / 'tests').glob('test_*.py'))
-    for package in PACKAGES:
-        directory = ROOT / 'rust' / package
-        files.extend(p.relative_to(ROOT) for p in directory.rglob('*')
-                     if p.is_file() and p.suffix in ('.rs', '.toml', '.json', '.txt')
-                     and 'target' not in p.relative_to(directory).parts)
+    if (platform.system(), platform.machine()) != ('Darwin', 'arm64'):
+        sys.exit('check-cli-clean requires macOS ARM64')
+    # Use current worktree contents, but only for paths tracked by Git.
+    tracked = subprocess.check_output([
+        'git', 'ls-files', '-z', '--', 'Makefile', 'cli/Makefile', 'tests/Makefile',
+        'tests/test_*.py', 'tools/rust_workspace.py', 'rust',
+    ], cwd=ROOT, timeout=15)
+    files = [Path(os.fsdecode(path)) for path in tracked.split(b'\0') if path]
 
     with tempfile.TemporaryDirectory(prefix='traceq-cli-clean-') as directory:
         workspace = Path(directory)
