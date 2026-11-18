@@ -27,6 +27,9 @@ execution-state stream queries (profile 2):
     ranges-checkpoints-v1 returns one group per range, in request order, with
     range_base, range_size and the checkpoints in data. The byte offset and
     limit apply to each range. The 4096-cell cap covers all ranges and checkpoints.
+    To give ranges different checkpoints, place --range-checkpoint E:pre or E:post
+    after its --range. Each range needs at least one, with up to 64 in total.
+    This mode uses meta.checkpoint_pairs and cannot mix with --checkpoint or --at-ev/--at-seq/--phase.
   traceq last-writers FILE --range BASE,LEN [--at-seq E] [--compact] [--json]
     --compact requires JSON; first_located_gap_ref indexes the current page's meta.located_gaps.
     last_observed_write.first_located_gap explains the earliest positioned gap after that write.

@@ -112,10 +112,51 @@ pub fn snapshots_for_ranges<R: Read>(
     offset: u64,
     limit: usize,
 ) -> Result<BatchSnapshot> {
+    if !(1..=64).contains(&checkpoints.len()) {
+        return Err(Error::trace("invalid memory checkpoint bounds"));
+    }
+    snapshots_impl(input, ranges, Selection::Shared(checkpoints), offset, limit)
+}
+
+/// Validate once for all ranges, returning only the checkpoints requested for
+/// each range. Points are in range order, then checkpoint request order. Each
+/// point contains cells for its own range's page.
+pub fn snapshots_for_range_checkpoints<R: Read>(
+    input: Input<R>,
+    ranges: &[(u64, usize)],
+    checkpoints: &[Vec<Checkpoint>],
+    offset: u64,
+    limit: usize,
+) -> Result<BatchSnapshot> {
     if !(1..=64).contains(&ranges.len())
-        || !(1..=64).contains(&checkpoints.len())
-        || !(1..=4096).contains(&limit)
+        || ranges.len() != checkpoints.len()
+        || checkpoints.iter().any(Vec::is_empty)
+        || !(1..=64).contains(&checkpoints.iter().map(Vec::len).sum::<usize>())
     {
+        return Err(Error::trace("invalid memory checkpoint bounds"));
+    }
+    snapshots_impl(
+        input,
+        ranges,
+        Selection::PerRange(checkpoints),
+        offset,
+        limit,
+    )
+}
+
+enum Selection<'a> {
+    Shared(&'a [Checkpoint]),
+    PerRange(&'a [Vec<Checkpoint>]),
+}
+
+fn snapshots_impl<R: Read>(
+    input: Input<R>,
+    ranges: &[(u64, usize)],
+    selection: Selection<'_>,
+    offset: u64,
+    limit: usize,
+) -> Result<BatchSnapshot> {
+    if !(1..=64).contains(&ranges.len()) || !(1..=4096).contains(&limit) {
         return Err(Error::trace("invalid memory checkpoint bounds"));
     }
     let mut range_valid = true;
@@ -128,21 +169,29 @@ pub fn snapshots_for_ranges<R: Read>(
         range_valid &= input.header.contains_data(base, len as u64);
         let first = offset.min(len as u64) as usize;
         let end = shown + limit.min(len - first);
-        if end > shown {
-            pages.push((base + first as u64, shown..end));
-        }
+        pages.push((base + first as u64, shown..end));
         shown = end;
     }
-    if shown * checkpoints.len() > 4096 {
+    let requests: Vec<_> = match selection {
+        Selection::Shared(checkpoints) => {
+            checkpoints.iter().map(|&point| (point, 0..shown)).collect()
+        }
+        Selection::PerRange(checkpoints) => pages
+            .iter()
+            .zip(checkpoints)
+            .flat_map(|((_, cells), group)| group.iter().map(move |&point| (point, cells.clone())))
+            .collect(),
+    };
+    if requests.iter().map(|(_, cells)| cells.len()).sum::<usize>() > 4096 {
         return Err(Error::trace(
             "memory checkpoint page exceeds 4096 byte cells",
         ));
     }
-    let mut points: Vec<_> = checkpoints
+    let mut points: Vec<_> = requests
         .iter()
-        .map(|&checkpoint| CheckpointSnapshot {
-            checkpoint,
-            cells: vec![None; shown],
+        .map(|(checkpoint, cells)| CheckpointSnapshot {
+            checkpoint: *checkpoint,
+            cells: vec![None; cells.len()],
             selected_event: false,
             pc: 0,
             committed: false,
@@ -151,26 +200,30 @@ pub fn snapshots_for_ranges<R: Read>(
             gap_reasons: 0,
         })
         .collect();
-    let mut order: Vec<_> = (0..checkpoints.len()).collect();
-    order.sort_by_key(|&i| (checkpoints[i].at, checkpoints[i].phase == Phase::Post, i));
-    let last = checkpoints[*order.last().unwrap()].at;
+    let mut order: Vec<_> = (0..requests.len()).collect();
+    order.sort_by_key(|&i| (requests[i].0.at, requests[i].0.phase == Phase::Post, i));
+    let last = requests[*order.last().unwrap()].0.at;
     let mut next = 0;
     let mut cells = vec![None; shown];
     let info = replay::read_evidence(input, |g, _| {
         while next < order.len()
-            && checkpoints[order[next]].at == g.seq
-            && checkpoints[order[next]].phase == Phase::Pre
+            && requests[order[next]].0.at == g.seq
+            && requests[order[next]].0.phase == Phase::Pre
         {
-            capture(&mut points[order[next]], &cells, &g);
+            let index = order[next];
+            capture(&mut points[index], &cells[requests[index].1.clone()], &g);
             next += 1;
         }
-        if range_valid && g.seq <= last && (g.gap || !g.accesses.is_empty()) {
+        if range_valid && shown != 0 && g.seq <= last && (g.gap || !g.accesses.is_empty()) {
             for (base, indices) in &pages {
-                observe(&mut cells[indices.clone()], *base, &g);
+                if !indices.is_empty() {
+                    observe(&mut cells[indices.clone()], *base, &g);
+                }
             }
         }
-        while next < order.len() && checkpoints[order[next]].at == g.seq {
-            capture(&mut points[order[next]], &cells, &g);
+        while next < order.len() && requests[order[next]].0.at == g.seq {
+            let index = order[next];
+            capture(&mut points[index], &cells[requests[index].1.clone()], &g);
             next += 1;
         }
     })?;
@@ -438,6 +491,47 @@ mod tests {
         );
         assert_eq!(batch.points[4].gap_count, 1);
         assert_eq!(batch.points[4].gap_reasons, 2);
+
+        count.set(0);
+        let input = Input::new(Counted {
+            cursor: Cursor::new(bytes(&records)),
+            count: count.clone(),
+        })
+        .unwrap();
+        let checkpoints = [
+            vec![Checkpoint {
+                at: 1,
+                phase: Phase::Post,
+            }],
+            vec![
+                Checkpoint {
+                    at: 3,
+                    phase: Phase::Post,
+                },
+                Checkpoint {
+                    at: 0,
+                    phase: Phase::Post,
+                },
+            ],
+        ];
+        let batch =
+            snapshots_for_range_checkpoints(input, &[(0x2001, 4), (0x200e, 2)], &checkpoints, 1, 3)
+                .unwrap();
+        assert_eq!(count.get(), length);
+        assert_eq!(batch.points.len(), 3);
+        for (index, (point, request)) in batch
+            .points
+            .iter()
+            .zip(checkpoints.iter().flatten())
+            .enumerate()
+        {
+            assert_eq!(point.checkpoint, *request);
+            let expected = run(&records, request.at, request.phase);
+            assert_eq!(
+                point.cells,
+                expected.cells[if index == 0 { 1..4 } else { 14..15 }]
+            );
+        }
     }
 
     #[test]

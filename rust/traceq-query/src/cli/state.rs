@@ -145,6 +145,21 @@ fn instruction_row<'a>(g: &Instruction, info: &'a Info) -> InstructionRow<'a> {
         text: text(info, g.pc),
     }
 }
+
+fn parse_checkpoint(value: &str, flag: &str) -> Result<Checkpoint, CliError> {
+    let invalid = || CliError(format!("{flag} requires E:pre or E:post"), 2);
+    let (event, position) = value.split_once(':').ok_or_else(invalid)?;
+    let phase = match position {
+        "pre" => Phase::Pre,
+        "post" => Phase::Post,
+        _ => return Err(invalid()),
+    };
+    Ok(Checkpoint {
+        at: parse_u64(event, false)?,
+        phase,
+    })
+}
+
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let name = args[0].as_str();
     let json = args.iter().any(|s| s == "--json");
@@ -162,6 +177,8 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let (mut has_at, mut read_only, mut write_only, mut gaps_only, mut compact, mut has_phase) =
         (false, false, false, false, false, false);
     let mut ranges = vec![];
+    let mut range_checkpoints = Vec::<Vec<Checkpoint>>::new();
+    let mut range_checkpoint_count = 0;
     let mut checkpoints = vec![];
     let mut registers = vec![];
     let mut pcs = vec![];
@@ -188,27 +205,29 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 }
                 let (base, len) = parse_range(value)?;
                 ranges.push((base, len as usize));
+                range_checkpoints.push(Vec::new());
             }
             "--at-ev" | "--at-seq" if point_query => {
                 at = parse_u64(next(args, &mut i, a)?, false)?;
                 has_at = true;
             }
             "--checkpoint" => {
-                let value = next(args, &mut i, a)?;
-                let Some((event, position)) = value.split_once(':') else {
-                    return Err("--checkpoint requires E:pre or E:post".to_string().into());
-                };
-                if !matches!(position, "pre" | "post") {
-                    return Err("--checkpoint requires E:pre or E:post".to_string().into());
+                checkpoints.push(parse_checkpoint(next(args, &mut i, a)?, a)?);
+            }
+            "--range-checkpoint" if memory_query && json => {
+                let group = range_checkpoints.last_mut().ok_or_else(|| {
+                    CliError("--range-checkpoint must follow a --range".into(), 2)
+                })?;
+                if range_checkpoint_count == 64 {
+                    return Err("at most 64 --range-checkpoint options".to_string().into());
                 }
-                checkpoints.push(Checkpoint {
-                    at: parse_u64(event, false)?,
-                    phase: if position == "pre" {
-                        Phase::Pre
-                    } else {
-                        Phase::Post
-                    },
-                });
+                group.push(parse_checkpoint(next(args, &mut i, a)?, a)?);
+                range_checkpoint_count += 1;
+            }
+            "--range-checkpoint" => {
+                return Err("--range-checkpoint requires mem-state --json"
+                    .to_string()
+                    .into());
             }
             "--from" if event_window => from = parse_u64(next(args, &mut i, a)?, false)?,
             "--to" if event_window => to = parse_u64(next(args, &mut i, a)?, false)?,
@@ -255,7 +274,16 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             .to_string()
             .into());
     }
-    if matches!(name, "mem-state" | "reg-state") && !has_at && checkpoints.is_empty() {
+    let per_range = range_checkpoint_count != 0;
+    if per_range
+        && (!checkpoints.is_empty()
+            || has_at
+            || has_phase
+            || range_checkpoints.iter().any(Vec::is_empty))
+    {
+        return Err("--range-checkpoint requires a checkpoint for each range and cannot mix with --checkpoint/--at-ev/--at-seq/--phase".to_string().into());
+    }
+    if point_query && !has_at && checkpoints.is_empty() && !per_range {
         return Err("--at-ev is required".to_string().into());
     }
     if !checkpoints.is_empty()
@@ -264,8 +292,19 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         return Err("1..64 checkpoints apply only to mem-state and cannot mix with --at-ev/--at-seq/--phase".to_string().into());
     }
     let page_len = |len: usize| limit.min((len as u64).saturating_sub(offset));
-    let page_bytes: u64 = ranges.iter().map(|&(_, len)| page_len(len)).sum();
-    if checkpoints.len().max(1) as u64 * page_bytes > 4096 {
+    let checkpoint_count = |index: usize| {
+        if per_range {
+            range_checkpoints[index].len()
+        } else {
+            checkpoints.len().max(1)
+        }
+    };
+    let page_cells: u64 = ranges
+        .iter()
+        .enumerate()
+        .map(|(index, &(_, len))| page_len(len) * checkpoint_count(index) as u64)
+        .sum();
+    if page_cells > 4096 {
         return Err("checkpoint page exceeds 4096 byte cells; reduce --limit"
             .to_string()
             .into());
@@ -310,26 +349,35 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         }
     }
     if name == "mem-state" {
-        let batch_requested = !checkpoints.is_empty() || ranges.len() > 1;
-        if checkpoints.is_empty() {
-            checkpoints.push(Checkpoint { at, phase });
-        }
-        let batch = memory::snapshots_for_ranges(
-            input(&path)?,
-            &ranges,
-            &checkpoints,
-            offset,
-            limit as usize,
-        )?;
+        let batch_requested = per_range || !checkpoints.is_empty() || ranges.len() > 1;
+        let stream = input(&path)?;
+        let implicit = [Checkpoint { at, phase }];
+        let shared = if checkpoints.is_empty() {
+            &implicit[..]
+        } else {
+            &checkpoints[..]
+        };
+        let batch = if per_range {
+            memory::snapshots_for_range_checkpoints(
+                stream,
+                &ranges,
+                &range_checkpoints,
+                offset,
+                limit as usize,
+            )?
+        } else {
+            memory::snapshots_for_ranges(stream, &ranges, shared, offset, limit as usize)?
+        };
         let info = &batch.info;
         if !batch.range_valid {
             return Err("query extends outside declared data range"
                 .to_string()
                 .into());
         }
-        if checkpoints
+        if batch
+            .points
             .iter()
-            .any(|point| point.at >= info.instructions)
+            .any(|point| point.checkpoint.at >= info.instructions)
         {
             return Err("requested instruction is outside the capture"
                 .to_string()
@@ -341,13 +389,16 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         };
         let mut meta = capture_meta(info);
         let rows = if batch_requested {
-            let count = checkpoints.len() as u64;
-            let mut checkpoint_rows = |base: u64, len: usize, start: usize| -> Vec<Value> {
+            let mut checkpoint_rows = |base: u64,
+                                       len: usize,
+                                       start: usize,
+                                       points: &[memory::CheckpointSnapshot]|
+             -> Vec<Value> {
                 let first = offset.min(len as u64);
                 let shown = page_len(len) as usize;
                 let page_base = base + first;
                 let truncated = first + (shown as u64) < len as u64;
-                batch.points.iter().map(|point| {
+                points.iter().map(|point| {
                     let cells = &point.cells[start..start + shown];
                     let data = if compact {
                         packing.frame(page_base, cells, info)
@@ -368,28 +419,36 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 }).collect()
             };
             let longest = ranges.iter().map(|&(_, len)| len).max().unwrap();
-            let total: usize = ranges.iter().map(|&(_, len)| len).sum();
+            let total: usize = ranges
+                .iter()
+                .enumerate()
+                .map(|(index, &(_, len))| len * checkpoint_count(index))
+                .sum();
             meta.extend(page_meta(
                 args,
                 longest as u64,
                 page_len(longest) as usize,
                 offset,
             ));
-            meta.insert("total".into(), json!(total as u64 * count));
-            meta.insert("shown".into(), json!(page_bytes * count));
+            meta.insert("total".into(), json!(total));
+            meta.insert("shown".into(), json!(page_cells));
+            if per_range {
+                meta.insert("checkpoint_pairs".into(), json!(range_checkpoint_count));
+            } else {
+                meta.insert("checkpoints".into(), json!(shared.len()));
+            }
             meta.extend(Map::from_iter([
-                ("checkpoints".into(), json!(count)),
                 ("byte_offset".into(), json!(offset)),
                 ("byte_limit".into(), json!(limit)),
                 ("validation".into(), json!("one stream through END")),
             ]));
-            if ranges.len() == 1 {
+            if ranges.len() == 1 && !per_range {
                 let (base, len) = ranges[0];
                 meta.insert("memory_format".into(), json!("checkpoints-v1"));
                 meta.insert("pagination_unit".into(), json!("bytes_per_checkpoint"));
                 meta.insert("range_base".into(), hx(base));
                 meta.insert("range_size".into(), json!(len));
-                checkpoint_rows(base, len, 0)
+                checkpoint_rows(base, len, 0, &batch.points)
             } else {
                 meta.insert("memory_format".into(), json!("ranges-checkpoints-v1"));
                 meta.insert(
@@ -399,10 +458,19 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 meta.insert("range_count".into(), json!(ranges.len()));
                 let mut start = 0;
                 let mut rows = Vec::with_capacity(ranges.len());
-                for (base, len) in ranges {
+                for (index, &(base, len)) in ranges.iter().enumerate() {
+                    let (cells_start, points) = if per_range {
+                        (0, &batch.points[start..start + checkpoint_count(index)])
+                    } else {
+                        (start, &batch.points[..])
+                    };
                     rows.push(json!({"range_base": hx(base), "range_size": len,
-                        "data": checkpoint_rows(base, len, start)}));
-                    start += page_len(len) as usize;
+                        "data": checkpoint_rows(base, len, cells_start, points)}));
+                    start += if per_range {
+                        points.len()
+                    } else {
+                        page_len(len) as usize
+                    };
                 }
                 rows
             }

@@ -647,6 +647,38 @@ class StateStreamChecks(unittest.TestCase):
                 self.assertEqual(self.query(path,'mem-state',[*args,'--offset','99'],ok=False)['error']['code'],'TRACE_ERROR')
                 self.assertEqual(self.query(path,'mem-state',invalid,ok=False)['error']['code'],'TRACE_ERROR')
 
+    def test_mem_state_range_checkpoints_select_only_requested_pairs(self):
+        first=['--range','0x2000,4','--range-checkpoint','1:post']
+        second=['--range','0x2003,2','--range-checkpoint','0:post','--range-checkpoint','1:pre']
+        args=[*first,*second,'--limit','1','--access-source']
+        for chunked in (False,True):
+            path=self.atomic_access_artifact(chunked)
+            result=self.query(path,'mem-state',args)
+            self.assertEqual(result['meta']['checkpoint_pairs'],3)
+            self.assertEqual((result['meta']['total'],result['meta']['shown']),(8,3))
+            groups=result['data']
+            self.assertEqual([[(r['ev'],r['phase']) for r in group['data']] for group in groups],
+                             [[(1,'post')],[(0,'post'),(1,'pre')]])
+            self.assertEqual([r['data'][0]['value'] for group in groups for r in group['data']],['0x63','0x0','0x0'])
+            command=shlex.split(result['meta']['next'])
+            command[0]=str(ROOT/'cli/traceq')
+            page=json.loads(subprocess.check_output(command,text=True,timeout=10))
+            self.assertEqual(page['meta']['shown'],3)
+            self.assertTrue(all(not row['data'][0]['known'] for row in page['data'][1]['data']))
+            for invalid in [
+                ['--range-checkpoint','0:post','--range','0x2000,1'],
+                [*first,'--range','0x2003,2'],
+                [*first,'--checkpoint','0:post'],
+                [*first,'--at-ev','0'],
+                [*first,'--phase','pre'],
+                ['--range','0x2000,4096','--range-checkpoint','0:post',*second,'--limit','4096'],
+            ]:
+                self.assertEqual(self.query(path,'mem-state',invalid,ok=False)['error']['code'],'ARGUMENT')
+            raw=path.read_bytes()
+            for damage in (raw[:-1],raw+b'x'):
+                path.write_bytes(damage)
+                self.assertEqual(self.query(path,'mem-state',[*args,'--offset','99'],ok=False)['error']['code'],'TRACE_ERROR')
+
     def test_mem_state_compact_global_gap_and_damaged_empty_pages_remain_conservative(self):
         for chunked in [False,True]:
             events=self.compact_events();events.insert(-1,(3,6,0,0,0,0,0,4));events[-1]=(4,6,0,3,3,0,3,2)

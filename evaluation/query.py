@@ -41,7 +41,8 @@ MEMORY_CHECKPOINT_GUIDANCE = ('Profile2 mem-state: one --range B,L plus repeated
                              'meta.total/shown count aggregate byte cells; meta.next advances all groups together. '
                              'An unobserved post is unknown; pre values and global gaps retain their normal semantics. '
                              'With --json, repeat --range to group disjoint or overlapping ranges in one scan. '
-                             'ranges-checkpoints-v1 returns range_base, range_size and checkpoints in each range group; byte limits apply per range and the whole page cap is 4096 cells.')
+                             'ranges-checkpoints-v1 returns range_base, range_size and checkpoints in each range group; byte limits apply per range and the whole page cap is 4096 cells. '
+                             'Put --range-checkpoint E:pre or E:post after its --range for different checkpoints by range, at least one per range and at most 64 total. Do not mix with shared checkpoint options.')
 COMPACT_STATE_GUIDANCE = ('Profile2 mem-state supports optional --compact --json for single/batch snapshots: hex-v1 frames '
                          'contain address/size/data_hex and per-byte sources. null source is unknown (00 placeholder); '
                          '[observed_ev,pc_index] is known, with PCs in page-local meta.pc_table. '
