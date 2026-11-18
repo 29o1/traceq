@@ -98,6 +98,58 @@ class StateStreamChecks(unittest.TestCase):
             path.write_bytes(data)
             self.assertEqual(set(self.query(path,'last-writers',['--range','0x2000,8','--at-seq','0'],ok=False)),{'error'})
 
+    def test_find_pc_module_offsets_keep_capture_offsets_and_page_in_trace_order(self):
+        name = b'module.so'
+        fields = struct.unpack('<3Q', name.ljust(24, b'\0'))
+        metadata = [(13, 0, 0, 1, 0, 1, 0, 0), (10, 0, 0xf00, 0x200, len(name), *fields)]
+        for chunked in (False, True):
+            path = self.artifact([*metadata, *self.base()], chunked)
+            args = ['--module', name.decode(), '--off', '0x108', '--off', '0x100']
+            full = self.query(path, 'find-pc', args)
+            self.assertEqual([(r['ev'], r['module_offset'], r['off']) for r in full['data']],
+                             [(0, '0x100', '0x0'), (2, '0x108', '0x8')])
+            self.assertEqual(full['meta']['module'], 'module.so')
+            self.assertEqual(full['meta']['module_base'], '0xf00')
+            absolute = self.query(path, 'find-pc', ['--addr', '0x1000', '--addr', '0x1008'])
+            self.assertEqual(absolute['data'], [{k: v for k, v in row.items() if k != 'module_offset'}
+                                               for row in full['data']])
+            page = self.query(path, 'find-pc', [*args, '--limit', '1'])
+            self.assertEqual(page['data'], full['data'][:1])
+            self.assertEqual(page['meta']['total'], 2)
+            next_argv = shlex.split(page['meta']['next'])
+            result = subprocess.run([str(ROOT/'cli/traceq'), *next_argv[1:]],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(json.loads(result.stdout)['data'], full['data'][1:])
+            empty = self.artifact([*metadata, (4, 0, 0, 0, 0, 0, 0, 2)], chunked)
+            self.assertEqual(self.query(empty, 'find-pc', args)['data'], [])
+
+    def test_find_pc_module_selector_errors_follow_complete_validation(self):
+        name = b'module.so'
+        fields = struct.unpack('<3Q', name.ljust(24, b'\0'))
+        metadata = [(13, 0, 0, 1, 0, 1, 0, 0), (10, 0, 0xf00, 0x200, len(name), *fields)]
+        for chunked in (False, True):
+            path = self.artifact([*metadata, *self.base()], chunked)
+            duplicated = (10, 0, 0x2000, 0x200, len(name), *fields)
+            ambiguous = self.artifact([*metadata, duplicated, *self.base()], chunked)
+            missing = ['--module', 'missing.so', '--off', '0x100']
+            args = ['--module', 'module.so', '--off', '0x100']
+            for source, options, message in [
+                (path, missing, 'absent from trace metadata'),
+                (path, [*args, '--off', '0x200'], 'outside recorded module'),
+                (path, [*args, '--addr', '0x1000'], 'cannot mix with --addr'),
+                (ambiguous, args, 'multiple recorded instances'),
+            ]:
+                error = self.query(source, 'find-pc', options, ok=False)['error']
+                self.assertEqual(error['code'], 'ARGUMENT')
+                self.assertIn(message, error['message'])
+            raw = path.read_bytes()
+            for damaged in (raw[:-1], raw+b'x'):
+                path.write_bytes(damaged)
+                for selectors in (args, missing):
+                    error = self.query(path, 'find-pc', [*selectors, '--offset', '99'], ok=False)['error']
+                    self.assertEqual(error['code'], 'TRACE_ERROR')
+
     def test_memory_commands_reject_ignored_time_filters(self):
         path = self.artifact(self.compact_events(), chunked=True)
         args = ['--range','0x2000,1']

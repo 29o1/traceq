@@ -123,13 +123,19 @@ struct InstructionRow<'a> {
     completion: &'static str,
     ev: u64,
     gap: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module_offset: Option<HexWord>,
     off: HexWord,
     opcode: HexWord,
     pc: HexWord,
     post_observed: bool,
     text: Cow<'a, str>,
 }
-fn instruction_row<'a>(g: &Instruction, info: &'a Info) -> InstructionRow<'a> {
+fn instruction_row<'a>(
+    g: &Instruction,
+    info: &'a Info,
+    module_base: Option<u64>,
+) -> InstructionRow<'a> {
     InstructionRow {
         completion: if g.committed {
             "confirmed"
@@ -138,12 +144,36 @@ fn instruction_row<'a>(g: &Instruction, info: &'a Info) -> InstructionRow<'a> {
         },
         ev: g.seq,
         gap: g.gap,
+        module_offset: module_base.map(|base| HexWord(g.pc - base)),
         off: HexWord(g.pc.wrapping_sub(info.header.code_base)),
         opcode: HexWord(g.word),
         pc: HexWord(g.pc),
         post_observed: g.committed,
         text: text(info, g.pc),
     }
+}
+
+fn module_base(info: &Info, name: &str, offsets: &[u64]) -> Result<u64, CliError> {
+    let mut matches = info
+        .modules
+        .iter()
+        .filter(|(_, module)| module.name == name.as_bytes());
+    let Some((&base, module)) = matches.next() else {
+        return Err(format!(
+            "module {name:?} is absent from trace metadata. Use --addr with a verified PC"
+        )
+        .into());
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "module {name:?} has multiple recorded instances. Use --addr with a verified PC"
+        )
+        .into());
+    }
+    if offsets.iter().any(|&offset| offset >= module.size) {
+        return Err(format!("--off is outside recorded module {name:?}").into());
+    }
+    Ok(base)
 }
 
 fn parse_checkpoint(value: &str, flag: &str) -> Result<Checkpoint, CliError> {
@@ -183,6 +213,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut registers = vec![];
     let mut pcs = vec![];
     let mut offs = vec![];
+    let mut module = None;
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
@@ -257,6 +288,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             }
             "--addr" => pcs.push(parse_u64(next(args, &mut i, a)?, false)?),
             "--off" => offs.push(parse_u64(next(args, &mut i, a)?, false)?),
+            "--module" if name == "find-pc" => {
+                let value = next(args, &mut i, a)?;
+                if value.is_empty() || module.replace(value).is_some() {
+                    return Err("find-pc requires one nonempty --module NAME"
+                        .to_string()
+                        .into());
+                }
+            }
             "--read" => read_only = true,
             "--write" => write_only = true,
             _ if !a.starts_with('-') && path.is_empty() => path = a.clone(),
@@ -311,6 +350,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     }
     if name == "find-pc" && pcs.is_empty() && offs.is_empty() {
         return Err("--addr or --off is required".to_string().into());
+    }
+    if module.is_some() && (offs.is_empty() || !pcs.is_empty()) {
+        return Err("--module requires --off and cannot mix with --addr"
+            .to_string()
+            .into());
     }
     if registers.len() > 65 {
         return Err("at most 65 registers per query".to_string().into());
@@ -499,15 +543,29 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         "instructions" | "find-pc" => {
             let mut total = 0;
             let mut page = Vec::new();
+            let mut resolved = None;
             let info = replay::read_evidence(stream, |g, state| {
-                if g.seq < from
-                    || g.seq > to
-                    || gaps_only && !g.gap
-                    || name == "find-pc"
-                        && !pcs.contains(&g.pc)
-                        && !offs.contains(&g.pc.wrapping_sub(state.header.code_base))
-                {
+                if g.seq < from || g.seq > to || gaps_only && !g.gap {
                     return;
+                }
+                if name == "find-pc" {
+                    let matches = if let Some(module) = module {
+                        // Module metadata is complete before the first instruction.
+                        // Defer reporting selector errors until the stream is validated.
+                        resolved
+                            .get_or_insert_with(|| module_base(state, module, &offs))
+                            .as_ref()
+                            .is_ok_and(|base| {
+                                g.pc.checked_sub(*base)
+                                    .is_some_and(|off| offs.contains(&off))
+                            })
+                    } else {
+                        pcs.contains(&g.pc)
+                            || offs.contains(&g.pc.wrapping_sub(state.header.code_base))
+                    };
+                    if !matches {
+                        return;
+                    }
                 }
                 if total >= offset && (page.len() as u64) < limit {
                     page.push(Instruction {
@@ -520,8 +578,18 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 }
                 total += 1;
             })?;
-            let rows: Vec<_> = page.iter().map(|g| instruction_row(g, &info)).collect();
+            let selected_base = module
+                .map(|module| resolved.unwrap_or_else(|| module_base(&info, module, &offs)))
+                .transpose()?;
+            let rows: Vec<_> = page
+                .iter()
+                .map(|g| instruction_row(g, &info, selected_base))
+                .collect();
             let mut meta = capture_meta(&info);
+            if let Some(base) = selected_base {
+                meta.insert("module".into(), json!(module));
+                meta.insert("module_base".into(), hx(base));
+            }
             meta.extend(page_meta(args, total, rows.len(), offset));
             return Ok(response(rows, Value::Object(meta), json));
         }
