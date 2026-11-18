@@ -55,6 +55,19 @@ class StreamChecks(unittest.TestCase):
         self.assertEqual(rows[2]['value'],'0xbb');self.assertFalse(rows[8]['known'])
         self.assertIsNone(rows[8]['writer_seq']);self.assertIsNone(rows[8]['value'])
 
+    def test_state_cutoff_is_explicit_for_default_historical_empty_and_paged_results(self):
+        path=self.artifact(self.base())
+        for at,options in [(2,[]),(0,['--at-seq','0']),(1,['--at-seq','1'])]:
+            q=self.query(path,*options)
+            self.assertEqual(q['meta']['as_of_ev'],at)
+            self.assertEqual(q['meta']['state_position'],'after_recorded_accesses_at_event')
+            page=self.query(path,*options,'--limit','2','--offset','1')
+            self.assertEqual(page['meta']['as_of_ev'],at);self.assertEqual(page['data'],q['data'][1:3])
+        self.assertEqual(set(self.query(path,'--at-seq','3',ok=False)),{'error'})
+        empty=self.query(self.artifact([(4,0,0,0,0,0,0,1)]))
+        self.assertIsNone(empty['meta']['as_of_ev']);self.assertFalse(any(r['known'] for r in empty['data']))
+        self.assertEqual(set(self.query(self.artifact(self.base(),b'x'),'--at-seq','0',ok=False)),{'error'})
+
     def test_historical_query_selects_earlier_same_value_write(self):
         rows=self.query(self.artifact(self.base()),'--at-seq','1')['data']
         self.assertEqual(rows[2]['writer_seq'],1)

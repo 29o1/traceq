@@ -1,0 +1,45 @@
+{
+  "upstream_repository": "https://github.com/frida/frida-gum",
+  "upstream_version": "17.26.4",
+  "upstream_commit": "9d5505c74bd2ac72700f4837dc8128226c1f11f9",
+  "upstream_source": "gum/backend-arm64/gumstalker-arm64.c",
+  "upstream_source_sha256": "b6346db3028a438f6d9ce9dbc66c7c0baf70b238a6f254efa9ca3db67b6602ba",
+  "license": "wxWindows Library Licence3.1; COPYING",
+  "modifications": [
+    "Use the official matching devkit amalgamated header plus the five exact-version private declarations in gum-devkit-bridge.h; no private Stalker offsets cross the archive boundary.",
+    "MINIMAL and FULL helpers preserve FPCR/FPSR in16B below the public784B GumCpuContext on the new Stalker private stack. Preserve all upstream full-vector saves, prolog/SP switching, far-slab/backpatch fixes and literal-pool checks."
+  ],
+  "removed_customizations": [
+    "Full32-vector and far-slab backports now provided by upstream.",
+    "gum_stalker_set_ratio internal extension and4KiB override retired; upstream64KiB worst-case block margin retained. No public traceq C ABI or observation modes changed."
+  ],
+  "official_devkits": "dependencies/gum-devkits.json",
+  "replaced_archive_member": "backend-arm64_gumstalker-arm64.c.o",
+  "platforms": [
+    "android-arm64",
+    "macos-arm64"
+  ],
+  "private_header_sources": [
+    {
+      "path": "gum/arch-arm64/gumarm64relocator.h",
+      "sha256": "08230511fd7dad112b70ea6fa31eaefefc6bcf6f26cb519428ee7209733821b8"
+    },
+    {
+      "path": "gum/arch-arm64/gumarm64reader.h",
+      "sha256": "3e30598a2620159ec7ef19bf0b969655c282c95a1f8ad95857d1132a8ea08dac"
+    },
+    {
+      "path": "gum/gumspinlock.h",
+      "sha256": "e07d65b0194081dbd92487489cd912128dccbbef0989ec6479b2f295fcef5267"
+    },
+    {
+      "path": "gum/gumstalker-priv.h",
+      "sha256": "31ac6a49a68e48e2b3508a3ec2ae217041ef1a30e381508404c70fcd49e02ccf"
+    },
+    {
+      "path": "gum/gum-init.h",
+      "sha256": "51f24e20a918dd314f08742907c0aab6f122575827f6c7363d22d9ce1f204db6"
+    }
+  ],
+  "validation": "Independent actual C layout/constants, vector/FP checks, far slabs, dense callout/private-stack guard, formal SDK invoke and host ASM/C; exact results frozen in iteration112 artifacts."
+}

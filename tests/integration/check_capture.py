@@ -58,19 +58,12 @@ def main():
         assert query['meta']['capture_gaps']==len(gaps)
         (out/(case['id']+'.json')).write_text(json.dumps({'native':native,'capture':capture,'query':query},indent=2)+'\n')
         results.append({'case':case['id'],'partial':case.get('partial',False),'passed':True})
-        if case['id']=='memory-input':
-            # Exercise the retained legacy text/import path after relocation.
-            log=out/'legacy.log';gtb=out/'legacy.gtb'
-            text=invoke([*args,'text',log,*inputs]);invoke([GT,'import',log,'-o',gtb])
-            q=invoke([GT,'mem-access',gtb,'--range',text['data_base']+',32','--write','--limit','32','--json'])
-            found=[dict(seq=r['ev'],pc=int(r['at'].split('!')[1],0),offset=int(r['addr'],0)-int(text['data_base'],0),size=r['size'],value=int(r['val'],0)) for r in q['data']]
-            assert found==writes(answer)
     summary={'cases':results,'supported_cases':sum(not c.get('partial') for c in CASES),
-             'partial_cases':sum(bool(c.get('partial')) for c in CASES),'legacy_text_chain_passed':True,
+             'partial_cases':sum(bool(c.get('partial')) for c in CASES),'structured_capture_chain_passed':True,
              'binaries':{str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest()
                          for p in [GT,BUILD/'traceq-capture',BUILD/'libfixtures.dylib']}}
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
-    print(f"PASS: {len(results)} capture cases, native results, write facts, byte provenance, and legacy text/import chain")
+    print(f"PASS: {len(results)} capture cases, native results, write facts, byte provenance, and structured capture chain")
     print(out)
 
 if __name__=='__main__':main()

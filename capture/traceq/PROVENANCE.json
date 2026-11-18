@@ -178,5 +178,15 @@
     "src/GumTrace.cpp": "src/TraceqCapture.cpp",
     "src/GumTrace.h": "src/TraceqCapture.h",
     "README.md": "UPSTREAM_README.md"
+  },
+  "active_Gum": {
+    "version": "17.26.4",
+    "platforms": [
+      "Android ARM64",
+      "macOS ARM64 independent lab"
+    ],
+    "manifest": "dependencies/gum-devkits.json",
+    "source_patch_provenance": "vendor/frida-gum-arm64/PROVENANCE.json",
+    "historical_17_8_3_inputs": "Preserved below as provenance of earlier builds; Android formal path now uses official17.26.4. iPhoneOS remains unqualified legacy dependency."
   }
 }

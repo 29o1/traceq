@@ -7,7 +7,7 @@ CASES=[*PREVIOUS,
     dict(id='store-writeback',function='store_writeback',seed=0x123456789abcdef0,count=7,initial=0),
     dict(id='store-writeback-zero',function='store_writeback',seed=0,count=0,initial=0),
     dict(id='store-buffer-flush',function='store_loop',seed=0,count=2048,initial=0),
-    dict(id='unsupported-st1',function='unsupported_store',seed=0xab,count=1,initial=0,partial=True)]
+    dict(id='unsupported-stlr',function='unsupported_store',seed=0xab,count=1,initial=0,partial=True)]
 
 def expected(case):
     if case['function'] in {c['function'] for c in PREVIOUS}: return prior_expected(case)
@@ -30,7 +30,7 @@ def expected(case):
         for i in range(count): step(4,[(0,8,i)]);step(8);step(12);step(16)
         step(20);step(24);result=count
     elif case['function']=='unsupported_store':
-        step(0);step(4,[(0,16,int.from_bytes(bytes([3])*16,'little'))]);step(8,[(20,1,seed)]);step(12)
+        step(0);step(4,[(0,8,seed)]);step(8,[(20,1,seed)]);step(12)
     else:raise ValueError(case)
     return dict(events=events,buffer=buf.hex(),result=result)
 

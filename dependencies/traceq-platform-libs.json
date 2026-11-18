@@ -13,5 +13,9 @@
       "sha256": "c04d3833efe194d21630ccfe6f094e02fd03280f00b760ebb2ce9627109d2e55",
       "bytes": 39394792
     }
-  ]
+  ],
+  "active_platforms": [
+    "ios"
+  ],
+  "Android_replacement": "gum-devkits.json: official17.26.4; old artifacts retained for historical reproduction"
 }

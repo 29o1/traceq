@@ -1,0 +1,9 @@
+traceq context FILE --at-ev E [--at-ev E ...] [--before N --after N] [--reg R ...] [--limit N --offset N] [--json [--compact]]
+  One validated scan; overlapping windows merge in execution order.
+  Includes PC/opcode/disassembly, pre/post registers, real memory, boundaries, gaps and completion.
+  Reuse returned instruction facts; a bounded context window can start state analysis.
+  Default registers: full-width operand/changed slots plus x30, sp, nzcv.
+  --reg replaces automatic selection for every row; repeat for all needed views.
+  Unknown post-state stays null. Capture metadata covers the full validated stream.
+  --compact --json: columns-v1 arrays; each page declares columns and register_sets.
+  pre/post values follow register_sets[register_set]; unobserved post is null.

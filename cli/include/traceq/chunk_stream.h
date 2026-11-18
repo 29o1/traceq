@@ -45,7 +45,13 @@ inline bool decode(const unsigned char* bytes,size_t size,size_t count,std::vect
         uint64_t kind=bytes[pos++],v[7]{};uint32_t widths=get32(bytes+pos);pos+=4;
         if(widths>>28)return false;
         for(unsigned j=0;j<7;++j){unsigned n=(widths>>(4*j))&15;if(n>8 || n>size-pos)return false;
-            for(unsigned k=0;k<n;++k)v[j]|=uint64_t(bytes[pos++])<<(8*k);}
+            if (!n) continue;
+            if (size-pos>=sizeof(uint64_t)) {
+                // Read only within the packed block; the final bytes use the
+                // byte path. n==8 shifts by zero, never by the word size.
+                v[j]=writes::get64(bytes+pos) & (UINT64_MAX >> ((8-n)*8));
+                pos+=n;
+            } else for(unsigned k=0;k<n;++k)v[j]|=uint64_t(bytes[pos++])<<(8*k);}
         seq+=unzigzag(v[0]);pc+=unzigzag(v[1]);
         out.push_back({kind,seq,pc,v[2],v[3],v[4],v[5],v[6]});
     }

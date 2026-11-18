@@ -16,7 +16,9 @@ constexpr uint64_t REG_PRE=5, REG_POST=6, READ=7, SITE=8, COMMIT=9;
 // Optional profile-2 extension. Old streams remain readable; old readers reject
 // the explicit feature record instead of silently dropping boundary evidence.
 constexpr uint64_t MODULE=10, SCOPE_EXIT=11, SCOPE_REENTER=12, FEATURES=13;
-constexpr uint64_t FEATURE_BOUNDARIES=1;
+constexpr uint64_t FEATURE_BOUNDARIES=1, FEATURE_EXPLICIT_RANGES=2;
+constexpr uint64_t CODE_RANGE=14;
+struct CodeRange { uint64_t base,size; };
 enum Transfer : uint64_t { CALL=1, BRANCH=2, RETURN=3 };
 constexpr unsigned REGISTER_COUNT=65; // x0..x30, sp, nzcv, v0..v31
 enum Reason : uint64_t {

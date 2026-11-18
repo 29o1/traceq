@@ -1,0 +1,24 @@
+{
+  "version": "17.26.4",
+  "source_repository": "https://github.com/frida/frida-gum",
+  "source_commit": "9d5505c74bd2ac72700f4837dc8128226c1f11f9",
+  "backend_member": "backend-arm64_gumstalker-arm64.c.o",
+  "platforms": {
+    "android-arm64": {
+      "url": "https://github.com/frida/frida/releases/download/17.26.4/frida-gum-devkit-17.26.4-android-arm64.tar.xz",
+      "sha256": "894316095bfabd94e064be304d39b9955718c3baeb6131d1c77d08b832318d1b",
+      "members": {
+        "frida-gum.h": "07c81bd4811948a8d31ba0e674789fe374bfdbca3342c6cb7cdf5af1fbeee33e",
+        "libfrida-gum.a": "07b3e172763d6f861a37b7c975956f2bb5c3cfb2b34c1fd6bdb5c0b36cef2481"
+      }
+    },
+    "macos-arm64": {
+      "url": "https://github.com/frida/frida/releases/download/17.26.4/frida-gum-devkit-17.26.4-macos-arm64.tar.xz",
+      "sha256": "dbd4b90ec9543a0efdd7d06950fe7047734bd50a741ac35f5fab215f96202ef0",
+      "members": {
+        "frida-gum.h": "7d88e17eec9312f0bd78196202f028ee527fb697db69a2c3002b78551d72df67",
+        "libfrida-gum.a": "14360f63df0b9c754f79197985497cf975692b5ebe2b0cbd524ee472fb832c9e"
+      }
+    }
+  }
+}

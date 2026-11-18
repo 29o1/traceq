@@ -1,37 +1,19 @@
-CXX      ?= c++
-CPPFLAGS ?=
-CXXFLAGS ?= -std=c++17 -O2 -g -Wall -Wno-unused-parameter
-LDFLAGS  ?=
-LDLIBS   ?=
-AR       ?= ar
-INCLUDES := -Iinclude
+PYTHON ?= python3
+RUST_CLI := ../.deps/rust/target/release/traceq
+RUST_SOURCES := $(shell find ../rust/traceq-cli ../rust/traceq-query ../rust/traceq-core -type f \( -name '*.rs' -o -name '*.json' -o -name '*.txt' -o -name 'Cargo.toml' \))
+RUST_SOURCES += ../rust/Cargo.toml ../rust/Cargo.lock ../tools/rust_workspace.py
 
-LIB_SRC := src/site.cpp src/recorder.cpp src/event_decoder.cpp src/ingest.cpp \
-	src/export.cpp src/query_taint.cpp src/query_compare.cpp \
-	src/query_lookup.cpp src/query_calls.cpp src/import.cpp
-LIB_SRC += src/query_last_writers.cpp
-LIB_SRC += src/state_stream.cpp src/query_state_stream.cpp
-LIB_SRC += src/query_context.cpp
-LIB_OBJ := $(LIB_SRC:.cpp=.o)
-HEADERS := $(wildcard include/traceq/*.h) $(wildcard src/*.h)
+all: traceq
 
-all: traceq gt
+$(RUST_CLI): $(RUST_SOURCES)
+	$(PYTHON) ../tools/rust_workspace.py build --locked --release -p traceq-cli
 
-# libtraceq: text import, .gtb parsing/expansion, and queries.
-libtraceq.a: $(LIB_OBJ)
-	$(AR) rcs $@ $^
-
-%.o: %.cpp $(HEADERS)
-	$(CXX) $(CPPFLAGS) $(INCLUDES) $(CXXFLAGS) -c $< -o $@
-
-traceq: src/main.o libtraceq.a
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< libtraceq.a $(LDLIBS) -o $@
-
-# Compatibility for existing scripts; help and continuation commands use traceq.
-gt: traceq
-	ln -sfn traceq gt
+traceq: $(RUST_CLI) Makefile
+	cp $(RUST_CLI) $@.new
+	chmod 755 $@.new
+	mv $@.new $@
 
 clean:
-	rm -f traceq gt libtraceq.a src/*.o
+	rm -f traceq gt
 
-.PHONY: all clean gt
+.PHONY: all clean

@@ -1,121 +1,70 @@
-cmake_minimum_required(VERSION 3.13)
-project(traceq_capture CXX)
-
-set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-include_directories(${CMAKE_SOURCE_DIR}/libs)
-include_directories(${CMAKE_SOURCE_DIR})
-
-set(TRACEQ_SOURCES
-        src/main.cpp
-        src/TraceqCapture.cpp
-        src/Utils.cpp
-        src/CallbackContext.cpp
-        src/FuncPrinter.cpp
-)
-
-add_library(traceq_capture SHARED
-        ${TRACEQ_SOURCES}
-)
-
-option(TRACEQ_WRITE_STREAM "Build experimental scoped write-evidence collector" OFF)
-option(TRACEQ_CAPTURE_PERF "Build experimental capture cost probes and counters" OFF)
-set(TRACEQ_INCLUDE_DIR "" CACHE PATH "traceq cli/include directory for the experimental stream contract")
-if(NOT TRACEQ_INCLUDE_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../cli/include/traceq/write_stream.h")
-    set(TRACEQ_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../cli/include")
+cmake_minimum_required(VERSION 3.19)
+project(traceq_capture C)
+# The generated empty translation unit is only a shared-library link container.
+# All self-owned runtime code is built by Cargo; Gum remains the pinned C archive.
+get_filename_component(TRACEQ_RUST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+option(TRACEQ_GUM_ONLY "Build the patched native Gum archive for the host lab" OFF)
+if(TRACEQ_GUM_ONLY)
+    include(cmake/TraceqGum.cmake)
+    return()
 endif()
-if(TRACEQ_WRITE_STREAM)
-    if(NOT EXISTS "${TRACEQ_INCLUDE_DIR}/traceq/write_stream.h")
-        message(FATAL_ERROR "Set TRACEQ_INCLUDE_DIR to traceq/cli/include")
-    endif()
-    target_sources(traceq_capture PRIVATE src/WriteStream.cpp)
-    target_compile_definitions(traceq_capture PRIVATE TRACEQ_WRITE_STREAM)
-    if(TRACEQ_CAPTURE_PERF)
-        target_compile_definitions(traceq_capture PRIVATE TRACEQ_CAPTURE_PERF)
-    endif()
-    target_compile_features(traceq_capture PRIVATE cxx_std_17)
-    target_include_directories(traceq_capture PRIVATE "${TRACEQ_INCLUDE_DIR}")
+option(TRACEQ_CAPTURE_PERF "Deprecated C++ diagnostic collector" OFF)
+if(TRACEQ_CAPTURE_PERF)
+    message(FATAL_ERROR "The retired C++ diagnostic collector is isolated; use complete capture measurements")
 endif()
-
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c" "/* Rust static library link container. */\n")
+add_library(traceq_capture SHARED "${CMAKE_CURRENT_BINARY_DIR}/rust-link.c")
 if(ANDROID)
-    message(STATUS "Configuring for Android")
-
-    set(ANDROID_SYSROOT_INCLUDE "${CMAKE_SYSROOT}/usr/include")
-
-    target_include_directories(traceq_capture SYSTEM PUBLIC .
-            ${ANDROID_SYSROOT_INCLUDE})
-
-    target_link_libraries(traceq_capture PRIVATE ${CMAKE_SOURCE_DIR}/libs/FridaGum-Android-17.8.3-fix.a)
+    if(NOT ANDROID_ABI STREQUAL "arm64-v8a")
+        message(FATAL_ERROR "The pinned capture ABI supports ARM64")
+    endif()
+    include(cmake/TraceqGum.cmake)
+    set(_traceq_rust_target aarch64-linux-android)
+    set(_traceq_rust_linker "${CMAKE_C_COMPILER}")
+    set(_traceq_target_env "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${_traceq_rust_linker}")
     target_link_libraries(traceq_capture PRIVATE log dl m z)
-    if(TRACEQ_WRITE_STREAM)
-        target_sources(traceq_capture PRIVATE src/AndroidCapture.cpp)
-        # Keep the embedded Gum/GLib distinct from the injecting agent's copy.
-        target_link_options(traceq_capture PRIVATE "-Wl,--exclude-libs,ALL")
-    endif()
-
+    target_link_options(traceq_capture PRIVATE "-Wl,--exclude-libs,libtraceq-gum.a" "-Wl,--gc-sections")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(_traceq_rust_target aarch64-apple-ios)
+    set(_traceq_target_env "TRACEQ_RUST_TARGET=aarch64-apple-ios")
+    set(TRACEQ_GUM_ARCHIVE "${CMAKE_CURRENT_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a")
+    target_link_libraries(traceq_capture PRIVATE "-framework Foundation" "-framework CoreFoundation")
 else()
-    message(STATUS "Configuring for iOS")
-
-    enable_language(OBJCXX)
-
-    execute_process(
-            COMMAND xcode-select -p
-            OUTPUT_VARIABLE DEVELOPER_DIR
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(NOT DEVELOPER_DIR)
-        message(FATAL_ERROR "Unable to locate Xcode developer directory")
-    endif()
-
-    set(CMAKE_XCODE_DEVELOPER_DIR ${DEVELOPER_DIR})
-
-    execute_process(
-            COMMAND /usr/bin/env DEVELOPER_DIR=${DEVELOPER_DIR} xcrun --sdk iphoneos --show-sdk-path
-            OUTPUT_VARIABLE IOS_SDK_PATH
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-
-    set(CMAKE_OSX_SYSROOT ${IOS_SDK_PATH})
-    message(STATUS "iOS SDK Path: ${IOS_SDK_PATH}")
-
-    set_source_files_properties(${TRACEQ_SOURCES} PROPERTIES LANGUAGE OBJCXX)
-
-    target_include_directories(traceq_capture SYSTEM PUBLIC .)
-
-    set_target_properties(traceq_capture PROPERTIES
-            LINKER_LANGUAGE OBJCXX
-            OBJCXX_STANDARD 11
-            OBJCXX_STANDARD_REQUIRED YES
-            BUNDLE FALSE
-            FRAMEWORK FALSE
-            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
-            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
-            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER ""
-            MACOSX_BUNDLE FALSE
-    )
-
-    target_compile_options(traceq_capture PRIVATE
-            -isysroot ${IOS_SDK_PATH}
-            -arch arm64
-            -miphoneos-version-min=12.0
-            -fvisibility=hidden
-            -Wno-unused-command-line-argument
-    )
-
-    target_link_options(traceq_capture PRIVATE
-            -isysroot ${IOS_SDK_PATH}
-            -arch arm64
-            -miphoneos-version-min=12.0
-    )
-
-    target_link_libraries(traceq_capture
-            ${CMAKE_SOURCE_DIR}/libs/FridaGum-IOS-17.8.3-fix.a
-            "-framework Foundation"
-            "-framework CoreFoundation"
-    )
+    message(FATAL_ERROR "Use tools/build_capture.py host for the independent macOS native lab")
 endif()
-
-if(TRACEQ_WRITE_STREAM)
-    set_target_properties(traceq_capture PROPERTIES CXX_STANDARD 17 OBJCXX_STANDARD 17)
+set(_traceq_rust_library "${TRACEQ_RUST_ROOT}/.deps/rust/target/${_traceq_rust_target}/release/libtraceq_capture.a")
+file(GLOB_RECURSE _traceq_rust_sources CONFIGURE_DEPENDS
+    "${TRACEQ_RUST_ROOT}/rust/traceq-capture/src/*.rs"
+    "${TRACEQ_RUST_ROOT}/rust/traceq-core/src/*.rs"
+    "${TRACEQ_RUST_ROOT}/rust/traceq-observer/src/*.rs")
+add_custom_command(OUTPUT "${_traceq_rust_library}"
+    COMMAND "${CMAKE_COMMAND}" -E env "${_traceq_target_env}"
+        "${Python3_EXECUTABLE}" "${TRACEQ_RUST_ROOT}/tools/rust_workspace.py"
+        build --release -p traceq-capture --target "${_traceq_rust_target}"
+    DEPENDS ${_traceq_rust_sources}
+        "${TRACEQ_RUST_ROOT}/rust/traceq-capture/Cargo.toml"
+        "${TRACEQ_RUST_ROOT}/rust/traceq-core/Cargo.toml"
+        "${TRACEQ_RUST_ROOT}/rust/traceq-observer/Cargo.toml"
+        "${TRACEQ_RUST_ROOT}/rust/Cargo.toml" "${TRACEQ_RUST_ROOT}/rust/Cargo.lock"
+        "${TRACEQ_RUST_ROOT}/tools/rust_workspace.py"
+    WORKING_DIRECTORY "${TRACEQ_RUST_ROOT}"
+    COMMENT "Building the Rust capture SDK with the pinned Gum ABI" VERBATIM)
+add_custom_target(traceq_rust_capture DEPENDS "${_traceq_rust_library}")
+add_dependencies(traceq_capture traceq_rust_capture)
+# Explicit undefined roots retain only public SDK functions; Rust std and Gum
+# symbols remain hidden on Android through the version script.
+if(ANDROID)
+    # A version script exports exactly the stable capture ABI from the archive.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map"
+        "{ global: traceq_capture_invoke; traceq_capture_invoke_at; traceq_capture_invoke_ranges_at; local: *; };\n")
+    target_link_options(traceq_capture PRIVATE
+        "-Wl,-u,traceq_capture_invoke" "-Wl,-u,traceq_capture_invoke_at" "-Wl,-u,traceq_capture_invoke_ranges_at"
+        "-Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/capture-exports.map")
+    # --exclude-libs must not localize SDK roots themselves; the version script
+    # hides all other Rust internals, and embedded Gum is separately localized.
+    target_link_libraries(traceq_capture PRIVATE "${_traceq_rust_library}" "${TRACEQ_GUM_ARCHIVE}")
+else()
+    target_link_options(traceq_capture PRIVATE "-Wl,-u,_traceq_capture_invoke" "-Wl,-u,_traceq_capture_invoke_at" "-Wl,-u,_traceq_capture_invoke_ranges_at")
+    target_link_libraries(traceq_capture PRIVATE "${_traceq_rust_library}" "${TRACEQ_GUM_ARCHIVE}")
 endif()

@@ -27,7 +27,7 @@ _store_writeback_end:
 .globl _unsupported_store
 _unsupported_store:
     movi v0.16b, #3
-    st1 {v0.16b}, [x1]
+    stlr x0, [x1]
     strb w0, [x1, #20]
     ret
 .globl _unsupported_store_end

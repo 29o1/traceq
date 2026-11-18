@@ -1,0 +1,34 @@
+execution-state stream queries (profile 2):
+  traceq stat FILE [--json]
+  traceq instructions FILE [--from E --to E] [--gaps] [--limit N --offset N] [--json]
+  traceq boundaries FILE [--from E --to E] [--reg x0]... [--limit N --offset N] [--json]
+  traceq find-pc FILE (--off O | --addr A)... [--limit N] [--json]
+  traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
+  traceq mem-access FILE --range BASE,LEN [--read|--write] [--from E --to E] [--compact] [--json]
+    --compact --json uses columns-v1 arrays, with columns and rw-indexed value_sources in meta.
+    Rows retain ev/pc/off/rw/addr/size/known/val; unknown values stay null.
+    Each page is self-contained; limits still count actual accesses and validate the full stream.
+  traceq mem-state FILE --range BASE,LEN --at-ev E [--phase pre|post] [--compact] [--json]
+  traceq mem-state FILE --range BASE,LEN --checkpoint E:pre --checkpoint E2:post [--json]
+    Profile2 checkpoints share one validated scan; 1..64 requests, input order retained.
+    --limit/--offset page bytes independently per checkpoint; whole page <=4096 byte cells.
+    meta.total/shown count byte cells; meta.next advances all checkpoints together.
+    Optional --compact --json uses mem_state_format=hex-v1 for single/batch snapshots.
+    Each frame has address, size, data_hex and one sources entry per byte:
+      null means unknown (00 is a placeholder); [observed_ev,pc_index] means known.
+    meta.pc_table preserves each source PC and pc_offset; references are page-local.
+    Counts/limits still measure bytes, including unknowns; empty frames have size 0.
+    All input validation, gap/completion semantics and checkpoint fields are retained.
+  traceq last-writers FILE --range BASE,LEN [--at-seq E] [--compact] [--json]
+    --compact requires JSON; first_located_gap_ref indexes the current page's meta.located_gaps.
+    last_observed_write.first_located_gap explains the earliest positioned gap after that write.
+    Scope-exit memory effects remain unobserved; global unpositioned gaps are reported in meta.
+    meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture.
+  Profile2 memory queries require one --range BASE,LEN; LEN is 1..4096 bytes.
+    Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
+    --addr selects instruction PCs in find-pc; --len and --size are unsupported.
+
+mem-access --compact: columns-v1 hoists one value source per read/write direction.
+Mixed ordinary/atomic write-source pages retain named rows with
+meta.compact_fallback=mixed_write_sources; precise sources are preserved.
+Atomic add writes use returned old bits plus the saved addend, not a memory peek.

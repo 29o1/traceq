@@ -10,9 +10,7 @@ import urllib.request
 
 ROOT=Path(__file__).resolve().parents[1]
 CACHE=ROOT/'.deps'
-HOST_VERSION='17.26.3'
-HOST_SHA256='6491616e05cbe4fc527663d68d4f908266791d8ea7992c3aedc4cbccbc681814'
-HOST_URL=f'https://github.com/frida/frida/releases/download/{HOST_VERSION}/frida-gum-devkit-{HOST_VERSION}-macos-arm64.tar.xz'
+GUM_SPEC=ROOT/'dependencies/gum-devkits.json'
 
 def digest(path):
     h=hashlib.sha256()
@@ -30,12 +28,14 @@ def checked_download(url,path,expected):
         shutil.copyfileobj(response,out)
     if digest(path)!=expected:raise RuntimeError(f'checksum mismatch: {path}; file retained')
 
-def host():
-    archive=CACHE/f'frida-gum-{HOST_VERSION}.tar.xz'
-    checked_download(HOST_URL,archive,HOST_SHA256)
-    dest=CACHE/f'frida-gum-{HOST_VERSION}'
+def gum(platform):
+    spec=json.loads(GUM_SPEC.read_text())
+    item=spec['platforms'][platform]
+    archive=CACHE/f"frida-gum-{spec['version']}-{platform}.tar.xz"
+    checked_download(item['url'],archive,item['sha256'])
+    dest=CACHE/f"frida-gum-{spec['version']}-{platform}"
     dest.mkdir(parents=True,exist_ok=True)
-    # Copy regular archive members only. Paths never escape the SDK directory.
+    # Official devkit members are immutable and cannot escape the cache.
     with tarfile.open(archive,'r:xz') as package:
         for member in package.getmembers():
             path=dest/member.name
@@ -48,12 +48,20 @@ def host():
             else:
                 path.parent.mkdir(parents=True,exist_ok=True)
                 with path.open('xb') as out:out.write(data)
+    for name,expected in item['members'].items():
+        if digest(dest/name)!=expected:raise RuntimeError(f'Gum member checksum mismatch: {name}')
     return dest
 
+
+def host():
+    return gum('macos-arm64')
+
 def legacy(source=None,fetch=False,platform=None):
+    if platform=='android':raise RuntimeError('Android Gum moved to: tools/dependencies.py gum --platform android-arm64')
     spec=json.loads((ROOT/'dependencies/traceq-platform-libs.json').read_text())
     results=[]
     for item in spec['artifacts']:
+        if not any(p.lower() in item['path'].lower() for p in spec['active_platforms']):continue
         if platform and platform.lower() not in item['path'].lower():continue
         target=ROOT/spec['destination']/item['path']
         if not target.exists():
@@ -71,7 +79,11 @@ def legacy(source=None,fetch=False,platform=None):
     return results
 
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('kind',choices=['host','legacy']);parser.add_argument('--source',type=Path)
-    parser.add_argument('--fetch',action='store_true');parser.add_argument('--platform',choices=['android','ios'])
+    parser=argparse.ArgumentParser();parser.add_argument('kind',choices=['host','gum','legacy']);parser.add_argument('--source',type=Path)
+    parser.add_argument('--fetch',action='store_true');parser.add_argument('--platform',choices=['android','ios','android-arm64','macos-arm64'])
     args=parser.parse_args()
-    print(host() if args.kind=='host' else '\n'.join(legacy(args.source,args.fetch,args.platform)))
+    if args.kind=='gum':
+        if args.platform not in ('android-arm64','macos-arm64'):parser.error('gum requires --platform android-arm64 or macos-arm64')
+        print(gum(args.platform))
+    else:
+        print(host() if args.kind=='host' else '\n'.join(legacy(args.source,args.fetch,args.platform)))

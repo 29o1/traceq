@@ -40,13 +40,13 @@ def decode(path):
     return groups,gaps
 
 def capture(out,name,function,seed,count,initial,mode='trace'):
-    path=out/(name+('.log' if mode=='text' else '.gtsw'))
+    path=out/(name+'.gtsw')
     data=invoke([BUILD/'traceq-capture',BUILD/'libfixtures.dylib',function,mode,path,hex(seed),str(count),hex(initial)])
     return path,data
 
 def run():
     out=ROOT/'artifacts'/('state-check-'+str(time.time_ns()));out.mkdir(parents=True)
-    validations=[];legacy=[]
+    validations=[]
     for case in CASES:
         path,c=capture(out,case['id'],case['function'],case['seed'],case['count'],case['initial'])
         want=expected(case);assert c['buffer']==want['buffer'] and int(c['result'],0)==want['result'],case['id']
@@ -70,14 +70,6 @@ def run():
         query=invoke([GT,'reg-state',path,'--at-ev',str(ret),'--phase','post','--reg','x0','--json'])
         assert not query['data'][0]['known']
         validations.append(dict(case=case['id'],state_facts=checked,passed=True,gaps=gaps))
-        if not case.get('partial'):
-            log,text=capture(out,case['id']+'-legacy',case['function'],case['seed'],case['count'],case['initial'],'text')
-            assert text['buffer']==want['buffer'] and int(text['result'],0)==want['result']
-            gtb=out/(case['id']+'.gtb');invoke([GT,'import',log,'-o',gtb])
-            result=invoke([GT,'mem-access',gtb,'--range',text['data_base']+',32','--write','--limit','4096','--json'])
-            actual=[dict(seq=r['ev'],pc=int(r['at'].split('!')[1],0),offset=int(r['addr'],0)-int(text['data_base'],0),size=r['size'],value=int(r['val'],0) if 'val' in r else None) for r in result['data']]
-            assert actual==writes(want),(case['id'],actual[:10],writes(want)[:10])
-            legacy.append(case['id'])
         print('state:',case['id'],flush=True)
     c_cases=[]
     for n,(seed,count,initial) in enumerate([(0x12345678,4,0x8877665544332211),(0,8,0xffffffffffffffff),(0xffffffff,1,0x80),(9,0,7)]):
@@ -133,11 +125,11 @@ def run():
     q=invoke([GT,'last-writers',path,'--range',c['data_base']+',24','--limit','24','--json'])
     assert q['meta']['capture_gaps']==1
     assert [r['known'] for r in q['data']]==[i==16 for i in range(24)]
-    summary={'state_cases':validations,'legacy_fixed_cases':legacy,'c_cases':c_cases,
+    summary={'state_cases':validations,'c_cases':c_cases,
              'boundary_cases':['signed/discarded load','out-of-range helper call'],
              'binary_sha256':{str(p.relative_to(ROOT)):hashlib.sha256(p.read_bytes()).hexdigest() for p in (GT,BUILD/'traceq-capture',BUILD/'libfixtures.dylib')}}
     (out/'summary.json').write_text(json.dumps(summary,indent=2)+'\n')
-    print('PASS:',len(validations),'state cases,',len(legacy),'legacy regressions,',len(c_cases),'C inputs, 2 boundary cases')
+    print('PASS:',len(validations),'state cases,',len(c_cases),'C inputs, 2 boundary cases')
     print(out)
 
 if __name__=='__main__':run()

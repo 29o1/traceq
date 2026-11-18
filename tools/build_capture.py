@@ -11,23 +11,30 @@ ROOT=Path(__file__).resolve().parents[1]
 CAPTURE=ROOT/'capture/traceq'
 
 def run(args):
-    subprocess.run([str(x) for x in args],check=True,cwd=ROOT)
+    subprocess.run([str(x) for x in args],check=True,cwd=ROOT,timeout=300)
 
 def host(with_tests=False):
     if platform.system()!='Darwin' or platform.machine()!='arm64':
         raise RuntimeError('traceq-capture host currently requires macOS ARM64; make and check-cli are portable')
     sdk=dependencies.host()
     out=ROOT/'build/traceq-host';out.mkdir(parents=True,exist_ok=True)
+    gum_build=out/'gum-build'
+    run(['cmake','-S',CAPTURE,'-B',gum_build,'-DTRACEQ_GUM_ONLY=ON',
+         '-DCMAKE_BUILD_TYPE=Release','-DCMAKE_OSX_ARCHITECTURES=arm64',
+         '-DTRACEQ_GUM_DEVKIT_DIR='+str(sdk)])
+    run(['cmake','--build',gum_build])
+    archive=gum_build/'gum/libtraceq-gum.a'
     tests=ROOT/'tests/integration';fixtures=tests/'fixtures'
     run(['clang','-arch','arm64','-dynamiclib','-O2','-fno-stack-protector','-fomit-frame-pointer',
          fixtures/'targets.S',fixtures/'extra_targets.S',fixtures/'write_targets.S',
          fixtures/'boundary_targets.S',
          fixtures/'c_transform.c','-o',out/'libfixtures.dylib'])
-    sources=[CAPTURE/'src'/name for name in ['TraceqCapture.cpp','Utils.cpp','CallbackContext.cpp','FuncPrinter.cpp','WriteStream.cpp']]
+    run(['python3', ROOT/'tools/rust_workspace.py', 'build', '--release', '-p', 'traceq-capture'])
+    rust=ROOT/'.deps/rust/target/release/libtraceq_capture.a'
     command=['clang++','-arch','arm64','-std=c++17','-O2','-Wall','-Wextra','-Wno-unused-parameter',
          '-Wno-deprecated-declarations','-DTRACEQ_HOST_LAB','-DTRACEQ_WRITE_STREAM',
          '-I'+str(CAPTURE/'src'),'-I'+str(sdk),'-I'+str(ROOT/'cli/include'),
-         '-x','objective-c++',tests/'capture_host.mm',*sources,'-x','none',sdk/'libfrida-gum.a',
+         '-x','objective-c++',tests/'capture_host.mm','-x','none','-Wl,-force_load,'+str(rust),archive,
          '-framework','Foundation','-lresolv','-lm','-ldl','-o',out/'traceq-capture']
     run(command)
     if with_tests:
@@ -36,12 +43,14 @@ def host(with_tests=False):
     return out
 
 def device(target,perf=False):
-    dependencies.legacy(platform=target)
+    sdk=dependencies.gum('android-arm64') if target=='android' else None
+    if target!='android':dependencies.legacy(platform=target)
     out=ROOT/'build'/('traceq-'+target+('-perf' if perf else ''));out.mkdir(parents=True,exist_ok=True)
     args=['cmake','-S',CAPTURE,'-B',out,'-DCMAKE_BUILD_TYPE=Release',
-          '-DTRACEQ_WRITE_STREAM=ON','-DTRACEQ_CAPTURE_PERF='+('ON' if perf else 'OFF'),
+          '-DTRACEQ_CAPTURE_PERF='+('ON' if perf else 'OFF'),
           '-DTRACEQ_INCLUDE_DIR='+str(ROOT/'cli/include')]
     if target=='android':
+        args+=['-DTRACEQ_GUM_DEVKIT_DIR='+str(sdk)]
         ndk=os.environ.get('ANDROID_NDK_HOME')
         if not ndk or not (Path(ndk)/'build/cmake/android.toolchain.cmake').is_file():
             raise RuntimeError('ANDROID_NDK_HOME must point to an installed NDK')
