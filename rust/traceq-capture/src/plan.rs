@@ -6,20 +6,15 @@ pub use traceq_core::wire::Header;
 
 pub struct Plan {
     pub pc: u64,
-    pub seq: u64,
-    pub address: u64,
     pub mem: Arm64Op,
     pub sources: [u32; 4],
     pub width: u32,
     pub count: u32,
     pub structure_element: u32,
     pub structure_lane: i32,
-    pub values: [u128; 4],
     pub unsupported: bool,
-    pub pending: bool,
     pub load: bool,
     pub post: bool,
-    pub memory_valid: bool,
     pub ordered_memory: bool,
     pub atomic_width: Option<Width>,
     pub word: u32,
@@ -32,20 +27,15 @@ impl Default for Plan {
     fn default() -> Self {
         Self {
             pc: 0,
-            seq: 0,
-            address: 0,
             mem: Arm64Op::default(),
             sources: [0; 4],
             width: 0,
             count: 0,
             structure_element: 0,
             structure_lane: -1,
-            values: [0; 4],
             unsupported: false,
-            pending: false,
             load: false,
             post: false,
-            memory_valid: false,
             ordered_memory: false,
             atomic_width: None,
             word: 0,
@@ -788,11 +778,11 @@ pub unsafe fn make_in_scope(
     header: Header,
     mut in_code: impl FnMut(u64, u64) -> bool,
 ) -> Plan {
-    let Some(a) = (unsafe { ins.arm64() }) else {
+    let Some(a) = (unsafe { ins.arm64() }).filter(|a| a.op_count <= 8) else {
         return Plan {
             pc: ins.address,
             word: if header.profile == 2 {
-                u32::from_le_bytes(ins.bytes[..4].try_into().unwrap_or([0; 4]))
+                u32::from_le_bytes(ins.bytes[..4].try_into().unwrap())
             } else {
                 0
             },
@@ -800,18 +790,6 @@ pub unsafe fn make_in_scope(
             ..Plan::default()
         };
     };
-    if a.op_count > 8 {
-        return Plan {
-            pc: ins.address,
-            word: if header.profile == 2 {
-                u32::from_le_bytes(ins.bytes[..4].try_into().unwrap_or([0; 4]))
-            } else {
-                0
-            },
-            unsupported: true,
-            ..Plan::default()
-        };
-    }
     let mut p = base_plan(ins, a, header, &mut in_code);
     if header.profile != 2 {
         return p;
@@ -943,16 +921,16 @@ fn physical(reg: u32) -> i32 {
         -1
     }
 }
-pub fn store_values(cpu: &CpuContext, p: &mut Plan) -> bool {
-    for i in 0..p.count as usize {
-        let Some(value) = reg_value(p.sources[i], cpu) else {
+pub(crate) fn store_values(cpu: &CpuContext, p: &Plan, values: &mut [u128; 4]) -> bool {
+    for (slot, &source) in values.iter_mut().zip(&p.sources[..p.count as usize]) {
+        let Some(value) = reg_value(source, cpu) else {
             return false;
         };
-        p.values[i] = value;
+        *slot = value;
     }
     if p.structure_lane >= 0 {
-        for i in 0..p.count as usize {
-            p.values[i] >>= p.structure_lane as u32 * p.width * 8
+        for value in &mut values[..p.count as usize] {
+            *value >>= p.structure_lane as u32 * p.width * 8
         }
         return true;
     }
@@ -963,17 +941,17 @@ pub fn store_values(cpu: &CpuContext, p: &mut Plan) -> bool {
     let element = p.structure_element as usize;
     let width = p.width as usize;
     for lane in 0..width / element {
-        for reg in 0..p.count as usize {
-            let bytes = p.values[reg].to_le_bytes();
+        for (reg, value) in values[..p.count as usize].iter().enumerate() {
+            let bytes = value.to_le_bytes();
             interleaved[(lane * p.count as usize + reg) * element
                 ..(lane * p.count as usize + reg + 1) * element]
                 .copy_from_slice(&bytes[lane * element..(lane + 1) * element]);
         }
     }
-    for i in 0..p.count as usize {
+    for (i, value) in values[..p.count as usize].iter_mut().enumerate() {
         let mut bytes = [0; 16];
         bytes[..width].copy_from_slice(&interleaved[i * width..(i + 1) * width]);
-        p.values[i] = u128::from_le_bytes(bytes)
+        *value = u128::from_le_bytes(bytes)
     }
     true
 }
@@ -1381,7 +1359,7 @@ mod tests {
     }
     #[test]
     fn interleaved_structure_and_lane_values() {
-        let mut p = classify(
+        let p = classify(
             ARM64_INS_ST2,
             "st2",
             &[
@@ -1408,17 +1386,19 @@ mod tests {
         cpu.vectors[1] = [
             0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
-        assert!(store_values(&cpu, &mut p));
-        assert_eq!(p.values[0] as u64, 0x2322_1312_2120_1110);
-        assert_eq!(p.values[1] as u64, 0x2726_1716_2524_1514);
+        let mut values = [0; 4];
+        assert!(store_values(&cpu, &p, &mut values));
+        assert_eq!(values[0] as u64, 0x2322_1312_2120_1110);
+        assert_eq!(values[1] as u64, 0x2726_1716_2524_1514);
         let mut lane = operand(ARM64_REG_V0, ARM64_VAS_1H);
         lane.vector_index = 7;
-        let mut p = classify(ARM64_INS_ST1, "st1", &[lane, memory(ARM64_REG_X0)], false);
+        let p = classify(ARM64_INS_ST1, "st1", &[lane, memory(ARM64_REG_X0)], false);
         assert!(!p.unsupported);
         cpu.vectors[0][14] = 0xaa;
         cpu.vectors[0][15] = 0xbb;
-        assert!(store_values(&cpu, &mut p));
-        assert_eq!(p.values[0], 0xbbaa);
+        let mut values = [0; 4];
+        assert!(store_values(&cpu, &p, &mut values));
+        assert_eq!(values[0], 0xbbaa);
         lane.vector_index = 8;
         assert!(classify(ARM64_INS_ST1, "st1", &[lane, memory(ARM64_REG_X0)], false).unsupported);
     }
@@ -1539,15 +1519,15 @@ mod tests {
                     operand(ARM64_REG_V0 + 1, vas),
                     memory(ARM64_REG_X0),
                 ];
-                let mut p = classify(id, name, &ops, false);
+                let p = classify(id, name, &ops, false);
                 assert!(!p.unsupported && p.post);
                 assert_eq!(
                     (p.count, p.width, p.structure_element, p.load),
                     (4, width, element, id == ARM64_INS_LD4)
                 );
-                assert!(store_values(&cpu, &mut p));
-                let bytes: Vec<_> = p
-                    .values
+                let mut values = [0; 4];
+                assert!(store_values(&cpu, &p, &mut values));
+                let bytes: Vec<_> = values
                     .iter()
                     .flat_map(|v| v.to_le_bytes().into_iter().take(width as usize))
                     .collect();
@@ -1579,16 +1559,17 @@ mod tests {
             for op in &mut ops[..4] {
                 op.vector_index = lane;
             }
-            let mut p = classify(ARM64_INS_ST4, "st4", &ops, false);
+            let p = classify(ARM64_INS_ST4, "st4", &ops, false);
             assert!(!p.unsupported);
-            assert!(store_values(&cpu, &mut p));
+            let mut values = [0; 4];
+            assert!(store_values(&cpu, &p, &mut values));
             for (i, reg) in [30, 31, 0, 1].into_iter().enumerate() {
                 let mut want = [0; 16];
                 want[..element as usize].copy_from_slice(
                     &cpu.vectors[reg][(lane * element) as usize..((lane + 1) * element) as usize],
                 );
                 assert_eq!(
-                    p.values[i] & ((1u128 << (element * 8)) - 1),
+                    values[i] & ((1u128 << (element * 8)) - 1),
                     u128::from_le_bytes(want)
                 );
             }

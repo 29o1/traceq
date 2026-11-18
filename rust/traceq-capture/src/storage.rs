@@ -17,8 +17,6 @@ pub struct Storage {
     events: Vec<Event>,
     bytes: Vec<u8>,
     mode: Mode,
-    pub blocks: u64,
-    pub encoded_bytes: u64,
 }
 unsafe extern "C" {
     fn close(fd: i32) -> i32;
@@ -32,11 +30,16 @@ impl Storage {
             .open(path)?;
         let mut out = Self {
             file: Some(BufWriter::with_capacity(65536, file)),
-            events: Vec::with_capacity(MAX_RECORDS),
-            bytes: vec![0; MAX_RECORDS * 64],
+            events: Vec::with_capacity(if mode == Mode::Flat { 0 } else { MAX_RECORDS }),
+            bytes: vec![
+                0;
+                if mode == Mode::Flat {
+                    0
+                } else {
+                    MAX_RECORDS * 64
+                }
+            ],
             mode,
-            blocks: 0,
-            encoded_bytes: 0,
         };
         let mut b = [0; 64];
         b[..8].copy_from_slice(if mode == Mode::Chunked {
@@ -113,8 +116,6 @@ impl Storage {
             writer.write_all(&h)?;
         }
         writer.write_all(&self.bytes[..size])?;
-        self.blocks += 1;
-        self.encoded_bytes += size as u64 + if self.mode == Mode::Chunked { 16 } else { 0 };
         self.events.clear();
         Ok(())
     }

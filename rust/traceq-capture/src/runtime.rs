@@ -27,6 +27,25 @@ pub struct Summary {
     pub gaps: u64,
     pub commits: u64,
 }
+#[derive(Clone, Copy)]
+struct Instruction {
+    seq: u64,
+    pc: u64,
+}
+
+#[derive(Default)]
+struct PreparedMemory {
+    address: u64,
+    values: [u128; 4],
+}
+
+// The pointer is only an identity token. Gum owns immutable plans until their
+// callouts are reclaimed. The session owns the one execution awaiting a post.
+struct Pending {
+    plan: *const Plan,
+    instruction: Instruction,
+    memory_valid: bool,
+}
 struct Session {
     header: Header,
     code_scope: CodeScope,
@@ -40,7 +59,8 @@ struct Session {
     sites: HashSet<u64>,
     failed: bool,
     exclusive: bool,
-    pending: *mut Plan,
+    pending: Option<Pending>,
+    memory: PreparedMemory,
     outside: bool,
     return_exit: bool,
     exit_seq: u64,
@@ -162,15 +182,26 @@ pub fn emit_site(ins: &gum::Insn) {
         return;
     }
     if unsafe { (*p).sites.insert(ins.address) } {
-        let mut text = Vec::with_capacity(193);
-        text.extend(ins.mnemonic.iter().copied().take_while(|&c| c != 0));
-        text.push(b' ');
-        text.extend(ins.op_str.iter().copied().take_while(|&c| c != 0));
+        let mut text = [0u8; 193]; // 32-byte mnemonic, space, 160-byte operands.
+        let mnemonic_len = ins
+            .mnemonic
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(ins.mnemonic.len());
+        let operands_len = ins
+            .op_str
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(ins.op_str.len());
+        text[..mnemonic_len].copy_from_slice(&ins.mnemonic[..mnemonic_len]);
+        text[mnemonic_len] = b' ';
+        let len = mnemonic_len + 1 + operands_len;
+        text[mnemonic_len + 1..len].copy_from_slice(&ins.op_str[..operands_len]);
         fragments(
             Kind::Site,
             ins.address,
             u32::from_le_bytes(ins.bytes[..4].try_into().unwrap()) as u64,
-            &text,
+            &text[..len],
         );
     }
 }
@@ -251,7 +282,8 @@ pub fn begin_scoped(
         sites: HashSet::new(),
         failed: false,
         exclusive: false,
-        pending: ptr::null_mut(),
+        pending: None,
+        memory: PreparedMemory::default(),
         outside: false,
         return_exit: false,
         exit_seq: 0,
@@ -317,14 +349,7 @@ pub fn end() -> Option<(bool, Summary)> {
     if FOREIGN.load(Ordering::Relaxed) {
         s.failed = true;
     }
-    if !s.pending.is_null() {
-        unsafe {
-            let plan = &mut *s.pending;
-            gap(&mut s, plan.seq, plan.pc, 2);
-            plan.pending = false;
-        }
-        s.pending = ptr::null_mut();
-    }
+    discard_pending(&mut s);
     if s.exclusive {
         let seq = s.counts.instructions;
         gap(&mut s, seq, 0, 4);
@@ -347,14 +372,37 @@ pub fn end() -> Option<(bool, Summary)> {
     let ok = s.storage.finish().is_ok() && !s.failed;
     Some((ok, n))
 }
-fn observe_slot(s: &mut Session, slot: usize, value: u128, p: &Plan, kind: Kind) {
+fn discard_pending(s: &mut Session) {
+    if let Some(pending) = s.pending.take() {
+        gap(s, pending.instruction.seq, pending.instruction.pc, 2);
+    }
+}
+
+fn next_instruction(s: &mut Session, pc: u64) -> Instruction {
+    let seq = s.counts.instructions;
+    s.counts.instructions += 1;
+    Instruction { seq, pc }
+}
+
+fn take_pending(s: &mut Session, p: &Plan) -> Option<Pending> {
+    if s.pending
+        .as_ref()
+        .is_some_and(|pending| ptr::eq(pending.plan, p))
+    {
+        s.pending.take()
+    } else {
+        None
+    }
+}
+
+fn observe_slot(s: &mut Session, slot: usize, value: u128, instruction: Instruction, kind: Kind) {
     if !s.known[slot] || s.state[slot] != value {
         emit_to(
             s,
             event(
                 kind,
-                p.seq,
-                p.pc,
+                instruction.seq,
+                instruction.pc,
                 slot as u64,
                 if slot < 33 { 8 } else { 16 },
                 value as u64,
@@ -366,51 +414,38 @@ fn observe_slot(s: &mut Session, slot: usize, value: u128, p: &Plan, kind: Kind)
         s.known[slot] = true;
     }
 }
-fn state_delta(s: &mut Session, c: &CpuContext, p: &Plan, kind: Kind) {
+fn state_delta(s: &mut Session, c: &CpuContext, instruction: Instruction, kind: Kind) {
     if s.observation == 0 || !s.complete || s.gpr_bank != c.x {
         for (i, v) in c.x.iter().enumerate() {
-            observe_slot(s, i, *v as u128, p, kind);
+            observe_slot(s, i, *v as u128, instruction, kind);
         }
         s.gpr_bank = c.x;
     }
     for (i, v) in [(29, c.fp), (30, c.lr), (31, c.sp), (32, c.nzcv)] {
-        observe_slot(s, i, v as u128, p, kind);
+        observe_slot(s, i, v as u128, instruction, kind);
     }
     // Keep the bank comparison, followed only on change by scalar deltas.
     let vectors = unsafe { std::slice::from_raw_parts(s.state.as_ptr().add(33).cast::<u8>(), 512) };
     let cpu_vectors = unsafe { std::slice::from_raw_parts(c.vectors.as_ptr().cast::<u8>(), 512) };
     if s.observation == 0 || !s.complete || vectors != cpu_vectors {
         for (i, v) in c.vectors.iter().enumerate() {
-            observe_slot(s, i + 33, u128::from_le_bytes(*v), p, kind);
+            observe_slot(s, i + 33, u128::from_le_bytes(*v), instruction, kind);
         }
     }
     s.complete = true;
 }
-fn before_state(s: &mut Session, c: &CpuContext, p: &mut Plan, shared: bool) {
-    if !s.pending.is_null() {
-        if ptr::eq(s.pending, p) {
-            gap(s, p.seq, p.pc, 2);
-            p.pending = false;
-        } else {
-            unsafe {
-                let old = &mut *s.pending;
-                gap(s, old.seq, old.pc, 2);
-                old.pending = false;
-            }
-        }
-        s.pending = ptr::null_mut();
-    }
+fn before_state(s: &mut Session, c: &CpuContext, p: &Plan, shared: bool) {
+    discard_pending(s);
     let reenter = s.outside;
     if reenter && s.return_exit {
         gap(s, s.exit_seq, s.exit_pc, 6);
     }
-    p.seq = s.counts.instructions;
-    s.counts.instructions += 1;
+    let instruction = next_instruction(s, p.pc);
     emit_to(
         s,
         event(
             Kind::Exec,
-            p.seq,
+            instruction.seq,
             p.pc,
             p.word as u64,
             0,
@@ -420,18 +455,26 @@ fn before_state(s: &mut Session, c: &CpuContext, p: &mut Plan, shared: bool) {
         ),
     );
     if !shared || !s.complete {
-        state_delta(s, c, p, Kind::RegPre);
+        state_delta(s, c, instruction, Kind::RegPre);
     }
     if reenter {
         emit_to(
             s,
-            event(Kind::ScopeReenter, p.seq, p.pc, s.exit_seq, 0, 0, 0, 1),
+            event(
+                Kind::ScopeReenter,
+                instruction.seq,
+                p.pc,
+                s.exit_seq,
+                0,
+                0,
+                0,
+                1,
+            ),
         );
         s.outside = false;
     }
-    p.memory_valid = false;
     if p.unsupported {
-        gap(s, p.seq, p.pc, 1);
+        gap(s, instruction.seq, p.pc, 1);
         return;
     }
     if p.check_target {
@@ -441,7 +484,7 @@ fn before_state(s: &mut Session, c: &CpuContext, p: &mut Plan, shared: bool) {
             Some(p.target_address)
         };
         let Some(target) = target else {
-            gap(s, p.seq, p.pc, 1);
+            gap(s, instruction.seq, p.pc, 1);
             return;
         };
         if !s.code_scope.contains(target, 4) {
@@ -449,7 +492,7 @@ fn before_state(s: &mut Session, c: &CpuContext, p: &mut Plan, shared: bool) {
                 s,
                 event(
                     Kind::ScopeExit,
-                    p.seq,
+                    instruction.seq,
                     p.pc,
                     target,
                     p.transfer,
@@ -464,26 +507,29 @@ fn before_state(s: &mut Session, c: &CpuContext, p: &mut Plan, shared: bool) {
             );
             s.outside = true;
             s.return_exit = p.transfer == 3;
-            s.exit_seq = p.seq;
+            s.exit_seq = instruction.seq;
             s.exit_pc = p.pc;
             if !s.return_exit {
-                gap(s, p.seq, p.pc, 6);
+                gap(s, instruction.seq, p.pc, 6);
             }
             return;
         }
     }
+    let memory_valid = memory_before(s, c, p, instruction);
     if p.post {
-        p.pending = true;
-        s.pending = p;
+        s.pending = Some(Pending {
+            plan: p,
+            instruction,
+            memory_valid,
+        });
     }
-    memory_before(s, c, p);
 }
-fn memory_before(s: &mut Session, c: &CpuContext, p: &mut Plan) {
+fn memory_before(s: &mut Session, c: &CpuContext, p: &Plan, instruction: Instruction) -> bool {
     if p.count == 0 {
-        return;
+        return false;
     }
-    if p.mem.kind == gum::ARM64_OP_IMM {
-        p.address = p.mem.imm() as u64;
+    let address = if p.mem.kind == gum::ARM64_OP_IMM {
+        p.mem.imm() as u64
     } else {
         let mem = p.mem.mem();
         let (Some(base), Some(index)) = (
@@ -494,8 +540,8 @@ fn memory_before(s: &mut Session, c: &CpuContext, p: &mut Plan) {
                 Some(0)
             },
         ) else {
-            gap(s, p.seq, p.pc, 1);
-            return;
+            gap(s, instruction.seq, p.pc, 1);
+            return false;
         };
         let mut ix = index as u64;
         if p.mem.ext == gum::ARM64_EXT_UXTW {
@@ -504,65 +550,85 @@ fn memory_before(s: &mut Session, c: &CpuContext, p: &mut Plan) {
         if p.mem.ext == gum::ARM64_EXT_SXTW {
             ix = ix as i32 as i64 as u64;
         }
-        p.address = (base as u64)
+        (base as u64)
             .wrapping_add(ix.wrapping_shl(p.mem.shift.value))
-            .wrapping_add(mem.disp as u64);
-    }
-    if p.ordered_memory && !p.address.is_multiple_of(p.width as u64) {
-        gap(s, p.seq, p.pc, 1);
-        return;
+            .wrapping_add(mem.disp as u64)
+    };
+    if p.ordered_memory && !address.is_multiple_of(p.width as u64) {
+        gap(s, instruction.seq, p.pc, 1);
+        return false;
     }
     if !plan::contains(
         s.header.data_base,
         s.header.data_size,
-        p.address,
+        address,
         (p.width * p.count) as u64,
     ) {
-        gap(s, p.seq, p.pc, 5);
-        return;
+        gap(s, instruction.seq, p.pc, 5);
+        return false;
     }
-    if !p.load && !plan::store_values(c, p) {
-        gap(s, p.seq, p.pc, 1);
-        return;
+    if !p.load && !plan::store_values(c, p, &mut s.memory.values) {
+        gap(s, instruction.seq, p.pc, 1);
+        return false;
     }
-    p.memory_valid = true;
+    s.memory.address = address;
+    true
 }
-fn after_state(s: &mut Session, c: &CpuContext, p: &mut Plan) {
-    if !p.pending || !ptr::eq(s.pending, p) {
+fn after_state(s: &mut Session, c: &CpuContext, p: &Plan) {
+    let Some(Pending {
+        instruction,
+        memory_valid,
+        ..
+    }) = take_pending(s, p)
+    else {
         return;
-    }
-    if p.memory_valid {
+    };
+    if memory_valid {
+        let address = s.memory.address;
         if let Some(width) = p.atomic_width {
             // The completed destination is the actual atomic old value. The
             // saved source survives Rs==Rt; never sample the raced memory.
             if let Some(old) = plan::reg_value(p.sources[1], c) {
                 for (kind, value) in [
                     (Kind::Read, width.mask(old as u64)),
-                    (Kind::Write, width.add(old as u64, p.values[0] as u64)),
+                    (
+                        Kind::Write,
+                        width.add(old as u64, s.memory.values[0] as u64),
+                    ),
                 ] {
                     emit_to(
                         s,
-                        event(kind, p.seq, p.pc, p.address, p.width as u64, value, 0, 1),
+                        event(
+                            kind,
+                            instruction.seq,
+                            p.pc,
+                            address,
+                            p.width as u64,
+                            value,
+                            0,
+                            1,
+                        ),
                     );
                 }
                 s.counts.reads += 1;
                 s.counts.writes += 1;
             } else {
-                gap(s, p.seq, p.pc, 1);
+                gap(s, instruction.seq, p.pc, 1);
             }
         } else {
             // Structured loads deinterleave memory into destination registers. The
             // actual post registers are packed back into bounded memory-order chunks.
             let structured_load = p.load && p.structure_element != 0;
-            let structure_known = !structured_load || plan::store_values(c, p);
+            let structure_known =
+                !structured_load || plan::store_values(c, p, &mut s.memory.values);
             for i in 0..p.count as usize {
-                let mut value = p.values[i];
-                let mut known = true;
-                if structured_load {
-                    known = structure_known;
-                    if !known {
-                        value = 0;
-                    }
+                let (mut value, known) = if structured_load {
+                    let value = if structure_known {
+                        s.memory.values[i]
+                    } else {
+                        0
+                    };
+                    (value, structure_known)
                 } else if p.load {
                     let observed = if p.sources[i] == gum::ARM64_REG_XZR
                         || p.sources[i] == gum::ARM64_REG_WZR
@@ -571,12 +637,14 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &mut Plan) {
                     } else {
                         plan::reg_value(p.sources[i], c)
                     };
-                    known = observed.is_some();
-                    value = observed.unwrap_or(0);
+                    let mut value = observed.unwrap_or(0);
                     if p.structure_lane >= 0 {
                         value >>= p.structure_lane as u32 * p.width * 8;
                     }
-                }
+                    (value, observed.is_some())
+                } else {
+                    (s.memory.values[i], true)
+                };
                 if p.width < 16 {
                     value &= (1u128 << (p.width * 8)) - 1;
                 }
@@ -584,9 +652,9 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &mut Plan) {
                     s,
                     event(
                         if p.load { Kind::Read } else { Kind::Write },
-                        p.seq,
+                        instruction.seq,
                         p.pc,
-                        p.address.wrapping_add(i as u64 * p.width as u64),
+                        address.wrapping_add(i as u64 * p.width as u64),
                         p.width as u64,
                         value as u64,
                         (value >> 64) as u64,
@@ -601,11 +669,9 @@ fn after_state(s: &mut Session, c: &CpuContext, p: &mut Plan) {
             }
         }
     }
-    state_delta(s, c, p, Kind::RegPost);
-    emit_to(s, event(Kind::Commit, p.seq, p.pc, 0, 0, 0, 0, 1));
+    state_delta(s, c, instruction, Kind::RegPost);
+    emit_to(s, event(Kind::Commit, instruction.seq, p.pc, 0, 0, 0, 0, 1));
     s.counts.commits += 1;
-    p.pending = false;
-    s.pending = ptr::null_mut();
 }
 // Gum proxy contexts can be unaligned. Copy only that exceptional path before
 // constructing a Rust reference; normal aligned contexts stay in place.
@@ -619,68 +685,58 @@ unsafe fn cpu(c: *mut CpuContext, copy: &mut std::mem::MaybeUninit<CpuContext>) 
 }
 /// # Safety
 /// Gum provides a live CPU context and distinct live Plan objects owned by its code cache.
-pub unsafe fn before(c: *mut CpuContext, p: *mut Plan) {
+pub unsafe fn before(c: *mut CpuContext, p: *const Plan) {
     let s = check_owner();
     if s.is_null() || c.is_null() || p.is_null() {
         return;
     }
     let mut copy = std::mem::MaybeUninit::uninit();
     let c = unsafe { cpu(c, &mut copy) };
-    let (s, p) = unsafe { (&mut *s, &mut *p) };
+    let (s, p) = unsafe { (&mut *s, &*p) };
     if s.header.profile == 2 {
         before_state(s, c, p, false);
         return;
     }
-    if !s.pending.is_null() {
-        if ptr::eq(s.pending, p) {
-            gap(s, p.seq, p.pc, 2);
-            p.pending = false;
-        } else {
-            unsafe {
-                let old = &mut *s.pending;
-                gap(s, old.seq, old.pc, 2);
-                old.pending = false;
-            }
-        }
-        s.pending = ptr::null_mut();
-    }
-    p.seq = s.counts.instructions;
-    s.counts.instructions += 1;
-    emit_to(s, event(Kind::Exec, p.seq, p.pc, 0, 0, 0, 0, 0));
+    discard_pending(s);
+    let instruction = next_instruction(s, p.pc);
+    emit_to(s, event(Kind::Exec, instruction.seq, p.pc, 0, 0, 0, 0, 0));
     if p.unsupported {
-        gap(s, p.seq, p.pc, 1);
+        gap(s, instruction.seq, p.pc, 1);
         return;
     }
-    p.memory_valid = false;
-    memory_before(s, c, p);
-    if p.memory_valid {
-        p.pending = true;
-        s.pending = p;
+    if memory_before(s, c, p, instruction) {
+        s.pending = Some(Pending {
+            plan: p,
+            instruction,
+            memory_valid: true,
+        });
     }
 }
 /// # Safety
 /// Gum provides a live CPU context and distinct live Plan objects owned by its code cache.
-pub unsafe fn after(c: *mut CpuContext, p: *mut Plan) {
+pub unsafe fn after(c: *mut CpuContext, p: *const Plan) {
     let s = check_owner();
     if s.is_null() || c.is_null() || p.is_null() {
         return;
     }
     let mut copy = std::mem::MaybeUninit::uninit();
     let c = unsafe { cpu(c, &mut copy) };
-    let (s, p) = unsafe { (&mut *s, &mut *p) };
+    let (s, p) = unsafe { (&mut *s, &*p) };
     if s.header.profile == 2 {
         after_state(s, c, p);
         return;
     }
-    if !p.pending {
+    let Some(Pending {
+        instruction,
+        memory_valid: true,
+        ..
+    }) = take_pending(s, p)
+    else {
         return;
-    }
-    if !ptr::eq(s.pending, p) {
-        gap(s, p.seq, p.pc, 2);
-        return;
-    }
+    };
+    let address = s.memory.address;
     for i in 0..p.count as usize {
-        let mut v = p.values[i];
+        let mut v = s.memory.values[i];
         if p.width < 16 {
             v &= (1u128 << (p.width * 8)) - 1;
         }
@@ -688,9 +744,9 @@ pub unsafe fn after(c: *mut CpuContext, p: *mut Plan) {
             s,
             event(
                 Kind::Write,
-                p.seq,
+                instruction.seq,
                 p.pc,
-                p.address.wrapping_add(i as u64 * p.width as u64),
+                address.wrapping_add(i as u64 * p.width as u64),
                 p.width as u64,
                 v as u64,
                 (v >> 64) as u64,
@@ -699,12 +755,10 @@ pub unsafe fn after(c: *mut CpuContext, p: *mut Plan) {
         );
         s.counts.writes += 1;
     }
-    p.pending = false;
-    s.pending = ptr::null_mut();
 }
 /// # Safety
 /// Gum provides a live CPU context and distinct live Plan objects owned by its code cache.
-pub unsafe fn shared_boundary(c: *mut CpuContext, previous: *mut Plan, current: *mut Plan) {
+pub unsafe fn shared_boundary(c: *mut CpuContext, previous: *const Plan, current: *const Plan) {
     let s = check_owner();
     if s.is_null() || c.is_null() {
         return;
@@ -712,14 +766,17 @@ pub unsafe fn shared_boundary(c: *mut CpuContext, previous: *mut Plan, current: 
     let mut copy = std::mem::MaybeUninit::uninit();
     let c = unsafe { cpu(c, &mut copy) };
     let s = unsafe { &mut *s };
-    let confirmed = unsafe { (*previous).pending } && s.pending == previous;
+    let confirmed = s
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.plan == previous);
     if confirmed {
         unsafe {
-            after_state(s, c, &mut *previous);
+            after_state(s, c, &*previous);
         }
     }
     unsafe {
-        before_state(s, c, &mut *current, confirmed);
+        before_state(s, c, &*current, confirmed);
     }
 }
 
@@ -831,7 +888,8 @@ mod tests {
                 sites: HashSet::new(),
                 failed: false,
                 exclusive: false,
-                pending: ptr::null_mut(),
+                pending: None,
+                memory: PreparedMemory::default(),
                 outside: false,
                 return_exit: false,
                 exit_seq: 0,
@@ -850,17 +908,16 @@ mod tests {
                     previous.fill(None);
                     expected.push(event(Kind::Gap, seq as u64, 4096, 0, 0, 0, 0, 1));
                 }
-                let p = Plan {
+                let instruction = Instruction {
                     seq: seq as u64,
                     pc: 4096,
-                    ..Plan::default()
                 };
                 let kind = if seq % 2 == 0 {
                     Kind::RegPre
                 } else {
                     Kind::RegPost
                 };
-                state_delta(&mut s, cpu, &p, kind);
+                state_delta(&mut s, cpu, instruction, kind);
                 for (slot, prior) in previous.iter_mut().enumerate() {
                     let observed = value(cpu, slot);
                     if *prior != Some(observed) {
@@ -919,7 +976,8 @@ mod tests {
                 sites: HashSet::new(),
                 failed: false,
                 exclusive: false,
-                pending: ptr::null_mut(),
+                pending: None,
+                memory: PreparedMemory::default(),
                 outside: false,
                 return_exit: false,
                 exit_seq: 0,
@@ -945,7 +1003,7 @@ mod tests {
                     words[2],
                 ),
             );
-            let mut p = Plan {
+            let p = Plan {
                 pc: 4096,
                 word: 0xb8200020,
                 width: 4,
@@ -986,9 +1044,9 @@ mod tests {
                 } else {
                     8192
                 };
-                before_state(&mut s, &c, &mut p, false);
+                before_state(&mut s, &c, &p, false);
                 c.x[0] = counter as u64;
-                after_state(&mut s, &c, &mut p);
+                after_state(&mut s, &c, &p);
                 if seq < 300 {
                     counter = counter.wrapping_sub(1);
                 }
