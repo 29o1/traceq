@@ -172,7 +172,7 @@
     "src/taint/.DS_Store",
     "src/taint/result.log"
   ],
-  "note": "Original directory retained. Hashes describe files at import, before integration-only build/doc edits. Binary archives are local dependencies, ignored by the parent repository.",
+  "note": "The copied_files and renamed_files entries are historical import records, not the current build manifest. Their hashes describe files at import. Retired implementations, launchers, experiments and superseded binary inputs are preserved in local archives outside the active product source. Current build inputs are selected by CMake and dependencies/gum-devkits.json.",
   "current_directory": "capture/traceq",
   "renamed_files": {
     "src/GumTrace.cpp": "src/TraceqCapture.cpp",
@@ -187,6 +187,6 @@
     ],
     "manifest": "dependencies/gum-devkits.json",
     "source_patch_provenance": "vendor/frida-gum-arm64/PROVENANCE.json",
-    "historical_17_8_3_inputs": "Preserved below as provenance of earlier builds; Android formal path now uses official17.26.4. iPhoneOS remains unqualified legacy dependency."
+    "historical_17_8_3_inputs": "The copied_files entries preserve the identities of earlier Android and iOS inputs. Current Android builds use the pinned 17.26.4 devkit and source patch. The iOS build path has been removed. Superseded local archives are not current dependencies."
   }
 }

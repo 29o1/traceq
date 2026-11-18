@@ -12,6 +12,17 @@ Agent 可直接调用正式 CLI 的结构化查询。`agent-query` 由独立的 
 Mac 宿主采集器、普通 C／汇编对照、旧 C++ 参考和观察实验均位于 `tests/`。Rust 的内联单元测试由 `cfg(test)` 隔离。
 `rust/traceq-core/tests` 和 `examples` 供独立校验使用，正式构建不编译这些入口，源码发布包也排除它们。
 
+| 类别 | 维护的输入 | 构建或运行结果 | Git 和源码发布 |
+| --- | --- | --- | --- |
+| 正式产品 | `rust/traceq-{cli,query,core,capture,observer}` 的运行时代码，`capture/traceq` 的 C ABI／Gum，`tools/`、`dependencies/` | `cli/traceq`、`build/traceq-android/libtraceq_capture.so` | 源码跟踪，进入产品源码包；生成的二进制忽略 |
+| 回归测试 | `tests/`、Rust 的 `cfg(test)`、`tests` 和 `examples` 入口 | `build/traceq-host/`、临时固定输入和检查结果 | 测试源码跟踪；独立测试／示例目录从产品源码包排除，内联测试由编译条件隔离 |
+| 评测 | `evaluation/` 的任务打包、查询策略、计费记录和评分；其回归在 `tests/evaluation/` | `build/evaluation/traceq-eval`、显式任务包和模型运行日志 | 评测源码跟踪，评测与其回归从产品源码包排除；生成物忽略 |
+| 本地研究和历史证据 | `experiments/`、隔离的 `rust/traceq-engine/`、`docs/`、冻结二进制及失败记录 | `artifacts/`、`.deps/`、`build/` 中的具体实验产物 | 留在本地，不进入 Git 和产品源码包；有价值的最小回归提取到 `tests/` |
+
+这里的“正式产品”说明代码职责。工作区的一次构建仍是候选；通过验收并记录源码、实际二进制哈希和证据后，才能切换为已接受版本。
+`cli/traceq`、PATH 中安装的 `traceq`、评测任务包内的 `work/traceq` 分别核对身份，目录名和可执行文件名都不能代替验收记录。
+正式 Agent 使用同一个产品 CLI 的 JSON 查询。评测的 `agent-query` 增加任务包限制、调用日志和成本统计，仅由独立评测入口提供。
+
 ## 按改动运行检查
 
 | 场景 | 命令 | 范围 |
@@ -62,6 +73,10 @@ traceq mem-state FILE \
 
 产品、测试和评测源码都保留在同一个 Git 仓库，分别按 `feat`／`fix`、`test`、`build` 或 `chore` 提交具体改动。
 评测适配器的修复按其行为单独提交，目录边界不需要额外分支或仓库。提交前检查暂存区，避免把已有用户修改混入本轮提交。
+
+产品行为和对应回归可拆成相邻提交；评测策略与评分规则的变化另行说明，保留旧任务包的原始指导和打分口径。
+Git 提交记录源码进度，已接受版本由验收记录关联到提交及二进制哈希；普通开发提交不会自动成为产品发布。
+使用明确路径暂存本轮文件，通过 `git diff --cached --stat`、`git diff --cached --check` 和完整暂存差异核对后提交。工作区含用户修改或待验收候选时，避免整仓暂存。
 
 `.gitattributes` 从提交归档排除 `tests/`、`evaluation/` 及开发文档。`.gitignore` 将构建缓存、二进制、trace、运行记录和隔离实验留在本地。
 忽略规则不影响已跟踪文件，应结合 `git ls-files -ci --exclude-standard` 和 `git diff --cached` 检查。
