@@ -173,7 +173,7 @@ fn profile2(
     let shown = selection.limit.min(selection.len - start);
     let page_base = selection.base + start;
     let mut history = History::new(shown as usize);
-    let range_ok = data_contains(stream.header, selection.base, selection.len);
+    let range_ok = stream.header.contains_data(selection.base, selection.len);
     let info = replay::read_evidence(stream, |group, _| {
         if range_ok && shown != 0 && selection.at.is_none_or(|at| group.seq <= at) {
             history.observe(group, page_base);

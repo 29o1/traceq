@@ -15,7 +15,9 @@ use std::{
 const TIMEOUT: Duration = Duration::from_secs(90);
 const HELP: &str = "traceq agent-query [--manifest tools.json] TRACE_ID COMMAND [options]\n\
 Recorded, bounded read entry; query stdout/stderr and trace validation are unchanged.\n\
-Default row limit 40, maximum 256; mem-state byte limit 1..4096 per checkpoint.\n\
+Navigation/search row limit defaults to 40 (maximum 256).\n\
+last-writers uses the CLI's 20-row default (maximum 4096).\n\
+mem-state byte limit defaults to 40 (maximum 4096 per checkpoint/page budget).\n\
 No --all or -o. Use bounded queries and shell redirection.\n\
 Relative executable/trace paths and queries/ logs are relative to the manifest.\n\
 --capabilities prints the query policy; --help prints this help.\n\
@@ -346,16 +348,39 @@ impl Entry {
         } else {
             None
         };
-        let record = json!({"log_schema":2,"id":id,"trace":self.trace,"command":self.command,
-            "requested_options":self.requested,"options":self.options,"argv":self.argv,
-            "query_backend":self.backend,"configured_context_format":self.format,"context_format":context_format,
-            "launched_cli":outcome.launched,"failure_origin":outcome.origin,"started_ns":self.started_ns,
-            "finished_ns":finished,"seconds":seconds,"returncode":outcome.status,
-            "stdout_bytes":outcome.stdout.len(),"stderr_bytes":outcome.stderr.len(),
-            "partial_stdout_bytes":outcome.partial_stdout.len(),"entry_kind":"rust","request_kind":self.kind,
-            "execution_path":if outcome.in_process {"in_process"} else if outcome.launched {"subprocess"} else {"none"},
-            "query_execution":outcome.launched || outcome.in_process,
-            "delegated_argv":if outcome.launched {&self.argv} else {&None}});
+        let execution = if outcome.in_process {
+            "in_process"
+        } else if outcome.launched {
+            "subprocess"
+        } else {
+            "none"
+        };
+        let record = json!({
+            "log_schema": 2,
+            "id": id,
+            "trace": self.trace,
+            "command": self.command,
+            "requested_options": self.requested,
+            "options": self.options,
+            "argv": self.argv,
+            "query_backend": self.backend,
+            "configured_context_format": self.format,
+            "context_format": context_format,
+            "launched_cli": outcome.launched,
+            "failure_origin": outcome.origin,
+            "started_ns": self.started_ns,
+            "finished_ns": finished,
+            "seconds": seconds,
+            "returncode": outcome.status,
+            "stdout_bytes": outcome.stdout.len(),
+            "stderr_bytes": outcome.stderr.len(),
+            "partial_stdout_bytes": outcome.partial_stdout.len(),
+            "entry_kind": "rust",
+            "request_kind": self.kind,
+            "execution_path": execution,
+            "query_execution": outcome.launched || outcome.in_process,
+            "delegated_argv": if outcome.launched { &self.argv } else { &None }
+        });
         let log = || -> io::Result<()> {
             let directory = self.directory.join("queries");
             fs::create_dir_all(&directory)?;
@@ -437,13 +462,6 @@ impl Entry {
                 );
             }
         };
-        if config.get("traces").is_none() || config.get("traceq").is_none() {
-            return self.reject(
-                "manifest requires a traceq path and traces object",
-                "ADAPTER_CONFIG",
-                &policy,
-            );
-        }
         self.backend = config.get("query_backend").cloned().unwrap_or_default();
         self.format = config.get("context_format").cloned().unwrap_or_default();
         let (Some(traces), Some(executable)) =
@@ -502,24 +520,17 @@ impl Entry {
                 &policy,
             );
         }
-        let maximum = if command == "mem-state" {
-            Some(
-                policy["memory_state_limits"]["maximum"]
-                    .as_u64()
-                    .expect("memory maximum"),
-            )
+        let limits = if command == "mem-state" {
+            Some(&policy["memory_state_limits"])
         } else if member(&policy["row_limits"], "commands", command) {
-            Some(
-                policy["row_limits"]["maximum"]
-                    .as_u64()
-                    .expect("row maximum"),
-            )
+            Some(&policy["row_limits"])
         } else {
             None
         };
-        if let Some(maximum) =
-            maximum.filter(|_| !self.options.iter().any(|v| v == "--help" || v == "-h"))
+        if let Some(limits) =
+            limits.filter(|_| !self.options.iter().any(|v| v == "--help" || v == "-h"))
         {
+            let maximum = limits["maximum"].as_u64().expect("page maximum");
             let last = command == "find-value" && self.options.iter().any(|v| v == "--last");
             let page_flag = if last { "--last" } else { "--limit" };
             if last
@@ -542,10 +553,8 @@ impl Entry {
                 );
             }
             if !self.options.iter().any(|v| v == page_flag) {
-                self.options.extend([
-                    page_flag.into(),
-                    policy["row_limits"]["default"].to_string(),
-                ]);
+                self.options
+                    .extend([page_flag.into(), limits["default"].to_string()]);
             }
             let limit = self
                 .options
@@ -630,10 +639,7 @@ pub fn native_main(args: Vec<String>) -> i32 {
     } else {
         (directory.join("tools.json"), args.as_slice())
     };
-    let directory = manifest
-        .parent()
-        .expect("absolute manifest parent")
-        .to_path_buf();
+    let directory = manifest.parent().map_or(directory, Path::to_path_buf);
     Entry::new(rest, directory, started, started_ns).run(&manifest, explicit)
 }
 

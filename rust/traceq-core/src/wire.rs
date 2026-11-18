@@ -105,6 +105,16 @@ pub struct Header {
     pub thread_id: u64,
     pub profile: u64,
 }
+
+impl Header {
+    #[inline]
+    pub fn contains_data(self, base: u64, len: u64) -> bool {
+        base >= self.data_base
+            && len <= self.data_size
+            && base - self.data_base <= self.data_size - len
+    }
+}
+
 fn u64le(b: &[u8]) -> u64 {
     u64::from_le_bytes(b[..8].try_into().expect("fixed field"))
 }

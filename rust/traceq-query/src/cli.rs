@@ -2,10 +2,11 @@
 //! bounded results; nothing is published before complete stream validation.
 use serde_json::{Map, Value, json};
 use std::{
+    borrow::Cow,
     cell::Cell,
     collections::{BTreeMap, HashSet},
     fs::File,
-    io::BufReader,
+    io::{BufReader, Read},
 };
 use traceq_core::{
     memory::{self, Checkpoint, Phase},
@@ -33,7 +34,17 @@ impl Response {
 }
 pub(crate) fn failure(command: &str, message: &str, code: i32, json: bool) -> Response {
     if json {
-        Response { stdout: format!("{}\n", json!({"error":{"code":if code==2 {"ARGUMENT"} else {"TRACE_ERROR"},"message":message}})).into_bytes(), stderr: vec![], status: code }
+        let error = json!({
+            "error": {
+                "code": if code == 2 { "ARGUMENT" } else { "TRACE_ERROR" },
+                "message": message
+            }
+        });
+        Response {
+            stdout: format!("{error}\n").into_bytes(),
+            stderr: vec![],
+            status: code,
+        }
     } else {
         Response {
             stdout: vec![],
@@ -57,7 +68,7 @@ pub(crate) fn response(rows: Vec<Value>, meta: Value, json: bool) -> Response {
         Response::text(text)
     }
 }
-pub(crate) fn parse_u64(text: &str, decimal: bool) -> Result<u64, CliError> {
+fn unsigned_digits(text: &str, decimal: bool) -> Option<(u32, &str)> {
     let (base, digits) = if decimal {
         (10, text)
     } else if text.starts_with("0x") || text.starts_with("0X") {
@@ -67,15 +78,16 @@ pub(crate) fn parse_u64(text: &str, decimal: bool) -> Result<u64, CliError> {
     } else {
         (10, text)
     };
-    if digits.is_empty()
-        || !digits
+    (!digits.is_empty()
+        && digits
             .bytes()
-            .all(|c| c.is_ascii_digit() || base == 16 && c.is_ascii_hexdigit())
-    {
-        return Err(format!("invalid unsigned integer: '{text}'").into());
-    }
-    u64::from_str_radix(digits, base)
-        .map_err(|_| format!("invalid unsigned integer: '{text}'").into())
+            .all(|c| c.is_ascii_digit() || base == 16 && c.is_ascii_hexdigit()))
+    .then_some((base, digits))
+}
+pub(crate) fn parse_u64(text: &str, decimal: bool) -> Result<u64, CliError> {
+    unsigned_digits(text, decimal)
+        .and_then(|(base, digits)| u64::from_str_radix(digits, base).ok())
+        .ok_or_else(|| format!("invalid unsigned integer: '{text}'").into())
 }
 // Search pages use decimal counts; state commands retain their radix syntax.
 pub(crate) fn parse_page_number(command: &str, literal: &str) -> Result<u64, CliError> {
@@ -97,34 +109,19 @@ fn parse_range(text: &str) -> Result<(u64, u64), CliError> {
 
 const RANGE_HINT: &str = "use --range BASE,LEN (LEN is bytes), e.g. --range 0x1000,16";
 
-fn data_contains(header: traceq_core::wire::Header, base: u64, len: u64) -> bool {
-    base >= header.data_base
-        && len <= header.data_size
-        && base - header.data_base <= header.data_size - len
-}
 pub(crate) fn number128(text: &str) -> Result<u128, CliError> {
-    let (base, digits) = if text.starts_with("0x") || text.starts_with("0X") {
-        (16, &text[2..])
-    } else if text.len() > 1 && text.starts_with('0') {
-        (8, text)
-    } else {
-        (10, text)
-    };
-    if digits.is_empty()
-        || !digits
-            .bytes()
-            .all(|c| c.is_ascii_digit() || base == 16 && c.is_ascii_hexdigit())
-    {
-        return Err(format!("invalid unsigned 128-bit value: {text}").into());
-    }
-    u128::from_str_radix(digits, base)
-        .map_err(|_| format!("invalid unsigned 128-bit value: {text}").into())
+    unsigned_digits(text, false)
+        .and_then(|(base, digits)| u128::from_str_radix(digits, base).ok())
+        .ok_or_else(|| format!("invalid unsigned 128-bit value: {text}").into())
 }
 pub(crate) fn hx(value: impl Into<u128>) -> Value {
     Value::String(format!("0x{:x}", value.into()))
 }
 pub(crate) fn input(path: &str) -> traceq_core::Result<Input<BufReader<File>>> {
-    Input::new(BufReader::with_capacity(64 * 1024, File::open(path)?))
+    buffered_input(File::open(path)?)
+}
+fn buffered_input<R: Read>(reader: R) -> traceq_core::Result<Input<BufReader<R>>> {
+    Input::new(BufReader::with_capacity(64 * 1024, reader))
 }
 pub(crate) fn shell_arg(s: &str) -> String {
     if !s.is_empty()
@@ -157,7 +154,17 @@ pub(crate) fn page_meta(
     offset: u64,
 ) -> Map<String, Value> {
     let truncated = offset < total && (shown as u64) < total - offset;
-    json!({"total":total,"shown":shown,"truncated":truncated,"next":if truncated {next_command(args,offset+shown as u64)} else {String::new()}}).as_object().unwrap().clone()
+    let next = if truncated {
+        next_command(args, offset + shown as u64)
+    } else {
+        String::new()
+    };
+    Map::from_iter([
+        ("total".into(), json!(total)),
+        ("shown".into(), json!(shown)),
+        ("truncated".into(), json!(truncated)),
+        ("next".into(), json!(next)),
+    ])
 }
 const LABELS: [&str; 7] = [
     "unused",
@@ -193,11 +200,43 @@ pub(crate) fn scope_meta(meta: &mut Map<String, Value>, info: &Info) {
 }
 pub(crate) fn capture_meta(info: &Info) -> Map<String, Value> {
     let h = info.header;
-    let mut meta=json!({"capture_gaps":info.gaps,"instructions":info.instructions,"reads":info.reads,"unknown_reads":info.unknown_reads,"stores":info.writes,"confirmed_instructions":info.commits,"unpositioned_gap":info.unpositioned_gap,"boundary_capture":info.boundary_capture,"external_execution":if info.external_followed {"followed_without_instruction_records"} else {"excluded_or_unspecified"},"scope_exits":info.exits,"scope_reentries":info.reentries,"thread_id":hx(h.thread_id),"code_base":hx(h.code_base),"code_size":h.code_size,"data_base":hx(h.data_base),"data_size":if h.data_size>9007199254740991 {hx(h.data_size)} else {json!(h.data_size)},"scope":"observations within declared single-thread code/data ranges"}).as_object().unwrap().clone();
+    let external = if info.external_followed {
+        "followed_without_instruction_records"
+    } else {
+        "excluded_or_unspecified"
+    };
+    let mut meta = Map::from_iter([
+        ("capture_gaps".into(), json!(info.gaps)),
+        ("instructions".into(), json!(info.instructions)),
+        ("reads".into(), json!(info.reads)),
+        ("unknown_reads".into(), json!(info.unknown_reads)),
+        ("stores".into(), json!(info.writes)),
+        ("confirmed_instructions".into(), json!(info.commits)),
+        ("unpositioned_gap".into(), json!(info.unpositioned_gap)),
+        ("boundary_capture".into(), json!(info.boundary_capture)),
+        ("external_execution".into(), json!(external)),
+        ("scope_exits".into(), json!(info.exits)),
+        ("scope_reentries".into(), json!(info.reentries)),
+        ("thread_id".into(), hx(h.thread_id)),
+        ("code_base".into(), hx(h.code_base)),
+        ("code_size".into(), json!(h.code_size)),
+        ("data_base".into(), hx(h.data_base)),
+        (
+            "data_size".into(),
+            if h.data_size > (1u64 << 53) - 1 {
+                hx(h.data_size)
+            } else {
+                json!(h.data_size)
+            },
+        ),
+        (
+            "scope".into(),
+            json!("observations within declared single-thread code/data ranges"),
+        ),
+    ]);
     scope_meta(&mut meta, info);
     meta
 }
-#[derive(Clone)]
 pub(crate) struct Register {
     pub name: String,
     pub slot: Option<usize>,
@@ -274,17 +313,22 @@ pub(crate) fn register_values(
     unknown: bool,
     array: bool,
 ) -> Value {
-    let items = selected.iter().map(|r| match r.slot {
-        None => hx(0u64),
-        Some(slot) if !unknown && values.is_known(slot) => hx(masked(values.bits[slot], r.bits)),
-        _ => Value::Null,
-    });
+    let items = selected.iter().map(|r| register_value(values, r, unknown));
     if array {
         Value::Array(items.collect())
     } else {
         Value::Object(selected.iter().map(|r| r.name.clone()).zip(items).collect())
     }
 }
+
+fn register_value(values: &Registers, r: &Register, unknown: bool) -> Value {
+    match r.slot {
+        None => hx(0u64),
+        Some(slot) if !unknown && values.is_known(slot) => hx(masked(values.bits[slot], r.bits)),
+        _ => Value::Null,
+    }
+}
+
 pub(crate) fn location(address: u64, info: &Info) -> Value {
     // Reverse declaration order matches the prior C++ unordered map's normal
     // insertion traversal for nested module envelopes; explicit scope is separate.
@@ -303,8 +347,8 @@ pub(crate) fn transfer(t: u64) -> &'static str {
         _ => "branch",
     }
 }
-fn text(info: &Info, pc: u64) -> String {
-    String::from_utf8_lossy(&info.sites[&pc].text).into_owned()
+fn text(info: &Info, pc: u64) -> Cow<'_, str> {
+    String::from_utf8_lossy(&info.sites[&pc].text)
 }
 fn automatic_registers(g: &Group, text: &str) -> Vec<Register> {
     let mut slots = [false; 65];
@@ -357,7 +401,22 @@ fn memory_source(kind: Kind, word: u64) -> &'static str {
     }
 }
 pub(crate) fn memory_json(g: &Group) -> Value {
-    json!(g.accesses.iter().map(|a|json!({"rw":if a.kind==Kind::Read {"r"}else{"w"},"addr":hx(a.address),"size":a.size,"known":a.detail==1,"val":if a.detail==1 {hx(a.low as u128|((a.high as u128)<<64))}else{Value::Null},"value_source":memory_source(a.kind,g.word)})).collect::<Vec<_>>())
+    Value::Array(
+        g.accesses
+            .iter()
+            .map(|a| {
+                let value = (a.detail == 1).then(|| hx(a.low as u128 | ((a.high as u128) << 64)));
+                json!({
+                    "rw": if a.kind == Kind::Read { "r" } else { "w" },
+                    "addr": hx(a.address),
+                    "size": a.size,
+                    "known": a.detail == 1,
+                    "val": value,
+                    "value_source": memory_source(a.kind, g.word)
+                })
+            })
+            .collect(),
+    )
 }
 pub(crate) fn context_row(
     g: &Group,
@@ -367,8 +426,9 @@ pub(crate) fn context_row(
     compact: bool,
     register_set: usize,
 ) -> Value {
+    let disassembly = text(info, g.pc);
     let automatic = if chosen.is_empty() {
-        automatic_registers(g, &text(info, g.pc))
+        automatic_registers(g, &disassembly)
     } else {
         vec![]
     };
@@ -382,7 +442,7 @@ pub(crate) fn context_row(
         ("pc", hx(g.pc)),
         ("off", hx(g.pc.wrapping_sub(info.header.code_base))),
         ("opcode", hx(g.word)),
-        ("text", json!(text(info, g.pc))),
+        ("text", json!(disassembly)),
         ("focus", json!(focus)),
         (
             "completion",
@@ -497,7 +557,7 @@ fn context(args: &[String]) -> Result<Response, CliError> {
     let mut window = 0;
     let mut selected = vec![];
     let info = replay::read_selected(
-        input(&path).map_err(trace_error)?,
+        input(&path)?,
         |seq| {
             while window < windows.len() && seq > windows[window].1 {
                 window += 1;
@@ -514,25 +574,20 @@ fn context(args: &[String]) -> Result<Response, CliError> {
             capture
         },
         |g, _| selected.push(g.clone()),
-    )
-    .map_err(trace_error)?;
+    )?;
     if *anchors.last().unwrap() >= info.instructions {
         return Err(CliError("requested event is outside the capture".into(), 2));
     }
     let mut rows = vec![];
     let mut register_sets = vec![];
+    if compact && !registers.is_empty() && !selected.is_empty() {
+        let mut seen = HashSet::new();
+        registers.retain(|r| seen.insert(r.name.clone()));
+        register_sets.push(json!(registers.iter().map(|r| &r.name).collect::<Vec<_>>()));
+    }
     for g in &selected {
-        if compact {
-            let chosen = if registers.is_empty() {
-                automatic_registers(g, &text(&info, g.pc))
-            } else {
-                registers.clone()
-            };
-            let mut seen = HashSet::new();
-            let chosen = chosen
-                .into_iter()
-                .filter(|r| seen.insert(r.name.clone()))
-                .collect::<Vec<_>>();
+        if compact && registers.is_empty() {
+            let chosen = automatic_registers(g, &text(&info, g.pc));
             let names = json!(chosen.iter().map(|r| &r.name).collect::<Vec<_>>());
             let n = register_sets
                 .iter()
@@ -555,16 +610,48 @@ fn context(args: &[String]) -> Result<Response, CliError> {
                 &info,
                 &registers,
                 anchors.binary_search(&g.seq).is_ok(),
-                false,
+                compact,
                 0,
             ));
         }
     }
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total.get(), rows.len(), offset));
-    meta.extend(json!({"requested_events":anchors,"before":before,"after":after,"register_selection":if registers.is_empty(){"operand_and_changed_full_slots_plus_x30_sp_nzcv"}else{"explicit"},"validation":"full stream through END"}).as_object().unwrap().clone());
+    let selection = if registers.is_empty() {
+        "operand_and_changed_full_slots_plus_x30_sp_nzcv"
+    } else {
+        "explicit"
+    };
+    meta.extend(Map::from_iter([
+        ("requested_events".into(), json!(anchors)),
+        ("before".into(), json!(before)),
+        ("after".into(), json!(after)),
+        ("register_selection".into(), json!(selection)),
+        ("validation".into(), json!("full stream through END")),
+    ]));
     if compact {
-        meta.extend(json!({"context_format":"columns-v1","columns":["ev","pc","off","opcode","text","focus","completion","gap","gap_reasons","register_set","pre","post","memory","scope_exit","scope_reentry"],"register_sets":register_sets}).as_object().unwrap().clone());
+        meta.insert("context_format".into(), json!("columns-v1"));
+        meta.insert(
+            "columns".into(),
+            json!([
+                "ev",
+                "pc",
+                "off",
+                "opcode",
+                "text",
+                "focus",
+                "completion",
+                "gap",
+                "gap_reasons",
+                "register_set",
+                "pre",
+                "post",
+                "memory",
+                "scope_exit",
+                "scope_reentry"
+            ]),
+        );
+        meta.insert("register_sets".into(), Value::Array(register_sets));
     }
     Ok(response(rows, Value::Object(meta), json))
 }
@@ -574,9 +661,6 @@ fn next<'a>(args: &'a [String], i: &mut usize, arg: &str) -> Result<&'a str, Cli
         .ok_or_else(|| CliError(format!("missing {arg} value"), 2))?;
     *i += 1;
     Ok(value)
-}
-fn trace_error(e: traceq_core::Error) -> CliError {
-    CliError(e.message, 1)
 }
 impl From<String> for CliError {
     fn from(message: String) -> Self {

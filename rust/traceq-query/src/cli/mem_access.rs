@@ -21,7 +21,6 @@ impl<'a> Options<'a> {
         let mut range = None;
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
-        let invalid = || "invalid file, limits, window or phase".to_string();
         let mut i = 1;
         while i < args.len() {
             let flag = &args[i];
@@ -55,7 +54,7 @@ impl<'a> Options<'a> {
         }
 
         if path.is_empty() || !(1..=4096).contains(&limit) || from > to || read && write {
-            return Err(invalid().into());
+            return Err("invalid file, limits, window or phase".to_string().into());
         }
         let Some((base, len)) = range else {
             return Err(format!("--range is required; {RANGE_HINT}").into());
@@ -99,7 +98,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let len = end - base;
     let stream = input(options.path)?;
     let header = stream.header;
-    let range_ok = data_contains(header, base, len);
+    let range_ok = header.contains_data(base, len);
     let info = replay::read_evidence(stream, |g, _| {
         if !range_ok || !options.events.contains(&g.seq) {
             return;
@@ -126,9 +125,28 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             };
             rows.push(if options.compact {
                 sources.push(source);
-                json!([g.seq,hx(g.pc),hx(off),rw,hx(a.address),a.size,a.detail==1,value])
+                json!([
+                    g.seq,
+                    hx(g.pc),
+                    hx(off),
+                    rw,
+                    hx(a.address),
+                    a.size,
+                    a.detail == 1,
+                    value
+                ])
             } else {
-                json!({"ev":g.seq,"pc":hx(g.pc),"off":hx(off),"rw":rw,"addr":hx(a.address),"size":a.size,"known":a.detail==1,"val":value,"value_source":source})
+                json!({
+                    "ev": g.seq,
+                    "pc": hx(g.pc),
+                    "off": hx(off),
+                    "rw": rw,
+                    "addr": hx(a.address),
+                    "size": a.size,
+                    "known": a.detail == 1,
+                    "val": value,
+                    "value_source": source
+                })
             });
         }
     })?;

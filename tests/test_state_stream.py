@@ -441,6 +441,10 @@ class StateStreamChecks(unittest.TestCase):
         self.assertEqual(last['status'],'no_reentry_observed')
         self.assertIsNone(last['reentry_registers'])
         self.assertIsNone(last['target']['module'])
+        left_page=self.query(path,'boundaries',['--reg','x0','--from','0','--to','0'])
+        right_page=self.query(path,'boundaries',['--reg','x0','--from','1','--to','1'])
+        self.assertEqual(left_page['data'],[first])
+        self.assertEqual(right_page['data'],[last])
         for args in [['--at-ev','0'],['--range','0x2000,1'],['--phase','post']]:
             self.assertEqual(self.query(path,'boundaries',args,ok=False)['error']['code'],'ARGUMENT')
 

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,21 @@ class NativeArguments(unittest.TestCase):
                 else:
                     self.assertEqual(result.stdout, b'')
                     self.assertEqual(result.stderr, b'traceq: arguments require valid UTF-8\n')
+
+    def test_root_manifest_path_is_a_config_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [CLI, b'agent-query', b'--manifest', b'/', b'sample', b'stat'],
+                cwd=directory,
+                capture_output=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, b'')
+            self.assertEqual(json.loads(result.stdout)['error']['code'], 'ADAPTER_CONFIG')
+            record = json.loads((Path(directory) / 'queries/calls.jsonl').read_text())
+            self.assertEqual(record['failure_origin'], 'adapter')
+            self.assertFalse(record['query_execution'])
 
 
 if __name__ == '__main__':

@@ -1,7 +1,12 @@
 //! Exact recorded-value searches.
 //! Selected hits are bounded; every transport frame is checked before output.
 use super::*;
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Write as _,
+    io::Seek,
+};
+use traceq_core::wire::Event;
 
 #[derive(Clone, Default)]
 struct Hit {
@@ -81,9 +86,6 @@ impl Default for Options {
 const NUMERIC_HELP: &str = "traceq find-value V FILE [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  Register phases describe snapshots; --read/--write select memory only.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
 const BYTES_HELP: &str = "traceq find-value FILE --bytes HEX [--bytes HEX ...] [--across-events] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\n  Profile 2 GTSW/GTSC: exact patterns in known recorded memory bytes.\n  Up to64 distinct patterns of1..64 bytes; contiguous hexadecimal digits.\n  Contiguous accesses may join within one instruction/direction without gaps.\n  Unknown accesses and event/direction/address changes break byte spans.\n  --across-events joins adjacent increasing addresses across events in a64-byte window.\n  With --read/--write, known disjoint opposite accesses may be skipped; overlaps break.\n  All unknown accesses, gaps and selected address/direction changes break runs.\n  An unpositioned gap suppresses joins across events or skipped accesses.\n  Historical recorded runs only; no current-memory or last-writer claim.\n  Reordered stores can leave complete content with no sequence hit.\n  Locate/disambiguate a shorter prefix; use mem-access --range B,L to choose the last required observation E, then mem-state --range B,L --checkpoint E:post before later gaps.\n  Run hits use first ev/access_index and last_ev/last_access_index, ordered by completion byte.\n  Pagination applies per pattern, at most4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  In run mode --context selects bounded windows at both endpoints of the first hit.\n  Numeric --value matching stays exact; do not mix --bytes and numeric values.\n";
 
-fn core_error(error: traceq_core::Error) -> CliError {
-    CliError(error.message, 1)
-}
 fn pattern(text: &str) -> Result<Vec<u8>, CliError> {
     let text = text
         .strip_prefix("0x")
@@ -111,7 +113,11 @@ fn pattern(text: &str) -> Result<Vec<u8>, CliError> {
         .collect()
 }
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut hex, "{byte:02x}").expect("write to a string");
+    }
+    hex
 }
 
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
@@ -243,14 +249,19 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             2,
         ));
     }
+    let mut file = File::open(&options.path).map_err(traceq_core::Error::from)?;
     if byte_mode {
-        find_bytes(options, patterns)
+        find_bytes(&mut file, options, patterns)
     } else {
-        find_numbers(options, values)
+        find_numbers(&mut file, options, values)
     }
 }
 
-fn find_numbers(options: Options, values: Vec<u128>) -> Result<Response, CliError> {
+fn find_numbers(
+    file: &mut File,
+    options: Options,
+    values: Vec<u128>,
+) -> Result<Response, CliError> {
     let index: HashMap<_, _> = values.iter().enumerate().map(|(i, v)| (*v, i)).collect();
     let registers = !options.read && !options.write;
     let mut all: Vec<Page> = (0..values.len()).map(|_| Page::default()).collect();
@@ -268,27 +279,26 @@ fn find_numbers(options: Options, values: Vec<u128>) -> Result<Response, CliErro
         }
         all[key].add(hit, &options);
     };
-    let info = replay::read_observations(input(&options.path).map_err(core_error)?, |g, _| {
-        if g.seq < options.from || g.seq > options.to {
+    let mut observe = |seq, pc, accesses: &[Event], state: Option<replay::ObservationGroup<'_>>| {
+        if seq < options.from || seq > options.to {
             return;
         }
-        if registers {
-            for post in [false, true] {
-                if post && !g.committed {
+        if let Some(state) = state {
+            for (post, observation) in [(false, state.pre), (true, state.post)] {
+                if post && !state.committed {
                     continue;
                 }
-                let state = if post { &g.post } else { &g.pre };
-                for (bank, &bits) in state.observed.iter().enumerate() {
+                for (bank, &bits) in observation.observed.iter().enumerate() {
                     let mut bits = bits;
                     while bits != 0 {
                         let slot = bank * 64 + bits.trailing_zeros() as usize;
                         bits &= bits - 1;
-                        if let Some(value) = state.get(slot) {
+                        if let Some(value) = observation.get(slot) {
                             match_value(
                                 value,
                                 Hit {
-                                    ev: g.seq,
-                                    pc: g.pc,
+                                    ev: seq,
+                                    pc,
                                     slot: Some(slot),
                                     size: if slot < 33 { 8 } else { 16 },
                                     post,
@@ -300,7 +310,7 @@ fn find_numbers(options: Options, values: Vec<u128>) -> Result<Response, CliErro
                 }
             }
         }
-        for (access, a) in g.accesses.iter().enumerate() {
+        for (access, a) in accesses.iter().enumerate() {
             let write = a.kind == Kind::Write;
             if options.read && write || options.write && !write {
                 continue;
@@ -312,8 +322,8 @@ fn find_numbers(options: Options, values: Vec<u128>) -> Result<Response, CliErro
             match_value(
                 a.low as u128 | ((a.high as u128) << 64),
                 Hit {
-                    ev: g.seq,
-                    pc: g.pc,
+                    ev: seq,
+                    pc,
                     address: a.address,
                     size: a.size as usize,
                     write: Some(write),
@@ -322,14 +332,20 @@ fn find_numbers(options: Options, values: Vec<u128>) -> Result<Response, CliErro
                 },
             );
         }
-    })
-    .map_err(core_error)?;
+    };
+    let stream = buffered_input(&mut *file)?;
+    let info = if registers {
+        replay::read_observations(stream, |g, _| observe(g.seq, g.pc, g.accesses, Some(g)))?
+    } else {
+        replay::read_evidence(stream, |g, _| observe(g.seq, g.pc, g.accesses, None))?
+    };
     let pages = if registers && info.unpositioned_gap {
         memory
     } else {
         all
     };
     finish(
+        file,
         options,
         &info,
         pages,
@@ -400,9 +416,13 @@ impl Span {
         self.accesses.clear();
     }
 }
-fn find_bytes(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, CliError> {
+fn find_bytes(
+    file: &mut File,
+    options: Options,
+    patterns: Vec<Vec<u8>>,
+) -> Result<Response, CliError> {
     if options.across_events {
-        return find_byte_runs(options, patterns);
+        return find_byte_runs(file, options, patterns);
     }
     let mut candidates: [Vec<usize>; 256] = std::array::from_fn(|_| vec![]);
     for (key, p) in patterns.iter().enumerate() {
@@ -411,7 +431,7 @@ fn find_bytes(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, CliE
     let mut pages: Vec<Page> = (0..patterns.len()).map(|_| Page::default()).collect();
     let (mut order, mut unknown_reads) = (0, 0);
     let mut span = Span::new();
-    let info = replay::read_evidence(input(&options.path).map_err(core_error)?, |g, _| {
+    let info = replay::read_evidence(buffered_input(&mut *file)?, |g, _| {
         if g.seq < options.from || g.seq > options.to {
             return;
         }
@@ -444,9 +464,17 @@ fn find_bytes(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, CliE
             );
         }
         span.flush(&g, &patterns, &candidates, &mut pages, &options, &mut order);
-    })
-    .map_err(core_error)?;
-    finish(options, &info, pages, &[], &patterns, unknown_reads, false)
+    })?;
+    finish(
+        file,
+        options,
+        &info,
+        pages,
+        &[],
+        &patterns,
+        unknown_reads,
+        false,
+    )
 }
 
 #[derive(Clone, Copy, Default)]
@@ -497,7 +525,11 @@ impl ByteRun {
                 .all(|(i, b)| self.bytes[(self.next + 64 - pattern.len() + i) % 64] == *b)
     }
 }
-fn find_byte_runs(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, CliError> {
+fn find_byte_runs(
+    file: &mut File,
+    options: Options,
+    patterns: Vec<Vec<u8>>,
+) -> Result<Response, CliError> {
     let mut candidates: [Vec<usize>; 256] = std::array::from_fn(|_| vec![]);
     for (key, p) in patterns.iter().enumerate() {
         candidates[*p.last().unwrap() as usize].push(key);
@@ -508,7 +540,7 @@ fn find_byte_runs(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, 
     let mut local_pages: Vec<Page> = (0..patterns.len()).map(|_| Page::default()).collect();
     let (mut order, mut unknown_reads, mut local_epoch) = (0, 0, 0u64);
     let mut run = ByteRun::new();
-    let info = replay::read_evidence(input(&options.path).map_err(core_error)?, |g, _| {
+    let info = replay::read_evidence(buffered_input(&mut *file)?, |g, _| {
         if g.seq < options.from || g.seq > options.to {
             return;
         }
@@ -590,9 +622,9 @@ fn find_byte_runs(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, 
         if g.gap {
             run.clear();
         }
-    })
-    .map_err(core_error)?;
+    })?;
     finish(
+        file,
         options,
         &info,
         if info.unpositioned_gap {
@@ -607,7 +639,9 @@ fn find_byte_runs(options: Options, patterns: Vec<Vec<u8>>) -> Result<Response, 
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish(
+    file: &mut File,
     options: Options,
     info: &Info,
     pages: Vec<Page>,
@@ -709,12 +743,14 @@ fn finish(
             let last_begin = last_ev.saturating_sub(span);
             let last_end = last_ev.saturating_add(span);
             let mut groups = vec![];
+            // Keep searching the same open capture if its path is replaced
+            // after the first pass.
+            file.rewind().map_err(traceq_core::Error::from)?;
             let context_info = replay::read_selected(
-                input(&options.path).map_err(core_error)?,
+                buffered_input(file)?,
                 |seq| seq >= begin && seq <= end || seq >= last_begin && seq <= last_end,
                 |g, _| groups.push(g.clone()),
-            )
-            .map_err(core_error)?;
+            )?;
             for group in groups {
                 context_rows.push(context_row(
                     &group,
@@ -727,17 +763,86 @@ fn finish(
             }
         }
     }
-    let rows=hits.iter().map(|hit|{
-        let mut row=json!({"ev":hit.ev,"pc":hx(hit.pc),"off":hx(hit.pc.wrapping_sub(info.header.code_base)),"size":hit.size,"known":true});
-        row[if byte_mode{"bytes"}else{"val"}]=if byte_mode{json!(hex_bytes(&patterns[hit.key]))}else{hx(values[hit.key])};
-        if let Some(write)=hit.write {
-            row["kind"]=json!("mem");row["lane"]=json!(if write{"mem_w"}else{"mem_r"});row["rw"]=json!(if write{"w"}else{"r"});row["addr"]=hx(hit.address);row["access_index"]=json!(hit.access);
-            if byte_mode{row["byte_offset"]=json!(hit.byte_offset);row["access_size"]=json!(hit.access_size);row["last_access_index"]=json!(hit.last_access);}
-            if options.across_events {row["last_ev"]=json!(hit.last_ev);row["last_pc"]=hx(hit.last_pc);row["last_off"]=hx(hit.last_pc.wrapping_sub(info.header.code_base));}
-        } else {let name=slot_name(hit.slot.unwrap());let phase=if hit.post{"post"}else{"pre"};row["kind"]=json!("reg");row["reg"]=json!(name);row["phase"]=json!(phase);row["lane"]=json!(format!("reg_{phase}:{name}"));}
-        row
-    }).collect::<Vec<_>>();
-    let mut meta=json!({"total":total,"shown":rows.len(),"truncated":truncated,"next":continuation,"context_command":context_command,"instructions":info.instructions,"capture_gaps":info.gaps,"unpositioned_gap":info.unpositioned_gap,"register_matches_suppressed":registers&&info.unpositioned_gap,"skipped_unknown_reads":unknown_reads,"code_base":hx(info.header.code_base),"matching":if byte_mode{"recorded_memory_byte_subsequence"}else{"exact_unsigned_numeric_value"},"scope":if byte_mode{"known recorded memory bytes; contiguous spans stay within one instruction/direction without gaps; no current-memory or writer-provenance claim"}else{"recorded register observations and memory access values; no current-memory or writer-provenance claim"},"validation":"full stream through END","scans":if options.context!=0&&!hits.is_empty(){2}else{1}}).as_object().unwrap().clone();
+    let rows = hits
+        .iter()
+        .map(|hit| {
+            let mut row = json!({
+                "ev": hit.ev,
+                "pc": hx(hit.pc),
+                "off": hx(hit.pc.wrapping_sub(info.header.code_base)),
+                "size": hit.size,
+                "known": true
+            });
+            if byte_mode {
+                row["bytes"] = json!(hex_bytes(&patterns[hit.key]));
+            } else {
+                row["val"] = hx(values[hit.key]);
+            }
+            if let Some(write) = hit.write {
+                row["kind"] = json!("mem");
+                row["lane"] = json!(if write { "mem_w" } else { "mem_r" });
+                row["rw"] = json!(if write { "w" } else { "r" });
+                row["addr"] = hx(hit.address);
+                row["access_index"] = json!(hit.access);
+                if byte_mode {
+                    row["byte_offset"] = json!(hit.byte_offset);
+                    row["access_size"] = json!(hit.access_size);
+                    row["last_access_index"] = json!(hit.last_access);
+                }
+                if options.across_events {
+                    row["last_ev"] = json!(hit.last_ev);
+                    row["last_pc"] = hx(hit.last_pc);
+                    row["last_off"] = hx(hit.last_pc.wrapping_sub(info.header.code_base));
+                }
+            } else {
+                let name = slot_name(hit.slot.unwrap());
+                let phase = if hit.post { "post" } else { "pre" };
+                row["kind"] = json!("reg");
+                row["reg"] = json!(name);
+                row["phase"] = json!(phase);
+                row["lane"] = json!(format!("reg_{phase}:{name}"));
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    let (matching, scope) = if byte_mode {
+        (
+            "recorded_memory_byte_subsequence",
+            "known recorded memory bytes; contiguous spans stay within one instruction/direction without gaps; no current-memory or writer-provenance claim",
+        )
+    } else {
+        (
+            "exact_unsigned_numeric_value",
+            "recorded register observations and memory access values; no current-memory or writer-provenance claim",
+        )
+    };
+    let mut meta = Map::from_iter([
+        ("total".into(), json!(total)),
+        ("shown".into(), json!(rows.len())),
+        ("truncated".into(), json!(truncated)),
+        ("next".into(), json!(continuation)),
+        ("context_command".into(), json!(context_command)),
+        ("instructions".into(), json!(info.instructions)),
+        ("capture_gaps".into(), json!(info.gaps)),
+        ("unpositioned_gap".into(), json!(info.unpositioned_gap)),
+        (
+            "register_matches_suppressed".into(),
+            json!(registers && info.unpositioned_gap),
+        ),
+        ("skipped_unknown_reads".into(), json!(unknown_reads)),
+        ("code_base".into(), hx(info.header.code_base)),
+        ("matching".into(), json!(matching)),
+        ("scope".into(), json!(scope)),
+        ("validation".into(), json!("full stream through END")),
+        (
+            "scans".into(),
+            json!(if options.context != 0 && !hits.is_empty() {
+                2
+            } else {
+                1
+            }),
+        ),
+    ]);
     meta.insert(
         if byte_mode { "patterns" } else { "values" }.into(),
         json!(per_key),
@@ -770,5 +875,66 @@ fn finish(
             .stdout
             .extend_from_slice(format!("context: {}\n", json!(context_rows)).as_bytes());
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn trace(value: u64) -> Vec<u8> {
+        let mut bytes = b"GTSW001\0".to_vec();
+        for word in [4096u64, 4, 8192, 1, 1, 2, 64] {
+            bytes.extend(word.to_le_bytes());
+        }
+        let opcode = 0x39000020;
+        for row in [
+            [
+                8,
+                0,
+                4096,
+                opcode,
+                4,
+                u32::from_le_bytes(*b"strb") as u64,
+                0,
+                0,
+            ],
+            [1, 0, 4096, opcode, 0, 0, 0, 1],
+            [2, 0, 4096, 8192, 1, value, 0, 1],
+            [9, 0, 4096, 0, 0, 0, 0, 1],
+            [4, 1, 0, 1, 0, 0, 1, 2],
+        ] {
+            for word in row {
+                bytes.extend(word.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn context_rescans_the_original_file_after_path_replacement() {
+        let directory =
+            std::env::temp_dir().join(format!("traceq-find-context-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("trace.gtsw");
+        let replacement = directory.join("replacement.gtsw");
+        fs::write(&path, trace(0x5a)).unwrap();
+        let mut open = File::open(&path).unwrap();
+        fs::write(&replacement, trace(0x81)).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let options = Options {
+            path: path.to_str().unwrap().into(),
+            context: 1,
+            write: true,
+            json: true,
+            ..Options::default()
+        };
+        let response = find_numbers(&mut open, options, vec![0x5a]).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        let result: Value = serde_json::from_slice(&response.stdout).unwrap();
+        assert_eq!(result["data"][0]["val"], "0x5a");
+        assert_eq!(result["context"]["rows"][0]["memory"][0]["val"], "0x5a");
     }
 }

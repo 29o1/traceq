@@ -16,13 +16,6 @@ pub struct Observation {
     pub pc: u64,
 }
 
-pub struct Snapshot {
-    pub info: replay::Info,
-    pub cells: Vec<Option<Observation>>,
-    pub selected_event: bool,
-    pub range_valid: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
     pub at: u64,
@@ -112,10 +105,7 @@ pub fn snapshots<R: Read>(
             "memory checkpoint page exceeds 4096 byte cells",
         ));
     }
-    let h = input.header;
-    let mut range_valid = base >= h.data_base
-        && len as u64 <= h.data_size
-        && base - h.data_base <= h.data_size - len as u64;
+    let mut range_valid = input.header.contains_data(base, len as u64);
     let mut points: Vec<_> = checkpoints
         .iter()
         .map(|&checkpoint| CheckpointSnapshot {
@@ -134,6 +124,7 @@ pub fn snapshots<R: Read>(
     let last = checkpoints[*order.last().unwrap()].at;
     let mut next = 0;
     let mut cells = vec![None; shown];
+    let page_base = base + first as u64;
     let info = replay::read_evidence(input, |g, _| {
         while next < order.len()
             && checkpoints[order[next]].at == g.seq
@@ -142,8 +133,8 @@ pub fn snapshots<R: Read>(
             capture(&mut points[order[next]], &cells, &g);
             next += 1;
         }
-        if range_valid && g.seq <= last {
-            observe(&mut cells, base + first as u64, &g);
+        if range_valid && shown != 0 && g.seq <= last {
+            observe(&mut cells, page_base, &g);
         }
         while next < order.len() && checkpoints[order[next]].at == g.seq {
             capture(&mut points[order[next]], &cells, &g);
@@ -161,53 +152,6 @@ pub fn snapshots<R: Read>(
     Ok(BatchSnapshot {
         info,
         points,
-        range_valid,
-    })
-}
-
-pub fn snapshot<R: Read>(
-    input: Input<R>,
-    base: u64,
-    len: usize,
-    at: u64,
-    phase: Phase,
-) -> Result<Snapshot> {
-    if !(1..=4096).contains(&len) || base.checked_add(len as u64).is_none() {
-        return Err(Error::trace("invalid memory snapshot range"));
-    }
-    let header = input.header;
-    let mut range_valid = base >= header.data_base
-        && len as u64 <= header.data_size
-        && base - header.data_base <= header.data_size - len as u64;
-    let mut cells = vec![None; len];
-    let mut selected_event = false;
-    let info = replay::read_evidence(input, |g, _| {
-        if !range_valid || g.seq > at {
-            return;
-        }
-        if g.seq == at && phase == Phase::Pre {
-            selected_event = true;
-            return; // The result is already at this instruction's pre position.
-        }
-        observe(&mut cells, base, &g);
-        if g.seq == at {
-            selected_event = true;
-            if !g.committed {
-                cells.fill(None);
-            }
-        }
-    })?;
-    if info.unpositioned_gap {
-        cells.fill(None);
-    }
-    // The existing CLI checks the selected event for an empty capture first.
-    if info.instructions == 0 {
-        range_valid = true;
-    }
-    Ok(Snapshot {
-        info,
-        cells,
-        selected_event,
         range_valid,
     })
 }
@@ -242,14 +186,18 @@ mod tests {
         }
         bytes
     }
-    fn run(records: &[[u64; 8]], at: u64, phase: Phase) -> Snapshot {
-        snapshot(
+    fn run(records: &[[u64; 8]], at: u64, phase: Phase) -> CheckpointSnapshot {
+        snapshots(
             Input::new(Cursor::new(bytes(records))).unwrap(),
             0x2001,
             16,
-            at,
-            phase,
+            &[Checkpoint { at, phase }],
+            0,
+            16,
         )
+        .unwrap()
+        .points
+        .pop()
         .unwrap()
     }
     fn observations() -> Vec<[u64; 8]> {
@@ -357,24 +305,32 @@ mod tests {
         let mut raw = bytes(&records);
         raw.push(0);
         assert!(
-            snapshot(
+            snapshots(
                 Input::new(Cursor::new(raw)).unwrap(),
                 0x2001,
                 1,
+                &[Checkpoint {
+                    at: 0,
+                    phase: Phase::Post
+                }],
                 0,
-                Phase::Post
+                1,
             )
             .is_err()
         );
         let mut records = observations();
         records.insert(11, [5, 3, 0x1000, 65, 8, 7, 0, 1]);
         assert!(
-            snapshot(
+            snapshots(
                 Input::new(Cursor::new(bytes(&records))).unwrap(),
                 0x2001,
                 1,
+                &[Checkpoint {
+                    at: 0,
+                    phase: Phase::Post
+                }],
                 0,
-                Phase::Post
+                1,
             )
             .is_err()
         );

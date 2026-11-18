@@ -1,41 +1,5 @@
 use super::*;
 use std::fmt::Write as _;
-struct View<'a> {
-    seq: u64,
-    pc: u64,
-    word: u64,
-    committed: bool,
-    gap: bool,
-    exit: &'a replay::Exit,
-    reentered: bool,
-    full: Option<&'a Group>,
-}
-impl<'a> View<'a> {
-    fn from_group(g: &'a Group) -> Self {
-        Self {
-            seq: g.seq,
-            pc: g.pc,
-            word: g.word,
-            committed: g.committed,
-            gap: g.gap,
-            exit: &g.exit,
-            reentered: g.reentered,
-            full: Some(g),
-        }
-    }
-    fn from_evidence(g: replay::EvidenceGroup<'a>) -> Self {
-        Self {
-            seq: g.seq,
-            pc: g.pc,
-            word: g.word,
-            committed: g.committed,
-            gap: g.gap,
-            exit: g.exit,
-            reentered: g.reentered,
-            full: None,
-        }
-    }
-}
 fn byte_row(address: u64, cell: Option<memory::Observation>, info: &Info) -> Value {
     let mut row = json!({"address":hx(address),"known":cell.is_some()});
     if let Some(b) = cell {
@@ -50,6 +14,15 @@ fn byte_row(address: u64, cell: Option<memory::Observation>, info: &Info) -> Val
     }
     row
 }
+
+fn byte_rows(base: u64, cells: &[Option<memory::Observation>], info: &Info) -> Vec<Value> {
+    cells
+        .iter()
+        .enumerate()
+        .map(|(index, &cell)| byte_row(base + index as u64, cell, info))
+        .collect()
+}
+
 #[derive(Default)]
 struct CompactMemory {
     indices: BTreeMap<u64, usize>,
@@ -66,7 +39,10 @@ impl CompactMemory {
                     index
                 } else {
                     let index = self.pcs.len();
-                    self.pcs.push(json!({"pc":hx(b.pc),"pc_offset":hx(b.pc.wrapping_sub(info.header.code_base))}));
+                    self.pcs.push(json!({
+                        "pc": hx(b.pc),
+                        "pc_offset": hx(b.pc.wrapping_sub(info.header.code_base))
+                    }));
                     self.indices.insert(b.pc, index);
                     index
                 };
@@ -76,10 +52,17 @@ impl CompactMemory {
                 sources.push(Value::Null);
             }
         }
-        json!({"address":hx(address),"size":cells.len(),"data_hex":bytes,"sources":sources})
+        json!({
+            "address": hx(address),
+            "size": cells.len(),
+            "data_hex": bytes,
+            "sources": sources
+        })
     }
     fn metadata(self, meta: &mut Map<String, Value>) {
-        meta.extend(json!({"mem_state_format":"hex-v1","source_columns":["observed_ev","pc_index"],"pc_table":self.pcs}).as_object().unwrap().clone());
+        meta.insert("mem_state_format".into(), json!("hex-v1"));
+        meta.insert("source_columns".into(), json!(["observed_ev", "pc_index"]));
+        meta.insert("pc_table".into(), Value::Array(self.pcs));
     }
 }
 struct Instruction {
@@ -90,7 +73,16 @@ struct Instruction {
     gap: bool,
 }
 fn instruction_row(g: &Instruction, info: &Info) -> Value {
-    json!({"ev":g.seq,"pc":hx(g.pc),"off":hx(g.pc.wrapping_sub(info.header.code_base)),"opcode":hx(g.word),"text":text(info,g.pc),"completion":if g.committed {"confirmed"} else {"unobserved"},"post_observed":g.committed,"gap":g.gap})
+    json!({
+        "ev": g.seq,
+        "pc": hx(g.pc),
+        "off": hx(g.pc.wrapping_sub(info.header.code_base)),
+        "opcode": hx(g.word),
+        "text": text(info, g.pc),
+        "completion": if g.committed { "confirmed" } else { "unobserved" },
+        "post_observed": g.committed,
+        "gap": g.gap
+    })
 }
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let name = args[0].as_str();
@@ -251,224 +243,198 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         }
     }
     if name == "mem-state" {
-        if !checkpoints.is_empty() {
-            let batch = memory::snapshots(
-                input(&path)?,
-                base,
-                len as usize,
-                &checkpoints,
-                offset,
-                limit as usize,
-            )?;
-            let info = &batch.info;
-            if !batch.range_valid {
-                return Err("query extends outside declared data range"
-                    .to_string()
-                    .into());
-            }
-            if checkpoints.iter().any(|p| p.at >= info.instructions) {
-                return Err("requested instruction is outside the capture"
-                    .to_string()
-                    .into());
-            }
-            let first = offset.min(len);
-            let shown = limit.min(len - first);
-            let truncated = first + shown < len;
-            let mut rows = vec![];
-            let mut packing = CompactMemory::default();
-            for point in &batch.points {
-                let data = if compact {
-                    packing.frame(base + first, &point.cells, info)
-                } else {
-                    Value::Array(
-                        point
-                            .cells
-                            .iter()
-                            .enumerate()
-                            .map(|(j, c)| byte_row(base + first + j as u64, *c, info))
-                            .collect(),
-                    )
-                };
-                rows.push(json!({"ev":point.checkpoint.at,"phase":if point.checkpoint.phase==Phase::Pre{"pre"}else{"post"},"pc":hx(point.pc),"instruction_completion":if point.committed{"confirmed"}else{"unobserved"},"gap":point.gap,"gap_count":point.gap_count,"gap_reasons":reasons(point.gap_reasons),"data":data,"meta":{"total":len,"shown":shown,"truncated":truncated}}));
-            }
-            let mut meta = capture_meta(info);
-            meta.extend(json!({"total":len*checkpoints.len() as u64,"shown":shown*checkpoints.len() as u64,"truncated":truncated,"next":if truncated{next_command(args,first+shown)}else{String::new()},"memory_format":"checkpoints-v1","pagination_unit":"bytes_per_checkpoint","checkpoints":checkpoints.len(),"byte_offset":offset,"byte_limit":limit,"range_base":hx(base),"range_size":len,"validation":"one stream through END"}).as_object().unwrap().clone());
-            if compact {
-                packing.metadata(&mut meta);
-            }
-            return Ok(response(rows, Value::Object(meta), json));
+        let batch_requested = !checkpoints.is_empty();
+        if !batch_requested {
+            checkpoints.push(Checkpoint { at, phase });
         }
-        let snapshot = memory::snapshot(input(&path)?, base, len as usize, at, phase)?;
-        let info = &snapshot.info;
-        if !snapshot.range_valid {
+        let batch = memory::snapshots(
+            input(&path)?,
+            base,
+            len as usize,
+            &checkpoints,
+            offset,
+            limit as usize,
+        )?;
+        let info = &batch.info;
+        if !batch.range_valid {
             return Err("query extends outside declared data range"
                 .to_string()
                 .into());
         }
-        if at >= info.instructions {
+        if checkpoints
+            .iter()
+            .any(|point| point.at >= info.instructions)
+        {
             return Err("requested instruction is outside the capture"
                 .to_string()
                 .into());
         }
-        let first = offset.min(len) as usize;
-        let shown = (limit as usize).min(snapshot.cells.len() - first);
+        let first = offset.min(len);
+        let shown = limit.min(len - first);
+        let page_base = base + first;
         let mut packing = CompactMemory::default();
-        let rows = if compact {
-            vec![packing.frame(
-                base + first as u64,
-                &snapshot.cells[first..first + shown],
-                info,
-            )]
-        } else {
-            snapshot
-                .cells
-                .iter()
-                .enumerate()
-                .skip(first)
-                .take(shown)
-                .map(|(j, c)| byte_row(base + j as u64, *c, info))
-                .collect::<Vec<_>>()
-        };
         let mut meta = capture_meta(info);
-        meta.extend(page_meta(args, len, shown, offset));
-        meta.insert(
-            "phase".into(),
-            json!(if phase == Phase::Pre { "pre" } else { "post" }),
-        );
+        let rows = if batch_requested {
+            let count = checkpoints.len() as u64;
+            let truncated = first + shown < len;
+            meta.extend(page_meta(args, len, shown as usize, offset));
+            meta.insert("total".into(), json!(len * count));
+            meta.insert("shown".into(), json!(shown * count));
+            meta.extend(Map::from_iter([
+                ("memory_format".into(), json!("checkpoints-v1")),
+                ("pagination_unit".into(), json!("bytes_per_checkpoint")),
+                ("checkpoints".into(), json!(count)),
+                ("byte_offset".into(), json!(offset)),
+                ("byte_limit".into(), json!(limit)),
+                ("range_base".into(), hx(base)),
+                ("range_size".into(), json!(len)),
+                ("validation".into(), json!("one stream through END")),
+            ]));
+            batch
+                .points
+                .iter()
+                .map(|point| {
+                    let data = if compact {
+                        packing.frame(page_base, &point.cells, info)
+                    } else {
+                        Value::Array(byte_rows(page_base, &point.cells, info))
+                    };
+                    json!({
+                        "ev": point.checkpoint.at,
+                        "phase": if point.checkpoint.phase == Phase::Pre { "pre" } else { "post" },
+                        "pc": hx(point.pc),
+                        "instruction_completion": if point.committed { "confirmed" } else { "unobserved" },
+                        "gap": point.gap,
+                        "gap_count": point.gap_count,
+                        "gap_reasons": reasons(point.gap_reasons),
+                        "data": data,
+                        "meta": {"total": len, "shown": shown, "truncated": truncated}
+                    })
+                })
+                .collect()
+        } else {
+            meta.extend(page_meta(args, len, shown as usize, offset));
+            meta.insert(
+                "phase".into(),
+                json!(if phase == Phase::Pre { "pre" } else { "post" }),
+            );
+            let cells = &batch.points[0].cells;
+            if compact {
+                vec![packing.frame(page_base, cells, info)]
+            } else {
+                byte_rows(page_base, cells, info)
+            }
+        };
         if compact {
             packing.metadata(&mut meta);
         }
         return Ok(response(rows, Value::Object(meta), json));
     }
-    let mut selected: Option<Group> = None;
-    let mut instruction_rows = vec![];
-    let mut rows = vec![];
-    let mut total = 0u64;
-    let mut spans: Vec<(Group, Option<Group>)> = vec![];
-    let mut pending: Option<Group> = None;
-    let mut on_group = |g: View<'_>, state: &Info| {
-        if name == "reg-state" && g.seq == at {
-            selected = Some(g.full.unwrap().clone());
-        }
-
-        if name == "boundaries" {
-            if g.reentered
-                && let Some(exit) = pending.take()
-                && exit.seq >= from
-                && exit.seq <= to
-            {
-                let n = total;
-                total += 1;
-                if n >= offset && (spans.len() as u64) < limit {
-                    spans.push((exit, Some(g.full.unwrap().clone())));
-                }
-            }
-            if g.exit.transfer != 0 {
-                pending = Some(g.full.unwrap().clone());
-            }
-        }
-        if matches!(name, "instructions" | "find-pc")
-            && g.seq >= from
-            && g.seq <= to
-            && (!gaps_only || g.gap)
-            && (name != "find-pc"
-                || pcs.contains(&g.pc)
-                || offs.contains(&g.pc.wrapping_sub(state.header.code_base)))
-        {
-            let n = total;
-            total += 1;
-            if n >= offset && (instruction_rows.len() as u64) < limit {
-                instruction_rows.push(Instruction {
-                    seq: g.seq,
-                    pc: g.pc,
-                    word: g.word,
-                    committed: g.committed,
-                    gap: g.gap,
-                });
-            }
-        }
-    };
     let stream = input(&path)?;
-    let info = if name == "boundaries" {
-        replay::read(stream, |g, info| on_group(View::from_group(g), info))?
-    } else if name == "reg-state" {
-        replay::read_selected(
-            stream,
-            |seq| seq == at,
-            |g, info| on_group(View::from_group(g), info),
-        )?
-    } else {
-        replay::read_evidence(stream, |g, info| on_group(View::from_evidence(g), info))?
-    };
-    if has_at && at >= info.instructions {
-        return Err("requested instruction is outside the capture"
-            .to_string()
-            .into());
-    }
-    if matches!(name, "instructions" | "find-pc") {
-        rows = instruction_rows
-            .iter()
-            .map(|g| instruction_row(g, &info))
-            .collect();
-    }
-    if name == "boundaries" {
-        if let Some(exit) = pending
-            && exit.seq >= from
-            && exit.seq <= to
-        {
-            let n = total;
-            total += 1;
-            if n >= offset && (spans.len() as u64) < limit {
-                spans.push((exit, None));
-            }
-        }
-        for (g, entry) in spans {
-            let mut row = json!({"exit_ev":g.seq,"source":location(g.pc,&info),"source_off":hx(g.pc.wrapping_sub(info.header.code_base)),"instruction":text(&info,g.pc),"target":location(g.exit.target,&info),"transfer":transfer(g.exit.transfer),"status":if entry.is_some(){"reentered"}else{"no_reentry_observed"},"expected_return_address":if g.exit.expected_return!=0{hx(g.exit.expected_return)}else{Value::Null},"exit_registers":register_values(&g.pre,&registers,info.unpositioned_gap,false),"memory_effects":"unobserved"});
-            if let Some(entry) = entry {
-                row["reentry_ev"] = json!(entry.seq);
-                row["reentry"] = location(entry.pc, &info);
-                row["reentry_registers"] =
-                    register_values(&entry.pre, &registers, info.unpositioned_gap, false);
-                row["reentry_matches_expected_return"] = if g.exit.expected_return != 0 {
-                    json!(entry.pc == g.exit.expected_return)
-                } else {
-                    Value::Null
-                };
-            } else {
-                for key in [
-                    "reentry_ev",
-                    "reentry",
-                    "reentry_registers",
-                    "reentry_matches_expected_return",
-                ] {
-                    row[key] = Value::Null;
+    let (info, rows, total) = match name {
+        "instructions" | "find-pc" => {
+            let mut total = 0;
+            let mut page = Vec::new();
+            let info = replay::read_evidence(stream, |g, state| {
+                if g.seq < from
+                    || g.seq > to
+                    || gaps_only && !g.gap
+                    || name == "find-pc"
+                        && !pcs.contains(&g.pc)
+                        && !offs.contains(&g.pc.wrapping_sub(state.header.code_base))
+                {
+                    return;
                 }
+                if total >= offset && (page.len() as u64) < limit {
+                    page.push(Instruction {
+                        seq: g.seq,
+                        pc: g.pc,
+                        word: g.word,
+                        committed: g.committed,
+                        gap: g.gap,
+                    });
+                }
+                total += 1;
+            })?;
+            let rows = page.iter().map(|g| instruction_row(g, &info)).collect();
+            (info, rows, total)
+        }
+        "boundaries" => {
+            let mut total = 0;
+            let mut spans: Vec<(Group, Option<Group>)> = Vec::new();
+            let mut pending = None;
+            // An exit at the right edge can reenter at the next instruction.
+            let through = to.saturating_add(1);
+            let info = replay::read_selected(
+                stream,
+                |seq| (from..=through).contains(&seq),
+                |g, _| {
+                    if g.reentered
+                        && let Some(exit) = pending.take()
+                    {
+                        if total >= offset && (spans.len() as u64) < limit {
+                            spans.push((exit, Some(g.clone())));
+                        }
+                        total += 1;
+                    }
+                    if g.exit.transfer != 0 && g.seq <= to {
+                        pending = Some(g.clone());
+                    }
+                },
+            )?;
+            if let Some(exit) = pending {
+                if total >= offset && (spans.len() as u64) < limit {
+                    spans.push((exit, None));
+                }
+                total += 1;
             }
-            rows.push(row);
+            let rows = spans
+                .iter()
+                .map(|(exit, entry)| boundary_row(exit, entry.as_ref(), &registers, &info))
+                .collect();
+            (info, rows, total)
         }
-    } else if name == "stat" {
-        total = 1;
-        if offset == 0 {
-            rows.push(json!({"format":if info.chunked{"GTSC001"}else{"GTSW001"},"profile":2,"sites":info.sites.len(),"register_slots":65}));
+        "stat" => {
+            let info = replay::read_evidence(stream, |_, _| {})?;
+            let mut rows = Vec::new();
+            if offset == 0 {
+                rows.push(json!({
+                    "format": if info.chunked { "GTSC001" } else { "GTSW001" },
+                    "profile": 2,
+                    "sites": info.sites.len(),
+                    "register_slots": replay::REGISTER_COUNT
+                }));
+            }
+            (info, rows, 1)
         }
-    } else if name == "reg-state" {
-        let Some(g) = selected else {
-            return Err("requested state was not observed".to_string().into());
-        };
-        total = registers.len() as u64;
-        let values = if phase == Phase::Pre { &g.pre } else { &g.post };
-        for r in registers
-            .iter()
-            .skip(offset.min(total) as usize)
-            .take(limit as usize)
-        {
-            let known = r.slot.is_none()
-                || (!info.unpositioned_gap
-                    && (phase == Phase::Pre || g.committed)
-                    && values.is_known(r.slot.unwrap()));
-            rows.push(json!({"reg":r.name,"known":known,"val":if known {hx(r.slot.map_or(0,|slot|masked(values.bits[slot],r.bits)))}else{Value::Null}}));
+        "reg-state" => {
+            let mut selected = None;
+            let info =
+                replay::read_selected(stream, |seq| seq == at, |g, _| selected = Some(g.clone()))?;
+            if at >= info.instructions {
+                return Err("requested instruction is outside the capture"
+                    .to_string()
+                    .into());
+            }
+            let Some(g) = selected else {
+                return Err("requested state was not observed".to_string().into());
+            };
+            let total = registers.len() as u64;
+            let values = if phase == Phase::Pre { &g.pre } else { &g.post };
+            let unknown = info.unpositioned_gap || (phase == Phase::Post && !g.committed);
+            let rows = registers
+                .iter()
+                .skip(offset.min(total) as usize)
+                .take(limit as usize)
+                .map(|r| {
+                    let value = register_value(values, r, unknown);
+                    json!({"reg": r.name, "known": !value.is_null(), "val": value})
+                })
+                .collect();
+            (info, rows, total)
         }
-    }
+        _ => unreachable!("state command dispatch"),
+    };
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total, rows.len(), offset));
     if name == "boundaries" {
@@ -500,4 +466,24 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         );
     }
     Ok(response(rows, Value::Object(meta), json))
+}
+
+fn boundary_row(g: &Group, entry: Option<&Group>, registers: &[Register], info: &Info) -> Value {
+    let expected = (g.exit.expected_return != 0).then_some(g.exit.expected_return);
+    json!({
+        "exit_ev": g.seq,
+        "source": location(g.pc, info),
+        "source_off": hx(g.pc.wrapping_sub(info.header.code_base)),
+        "instruction": text(info, g.pc),
+        "target": location(g.exit.target, info),
+        "transfer": transfer(g.exit.transfer),
+        "status": if entry.is_some() { "reentered" } else { "no_reentry_observed" },
+        "expected_return_address": expected.map(hx),
+        "exit_registers": register_values(&g.pre, registers, info.unpositioned_gap, false),
+        "memory_effects": "unobserved",
+        "reentry_ev": entry.map(|next| next.seq),
+        "reentry": entry.map(|next| location(next.pc, info)),
+        "reentry_registers": entry.map(|next| register_values(&next.pre, registers, info.unpositioned_gap, false)),
+        "reentry_matches_expected_return": entry.zip(expected).map(|(next, expected)| next.pc == expected)
+    })
 }

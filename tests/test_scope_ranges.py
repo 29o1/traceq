@@ -59,6 +59,18 @@ class ScopeRangeChecks(unittest.TestCase):
    p=self.artifact(rows,chunked);q=self.q(p,'instructions','--limit',len(pcs));self.assertEqual([int(x['pc'],0) for x in q['data']],pcs)
    for invalid_pc in [0x10fd,0x10ff,0x1100,0x2000,0x30fd,0x3100]:
     damaged=list(rows);damaged.insert(len(prefix),self.site(invalid_pc,b'nop',0xd503201f));self.q(self.artifact(damaged,chunked),'stat',ok=False)
+ def test_implicit_range_cannot_end_inside_an_instruction(self):
+  pc=0x1004
+  rows=[self.site(pc,b'nop',0xd503201f),(1,0,pc,0xd503201f,0,0,0,0),(4,1,0,0,0,0,0,2)]
+  for chunked in (False,True):
+   path=self.artifact(rows,chunked)
+   data=bytearray(path.read_bytes())
+   struct.pack_into('<Q',data,16,8)
+   path.write_bytes(data)
+   self.assertEqual(self.q(path,'stat')['meta']['instructions'],1)
+   struct.pack_into('<Q',data,16,7)
+   path.write_bytes(data)
+   self.assertEqual(self.q(path,'instructions','--offset',100,ok=False)['error']['code'],'TRACE_ERROR')
  def test_scope_features_keep_prefix_order_and_legacy_site_order(self):
   pc=0x1000;site=self.site(pc,b'nop',0xd503201f);body=[(1,0,pc,0xd503201f,0,0,0,1)]+self.pre(0,pc)+[(9,0,pc,0,0,0,0,1),(4,1,0,0,0,0,1,2)]
   for chunked in [False,True]:

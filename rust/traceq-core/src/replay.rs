@@ -153,7 +153,8 @@ impl Info {
     fn in_code(&self, address: u64) -> bool {
         if self.ranges.is_empty() {
             address >= self.header.code_base
-                && address - self.header.code_base < self.header.code_size
+                && self.header.code_size >= 4
+                && address - self.header.code_base <= self.header.code_size - 4
         } else {
             self.ranges
                 .iter()
@@ -626,12 +627,12 @@ fn read_impl<
                 info.gap_reasons[e.detail as usize] += 1;
                 if e.detail == 1 {
                     let text = &info.sites[&e.pc].text;
-                    let mnemonic = text
-                        .split(|b| *b == b' ')
-                        .next()
-                        .unwrap_or_default()
-                        .to_vec();
-                    *info.unsupported_mnemonics.entry(mnemonic).or_default() += 1;
+                    let mnemonic = text.split(|b| *b == b' ').next().unwrap_or_default();
+                    if let Some(count) = info.unsupported_mnemonics.get_mut(mnemonic) {
+                        *count += 1;
+                    } else {
+                        info.unsupported_mnemonics.insert(mnemonic.to_vec(), 1);
+                    }
                 }
                 g.gap = true;
                 a.post_started = true;
@@ -686,9 +687,7 @@ fn read_impl<
                         && !g.committed
                         && g.accesses.len() < 4
                         && (1..=16).contains(&e.size)
-                        && e.address >= h.data_base
-                        && e.size <= h.data_size
-                        && e.address - h.data_base <= h.data_size - e.size
+                        && h.contains_data(e.address, e.size)
                         && e.detail <= 1
                         && (e.kind != Kind::Write || e.detail == 1),
                     "invalid memory event",
