@@ -11,29 +11,47 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-host = {('Darwin', 'arm64'): 'aarch64-apple-darwin',
-        ('Linux', 'aarch64'): 'aarch64-unknown-linux-gnu',
-        ('Linux', 'x86_64'): 'x86_64-unknown-linux-gnu'}.get((platform.system(), platform.machine()))
-local = ROOT / '.deps/rust/toolchain'
-android_local = ROOT / '.deps/rust/android-rustup/toolchains' / ('1.95.0-' + str(host))
-android_target = any(arg == 'aarch64-linux-android' or arg == '--target=aarch64-linux-android'
-                     for arg in sys.argv[1:])
-ios_target = any(arg == 'aarch64-apple-ios' or arg == '--target=aarch64-apple-ios'
-                 for arg in sys.argv[1:])
-preferred = android_local if (android_target or ios_target) and android_local.exists() else local
-toolchain = Path(os.environ.get('TRACEQ_RUST_TOOLCHAIN', str(preferred if preferred.exists() else
-    Path.home() / '.rustup/toolchains' / ('1.95.0-' + str(host)))))
-for name in ('cargo', 'rustc', 'rustdoc'):
-    if not (toolchain / 'bin' / name).is_file():
-        sys.exit(f'Missing fixed toolchain: {toolchain}; set TRACEQ_RUST_TOOLCHAIN to an existing 1.95.0 toolchain.')
-version = subprocess.check_output([str(toolchain/'bin/rustc'), '--version'], text=True)
-if not version.startswith('rustc 1.95.0 '):
-    sys.exit(f'Expected rustc 1.95.0, got {version.strip()}')
-env = os.environ.copy()
-env.update(CARGO_HOME=str(ROOT/'.deps/rust/cargo-home'), RUSTUP_HOME=str(ROOT/'.deps/rust/rustup-home'),
-           CARGO_TARGET_DIR=str(ROOT/'.deps/rust/target'), RUSTC=str(toolchain/'bin/rustc'),
-           RUSTDOC=str(toolchain/'bin/rustdoc'), RUSTUP_TOOLCHAIN=str(toolchain), PATH=str(toolchain/'bin')+os.pathsep+env.get('PATH',''))
-# Network access is explicit: dependency fetch populates only this project's
-# Cargo cache/lock. Ordinary builds and checks retain their offline behavior.
-offline = [] if sys.argv[1:2] == ['fetch'] else ['--offline']
-raise SystemExit(subprocess.call([str(toolchain/'bin/cargo'), *offline, *sys.argv[1:]], cwd=ROOT/'rust', env=env))
+VERSION = '1.95.0'
+HOSTS = {
+    ('Darwin', 'arm64'): 'aarch64-apple-darwin',
+    ('Linux', 'aarch64'): 'aarch64-unknown-linux-gnu',
+    ('Linux', 'x86_64'): 'x86_64-unknown-linux-gnu',
+}
+DEVICE_TARGETS = {'aarch64-linux-android', 'aarch64-apple-ios'}
+
+
+def main():
+    args = sys.argv[1:]
+    host = HOSTS.get((platform.system(), platform.machine()))
+    label = f'{VERSION}-{host}'
+    cache = ROOT / '.deps/rust'
+    local = cache / 'toolchain'
+    device_toolchain = cache / 'android-rustup/toolchains' / label
+    is_device = any(arg.removeprefix('--target=') in DEVICE_TARGETS for arg in args)
+    preferred = device_toolchain if is_device and device_toolchain.exists() else local
+    fallback = Path.home() / '.rustup/toolchains' / label
+    toolchain = Path(os.environ.get('TRACEQ_RUST_TOOLCHAIN', preferred if preferred.exists() else fallback))
+    tools = toolchain / 'bin'
+    if not all((tools / name).is_file() for name in ('cargo', 'rustc', 'rustdoc')):
+        sys.exit(f'Missing fixed toolchain: {toolchain}; set TRACEQ_RUST_TOOLCHAIN '
+                 f'to an existing {VERSION} toolchain.')
+    version = subprocess.check_output([str(tools / 'rustc'), '--version'], text=True, timeout=15)
+    if not version.startswith(f'rustc {VERSION} '):
+        sys.exit(f'Expected rustc {VERSION}, got {version.strip()}')
+    env = os.environ.copy()
+    env.update(
+        CARGO_HOME=str(cache / 'cargo-home'),
+        RUSTUP_HOME=str(cache / 'rustup-home'),
+        CARGO_TARGET_DIR=str(cache / 'target'),
+        RUSTC=str(tools / 'rustc'),
+        RUSTDOC=str(tools / 'rustdoc'),
+        RUSTUP_TOOLCHAIN=str(toolchain),
+        PATH=str(tools) + os.pathsep + env.get('PATH', ''),
+    )
+    # Fetch is explicit. Ordinary builds and checks stay offline.
+    offline = [] if args[:1] == ['fetch'] else ['--offline']
+    return subprocess.call([str(tools / 'cargo'), *offline, *args], cwd=ROOT / 'rust', env=env)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

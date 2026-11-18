@@ -1,12 +1,58 @@
 """Check the real capture CMake graph without compiling or loading an SDK."""
+from hashlib import sha256
+import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'tools'))
+import dependencies
+
+
+class DependencyCache(unittest.TestCase):
+    def test_download_checksum_failure_leaves_canonical_path_available_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'archive'
+            source.write_bytes(b'truncated')
+            path = root / 'cache/archive'
+            expected = sha256(b'complete').hexdigest()
+            with self.assertRaisesRegex(RuntimeError, 'partial file retained'):
+                dependencies.checked_download(source.as_uri(), path, expected)
+            self.assertFalse(path.exists())
+            [partial] = path.parent.glob('*.partial')
+            self.assertEqual(partial.read_bytes(), b'truncated')
+            source.write_bytes(b'complete')
+            dependencies.checked_download(source.as_uri(), path, expected)
+            self.assertEqual(path.read_bytes(), b'complete')
+            self.assertEqual(partial.read_bytes(), b'truncated')
+
+    def test_warm_devkit_verifies_members_without_reopening_the_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dest = root / 'frida-gum-fixture-macos-arm64'
+            dest.mkdir()
+            contents = {'frida-gum.h': b'header', 'libfrida-gum.a': b'library'}
+            for name, value in contents.items():
+                (dest / name).write_bytes(value)
+            spec = root / 'gum-devkits.json'
+            spec.write_text(json.dumps({
+                'version': 'fixture',
+                'platforms': {'macos-arm64': {
+                    'members': {name: sha256(value).hexdigest() for name, value in contents.items()},
+                }},
+            }))
+            with patch.multiple(dependencies, CACHE=root, GUM_SPEC=spec):
+                self.assertEqual(dependencies.gum('macos-arm64'), dest)
+                (dest / 'libfrida-gum.a').write_bytes(b'wrong')
+                with self.assertRaisesRegex(RuntimeError, 'checksum mismatch'):
+                    dependencies.gum('macos-arm64')
 
 
 @unittest.skipUnless(all(shutil.which(tool) for tool in ('cmake', 'make', 'cc')),

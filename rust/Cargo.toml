@@ -7,4 +7,3 @@ resolver = "2"
 opt-level = 2
 debug = 1
 panic = "unwind"
-

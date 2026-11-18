@@ -1,69 +1,102 @@
 #!/usr/bin/env python3
-"""Build capture targets from this repository without cleaning existing files."""
+"""Build native capture targets in the checkout's build directory."""
 import argparse
 import os
 from pathlib import Path
 import platform
 import subprocess
+import sys
+
 import dependencies
 
-ROOT=Path(__file__).resolve().parents[1]
-CAPTURE=ROOT/'capture/traceq'
+ROOT = Path(__file__).resolve().parents[1]
+CAPTURE = ROOT / 'capture/traceq'
+
 
 def run(args):
-    subprocess.run([str(x) for x in args],check=True,cwd=ROOT,timeout=300)
+    subprocess.run([str(arg) for arg in args], check=True, cwd=ROOT, timeout=300)
+
 
 def host(with_tests=False):
-    if platform.system()!='Darwin' or platform.machine()!='arm64':
-        raise RuntimeError('traceq-capture host currently requires macOS ARM64; make and check-cli are portable')
-    sdk=dependencies.host()
-    out=ROOT/'build/traceq-host';out.mkdir(parents=True,exist_ok=True)
-    gum_build=out/'gum-build'
-    run(['cmake','-S',CAPTURE,'-B',gum_build,'-DTRACEQ_GUM_ONLY=ON',
-         '-DCMAKE_BUILD_TYPE=Release','-DCMAKE_OSX_ARCHITECTURES=arm64',
-         '-DTRACEQ_GUM_DEVKIT_DIR='+str(sdk)])
-    run(['cmake','--build',gum_build])
-    archive=gum_build/'gum/libtraceq-gum.a'
-    tests=ROOT/'tests/integration';fixtures=tests/'fixtures'
-    run(['clang','-arch','arm64','-dynamiclib','-O2','-fno-stack-protector','-fomit-frame-pointer',
-         fixtures/'targets.S',fixtures/'extra_targets.S',fixtures/'write_targets.S',
-         fixtures/'boundary_targets.S',
-         fixtures/'c_transform.c','-o',out/'libfixtures.dylib'])
-    run(['python3', ROOT/'tools/rust_workspace.py', 'build', '--locked', '--release', '-p', 'traceq-capture'])
-    rust=ROOT/'.deps/rust/target/release/libtraceq_capture.a'
-    command=['clang++','-arch','arm64','-std=c++17','-O2','-Wall','-Wextra','-Wno-unused-parameter',
-         '-Wno-deprecated-declarations','-DTRACEQ_HOST_LAB',
-         '-I'+str(CAPTURE/'src'),'-I'+str(sdk),
-         '-x','objective-c++',tests/'capture_host.mm','-x','none','-Wl,-force_load,'+str(rust),archive,
-         '-framework','Foundation','-lresolv','-lm','-ldl','-o',out/'traceq-capture']
-    run(command)
+    if platform.system() != 'Darwin' or platform.machine() != 'arm64':
+        raise RuntimeError('traceq-capture host requires macOS ARM64')
+    sdk = dependencies.host()
+    out = ROOT / 'build/traceq-host'
+    out.mkdir(parents=True, exist_ok=True)
+    gum_build = out / 'gum-build'
+    run([
+        'cmake', '-S', CAPTURE, '-B', gum_build, '-DTRACEQ_GUM_ONLY=ON',
+        '-DCMAKE_BUILD_TYPE=Release', '-DCMAKE_OSX_ARCHITECTURES=arm64',
+        f'-DTRACEQ_GUM_DEVKIT_DIR={sdk}',
+    ])
+    run(['cmake', '--build', gum_build])
+    archive = gum_build / 'gum/libtraceq-gum.a'
+    tests = ROOT / 'tests/integration'
+    fixtures = tests / 'fixtures'
+    run([
+        'clang', '-arch', 'arm64', '-dynamiclib', '-O2', '-fno-stack-protector',
+        '-fomit-frame-pointer', fixtures / 'targets.S', fixtures / 'extra_targets.S',
+        fixtures / 'write_targets.S', fixtures / 'boundary_targets.S', fixtures / 'c_transform.c',
+        '-o', out / 'libfixtures.dylib',
+    ])
+    run([sys.executable, ROOT / 'tools/rust_workspace.py', 'build', '--locked', '--release',
+         '-p', 'traceq-capture'])
+    rust = ROOT / '.deps/rust/target/release/libtraceq_capture.a'
+    compile_flags = [
+        'clang++', '-arch', 'arm64', '-std=c++17', '-O2', '-Wall', '-Wextra',
+        '-Wno-unused-parameter', '-Wno-deprecated-declarations',
+        f'-I{CAPTURE / "src"}', f'-I{sdk}', '-x', 'objective-c++',
+    ]
+    link_flags = [
+        '-x', 'none', f'-Wl,-force_load,{rust}', archive,
+        '-framework', 'Foundation', '-lresolv', '-lm', '-ldl',
+    ]
+    programs = [('capture_host.mm', 'traceq-capture')]
     if with_tests:
-        run([tests/'thread_owner.mm' if x==tests/'capture_host.mm' else
-             out/'traceq-thread-owner-test' if x==out/'traceq-capture' else x for x in command])
+        programs.append(('thread_owner.mm', 'traceq-thread-owner-test'))
+    for source, program in programs:
+        run([*compile_flags, tests / source, *link_flags, '-o', out / program])
     return out
+
 
 def device(target):
-    sdk=dependencies.gum('android-arm64') if target=='android' else None
-    if target!='android':dependencies.legacy(platform=target)
-    out=ROOT/'build'/('traceq-'+target);out.mkdir(parents=True,exist_ok=True)
-    args=['cmake','-S',CAPTURE,'-B',out,'-DCMAKE_BUILD_TYPE=Release']
-    if target=='android':
-        args+=['-DTRACEQ_GUM_DEVKIT_DIR='+str(sdk)]
-        ndk=os.environ.get('ANDROID_NDK_HOME')
-        if not ndk or not (Path(ndk)/'build/cmake/android.toolchain.cmake').is_file():
+    out = ROOT / 'build' / f'traceq-{target}'
+    args = ['cmake', '-S', CAPTURE, '-B', out, '-DCMAKE_BUILD_TYPE=Release']
+    if target == 'android':
+        ndk = os.environ.get('ANDROID_NDK_HOME')
+        if not ndk or not (Path(ndk) / 'build/cmake/android.toolchain.cmake').is_file():
             raise RuntimeError('ANDROID_NDK_HOME must point to an installed NDK')
-        args+=['-DCMAKE_TOOLCHAIN_FILE='+str(Path(ndk)/'build/cmake/android.toolchain.cmake'),
-               '-DANDROID_ABI=arm64-v8a','-DANDROID_PLATFORM=android-24']
+        sdk = dependencies.gum('android-arm64')
+        args.extend([
+            f'-DTRACEQ_GUM_DEVKIT_DIR={sdk}',
+            f'-DCMAKE_TOOLCHAIN_FILE={Path(ndk) / "build/cmake/android.toolchain.cmake"}',
+            '-DANDROID_ABI=arm64-v8a', '-DANDROID_PLATFORM=android-24',
+        ])
     else:
-        sdk=subprocess.check_output(['xcrun','--sdk','iphoneos','--show-sdk-path'],text=True).strip()
-        args+=['-DCMAKE_SYSTEM_NAME=iOS','-DCMAKE_OSX_SYSROOT='+sdk,
-               '-DCMAKE_OSX_ARCHITECTURES=arm64','-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0']
-    run(args);run(['cmake','--build',out,'--config','Release'])
+        sdk = subprocess.check_output(
+            ['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True, timeout=30,
+        ).strip()
+        dependencies.legacy(platform='ios')
+        args.extend([
+            '-DCMAKE_SYSTEM_NAME=iOS', f'-DCMAKE_OSX_SYSROOT={sdk}',
+            '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0',
+        ])
+    out.mkdir(parents=True, exist_ok=True)
+    run(args)
+    run(['cmake', '--build', out, '--config', 'Release'])
     return out
 
-if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('platform',choices=['host','android','ios'])
-    parser.add_argument('--tests',action='store_true',help='build host thread-ownership regression executable')
-    args=parser.parse_args()
-    if args.tests and args.platform!='host':parser.error('--tests applies to the host build')
-    print(host(args.tests) if args.platform=='host' else device(args.platform))
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('platform', choices=['host', 'android', 'ios'])
+    parser.add_argument('--tests', action='store_true',
+                        help='build the host thread-ownership regression executable')
+    args = parser.parse_args()
+    if args.tests and args.platform != 'host':
+        parser.error('--tests applies to the host build')
+    print(host(args.tests) if args.platform == 'host' else device(args.platform))
+
+
+if __name__ == '__main__':
+    main()

@@ -27,8 +27,6 @@ deps-cli:
 	rustup toolchain install 1.95.0 --profile minimal
 	$(PYTHON) tools/rust_workspace.py fetch --locked
 
-.PHONY: deps-cli
-
 deps-host:
 	$(PYTHON) tools/dependencies.py host
 
@@ -55,8 +53,6 @@ check-cli: cli
 
 check-cli-clean:
 	$(PYTHON) tools/check_cli_clean.py
-
-.PHONY: check-cli-clean
 
 check-find-value: cli
 	$(PYTHON) tests/test_find_value_stream.py
@@ -112,16 +108,11 @@ check: check-cli check-capture-build
 	$(PYTHON) tests/integration/check_structure.py
 	$(PYTHON) tests/integration/check_simd.py
 
-.PHONY: deps-host capture-host capture-android capture-ios check-capture-build check-cli check-find-value check-multiply check-literal check-registers check-bitops check-prefetch check-st2 check-structure check-simd check-invoke-android check
-
-.PHONY: check-aes
-
-.PHONY: check-polymul
-
-.PHONY: check-transpose
-
 # Explicit device check; the normal build only prepares local artifacts.
 check-gum-context-android: capture-android
 	$(PYTHON) tests/integration/check_gum_context.py
 
-.PHONY: check-gum-context-android
+.PHONY: deps-cli deps-host capture-host capture-android capture-ios
+.PHONY: check check-cli check-cli-clean check-capture-build check-find-value
+.PHONY: check-multiply check-literal check-registers check-transpose check-polymul +	check-aes check-bitops check-prefetch check-st2 check-structure check-simd
+.PHONY: check-invoke-android check-gum-context-android
