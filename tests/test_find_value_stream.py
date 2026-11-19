@@ -109,6 +109,35 @@ class FindValueChecks(unittest.TestCase):
             self.assertEqual(tail['data'], wanted[-1:])
             self.assertEqual(self.query(path, '--bytes', '5a', '--memory', ok=False)['error']['code'], 'ARGUMENT')
 
+    def test_numeric_ranges_page_the_union_of_whole_accesses(self):
+        for chunked in (False, True):
+            path = self.artifact(chunked=chunked)
+            args = ['--value', '0x5a', '--range', '0x2001,1', '--range', '0x2019,1', '--range', '0x201a,1']
+            full = self.query(path, *args)
+            self.assertEqual([(r['rw'], r['addr'], r['size'], r['access_index']) for r in full['data']],
+                             [('r', '0x2001', 1, 0), ('w', '0x2018', 8, 1)])
+            self.assertEqual(full['meta']['total'], 2)
+            page = self.query(path, *args, '--limit', 1)
+            self.assertEqual(page['data'], full['data'][:1])
+            argv = shlex.split(page['meta']['next'])
+            self.assertEqual(argv.count('--range'), 3)
+            result = json.loads(subprocess.check_output([str(CLI), *argv[1:]], timeout=10))
+            self.assertEqual(result['data'], full['data'][1:])
+
+            unknown = self.query(path, '--value', 0, '--range', '0x2000,1')
+            self.assertEqual(unknown['data'], [])
+            self.assertEqual(unknown['meta']['skipped_unknown_reads'], 1)
+            outside = ['--value', '0x5a', '--range', '0x1000,1']
+            self.assertEqual(self.query(path, *outside, ok=False)['error']['code'], 'ARGUMENT')
+            self.assertEqual(self.query(path, '--bytes', '5a', '--range', '0x2001,1', ok=False)['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                for select in (args, outside):
+                    failure = self.query(path, *select, '--offset', '99', ok=False)
+                    self.assertEqual(set(failure), {'error'})
+                    self.assertEqual(failure['error']['code'], 'TRACE_ERROR')
+
     def test_full_width_and_slot_64(self):
         for chunked in (False,True):
             path=self.artifact(chunked=chunked);q=self.query(path,'--value',hex(WIDE))
