@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 fn byte_row(
     address: u64,
@@ -263,6 +264,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut include_location = false;
     let mut include_gap_reasons = false;
     let mut gap_reason_filter = 0;
+    let mut mnemonics = BTreeSet::new();
     let mut target_module = None;
     let mut i = 1;
     while i < args.len() {
@@ -290,6 +292,19 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                     .ok_or_else(|| CliError(format!("unknown gap reason: {reason}"), 2))?;
                 gap_reason_filter |= 1 << id;
                 include_gap_reasons = true;
+            }
+            "--mnemonic" if name == "instructions" => {
+                let mnemonic = next(args, &mut i, a)?;
+                if mnemonic.is_empty()
+                    || !mnemonic
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_'))
+                {
+                    return Err("--mnemonic requires one instruction mnemonic"
+                        .to_string()
+                        .into());
+                }
+                mnemonics.insert(mnemonic);
             }
             "--range" if memory_query => {
                 let value = next(args, &mut i, a)?;
@@ -625,49 +640,77 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let stream = input(&path)?;
     let (info, rows, total) = match name {
         "instructions" | "find-pc" => {
-            let mut total = 0;
-            let mut page = Vec::new();
-            let mut resolved = None;
-            let info = replay::read_evidence(stream, |g, state| {
-                if g.seq < from
-                    || g.seq > to
-                    || gaps_only && !g.gap
-                    || gap_reason_filter != 0 && g.gap_reason_mask & gap_reason_filter == 0
-                {
-                    return;
-                }
-                if name == "find-pc" {
-                    let matches = if let Some(module) = module {
-                        // Module metadata is complete before the first instruction.
-                        // Defer reporting selector errors until the stream is validated.
-                        resolved
-                            .get_or_insert_with(|| module_base(state, module, &offs))
-                            .as_ref()
-                            .is_ok_and(|base| {
-                                g.pc.checked_sub(*base)
-                                    .is_some_and(|off| offs.contains(&off))
-                            })
-                    } else {
-                        pcs.contains(&g.pc)
-                            || offs.contains(&g.pc.wrapping_sub(state.header.code_base))
-                    };
-                    if !matches {
+            let read_page = |stream, final_sites: Option<&Info>| {
+                let mut total = 0;
+                let mut page = Vec::new();
+                let mut resolved = None;
+                let mut partial_mnemonic = false;
+                let info = replay::read_evidence(stream, |g, state| {
+                    if g.seq < from
+                        || g.seq > to
+                        || gaps_only && !g.gap
+                        || gap_reason_filter != 0 && g.gap_reason_mask & gap_reason_filter == 0
+                    {
                         return;
                     }
-                }
-                if total >= offset && (page.len() as u64) < limit {
-                    page.push(Instruction {
-                        seq: g.seq,
-                        pc: g.pc,
-                        word: g.word,
-                        committed: g.committed,
-                        gap: g.gap,
-                        gap_count: g.gap_count,
-                        gap_reason_mask: g.gap_reason_mask,
-                    });
-                }
-                total += 1;
-            })?;
+                    if !mnemonics.is_empty() {
+                        let site = final_sites.unwrap_or(state).sites.get(&g.pc);
+                        let Some(site) = site else { return };
+                        let assembly = String::from_utf8_lossy(&site.text);
+                        let trimmed = assembly.trim_ascii_start();
+                        let mnemonic = trimmed.split_ascii_whitespace().next().unwrap_or_default();
+                        if final_sites.is_none()
+                            && mnemonic.len() == trimmed.len()
+                            && mnemonics.iter().any(|name| name.starts_with(mnemonic))
+                        {
+                            // A legal continuation may append to the first token later.
+                            partial_mnemonic = true;
+                        }
+                        if !mnemonics.contains(mnemonic) {
+                            return;
+                        }
+                    }
+                    if name == "find-pc" {
+                        let matches = if let Some(module) = module {
+                            // Module metadata is complete before the first instruction.
+                            // Defer reporting selector errors until the stream is validated.
+                            resolved
+                                .get_or_insert_with(|| module_base(state, module, &offs))
+                                .as_ref()
+                                .is_ok_and(|base| {
+                                    g.pc.checked_sub(*base)
+                                        .is_some_and(|off| offs.contains(&off))
+                                })
+                        } else {
+                            pcs.contains(&g.pc)
+                                || offs.contains(&g.pc.wrapping_sub(state.header.code_base))
+                        };
+                        if !matches {
+                            return;
+                        }
+                    }
+                    if total >= offset && (page.len() as u64) < limit {
+                        page.push(Instruction {
+                            seq: g.seq,
+                            pc: g.pc,
+                            word: g.word,
+                            committed: g.committed,
+                            gap: g.gap,
+                            gap_count: g.gap_count,
+                            gap_reason_mask: g.gap_reason_mask,
+                        });
+                    }
+                    total += 1;
+                })?;
+                Ok::<_, CliError>((info, page, total, resolved, partial_mnemonic))
+            };
+            let (info, page, total, resolved, partial_mnemonic) = read_page(stream, None)?;
+            let (info, page, total, resolved) = if partial_mnemonic {
+                let (info, page, total, resolved, _) = read_page(input(&path)?, Some(&info))?;
+                (info, page, total, resolved)
+            } else {
+                (info, page, total, resolved)
+            };
             let selected_base = module
                 .map(|module| resolved.unwrap_or_else(|| module_base(&info, module, &offs)))
                 .transpose()?;
@@ -690,6 +733,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             }
             if gap_reason_filter != 0 {
                 meta.insert("gap_reason_filter".into(), reasons(gap_reason_filter));
+            }
+            if !mnemonics.is_empty() {
+                meta.insert("mnemonics".into(), json!(mnemonics));
             }
             meta.extend(page_meta(args, total, rows.len(), offset));
             return Ok(response(rows, Value::Object(meta), json));

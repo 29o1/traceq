@@ -1,6 +1,8 @@
 execution-state stream queries (profile 2):
   traceq stat FILE [--json]
-  traceq instructions FILE [--from E --to E] [--gaps] [--gap-reasons] [--gap-reason REASON ...] [--limit N --offset N] [--json [--location]]
+  traceq instructions FILE [--from E --to E] [--mnemonic NAME ...] [--gaps] [--gap-reasons] [--gap-reason REASON ...] [--limit N --offset N] [--json [--location]]
+    Repeat --mnemonic to select any exact recorded mnemonic before pagination.
+    It combines with event and gap filters. The full trace is still validated.
     --gap-reasons adds the positioned gap_count and distinct gap_reasons for each instruction.
     --gap-reason matches any selected reason before pagination and includes all reasons for each match.
     Accepted reasons are unsupported, unconfirmed_store, foreign_thread, exclusive_region,

@@ -716,6 +716,50 @@ class StateStreamChecks(unittest.TestCase):
                     self.assertEqual(set(bad), {'error'})
                     self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
 
+    def test_instruction_mnemonics_filter_before_paging_and_validate_the_full_trace(self):
+        codes = {0x1000: (0x91000400, b'add x0, x0, #1'),
+                 0x1004: (0x4eb1b800, b'addv s0, v0.4s'),
+                 0x1008: (0x91000400, b'add\tx0, x0, #1')}
+        cases = self.base()
+        cases[4] = (1, 1, 0x1004, codes[0x1004][0], 0, 0, 0, 0)
+        gap = (3, 1, 0x1004, 0, 0, 0, 0, 1)
+        cases.insert(5, gap)
+        cases[-1] = (4, 3, 0, 0, 1, 0, 2, 2)
+        for chunked in (False, True):
+            path = self.artifact(cases, chunked, codes)
+            full = self.query(path, 'instructions', ['--location', '--gap-reasons'])
+            args = ['--location', '--gap-reasons', '--mnemonic', 'add', '--limit', '1']
+            first = self.query(path, 'instructions', args)
+            self.assertEqual(first['data'], full['data'][:1])
+            self.assertEqual((first['meta']['total'], first['meta']['mnemonics']), (2, ['add']))
+            next_argv = shlex.split(first['meta']['next'])
+            self.assertIn('--mnemonic', next_argv)
+            other = json.loads(subprocess.check_output([str(ROOT/'cli/traceq'), *next_argv[1:]], timeout=10))
+            self.assertEqual(other['data'], full['data'][2:])
+            combined = self.query(path, 'instructions', [*args, '--mnemonic', 'addv',
+                                                         '--mnemonic', 'add', '--gap-reason', 'unsupported'])
+            self.assertEqual(combined['data'], full['data'][1:2])
+            self.assertEqual(combined['meta']['mnemonics'], ['add', 'addv'])
+            empty = ['--mnemonic', 'ret', '--offset', '99']
+            self.assertEqual(self.query(path, 'instructions', empty)['data'], [])
+            self.assertEqual(self.query(path, 'instructions', ['--mnemonic', 'add x0'], ok=False)
+                             ['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for bad in (raw[:-1], raw + b'x'):
+                path.write_bytes(bad)
+                self.assertEqual(self.query(path, 'instructions', empty, ok=False)['error']['code'], 'TRACE_ERROR')
+
+            # A valid SITE continuation can finish the first token after its Exec group.
+            suffix = b'd x0, x0, #1'
+            payload = struct.unpack('<3Q', suffix.ljust(24, b'\0'))
+            continuation = (8, 2, 0x1000, codes[0x1000][0], len(suffix), *payload)
+            late_codes = {**codes, 0x1000: (codes[0x1000][0], b'ad')}
+            late = self.artifact([*cases[:5], continuation, *cases[5:]], chunked, late_codes)
+            filtered = self.query(late, 'instructions', ['--mnemonic', 'add'])
+            self.assertEqual([(row['ev'], row['text']) for row in filtered['data']],
+                             [(0, 'add x0, x0, #1'), (2, 'add\tx0, x0, #1')])
+            self.assertEqual(self.query(late, 'instructions', ['--mnemonic', 'ad'])['data'], [])
+
     def test_future_gap_does_not_erase_historical_write(self):
         events=self.base();events.insert(2,(2,0,0x1000,0x2000,1,0xab,0,1))
         events.insert(6,(3,1,0x1004,0,0,0,0,1));events[-1]=(4,3,0,1,1,0,2,2)
