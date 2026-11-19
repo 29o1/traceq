@@ -1183,6 +1183,47 @@ class StateStreamChecks(unittest.TestCase):
                 path.write_bytes(damage)
                 self.assertEqual(self.query(path, 'boundaries', empty, ok=False)['error']['code'], 'TRACE_ERROR')
 
+    def test_scope_boundaries_keep_late_pre_values_when_reentry_also_exits(self):
+        for chunked in (False, True):
+            events = []
+            for row in self.compact_events():
+                kind, ev, pc, *_ = row
+                if ev == 2 and kind in (2, 9):
+                    continue
+                if ev == 2 and kind == 1:
+                    row = (*row[:-1], 0)
+                if kind == 4:
+                    row = (4, 6, 0, 2, 3, 0, 2, 2)
+                events.append(row)
+                if kind == 11 and ev == 1:
+                    events.append((5, 1, pc, 0, 8, 0x11, 0, 1))
+                if kind == 12 and ev == 2:
+                    events.extend([
+                        (11, 2, pc, 0x3020, 1, pc + 4, 0, 1),
+                        (5, 2, pc, 0, 8, 0x22, 0, 1),
+                        (5, 2, pc, 64, 16, 0x33, 0x44, 1),
+                        (3, 2, pc, 0, 0, 0, 0, 6),
+                    ])
+                if kind == 1 and ev == 3:
+                    events.extend((5, 3, pc, slot, 8 if slot < 33 else 16, 0, 0, 1)
+                                  for slot in range(65))
+                    events.append((12, 3, pc, 2, 0, 0, 0, 1))
+            path = self.artifact(events, chunked)
+            regs = ['--reg', 'x0', '--reg', 'v31']
+            report = self.query(path, 'boundaries', regs)
+            first, second, terminal = report['data']
+            updated = {'x0': '0x22', 'v31': '0x440000000000000033'}
+            self.assertEqual((first['exit_ev'], first['reentry_ev']), (1, 2))
+            self.assertEqual(first['exit_registers']['x0'], '0x11')
+            self.assertEqual(first['reentry_registers'], updated)
+            self.assertEqual((second['exit_ev'], second['reentry_ev']), (2, 3))
+            self.assertEqual(second['exit_registers'], updated)
+            self.assertEqual(second['reentry_registers'], {'x0': '0x0', 'v31': '0x0'})
+            self.assertIsNone(terminal['reentry_ev'])
+            control = self.query(path, 'context',
+                                 ['--at-ev', '2', '--before', '0', '--after', '0', *regs])
+            self.assertEqual(control['data'][0]['pre'], updated)
+
     def test_scope_boundary_cannot_hide_missing_gap_or_reentry(self):
         for kind in (3,12,4):
             events=[e for e in self.boundary_events() if e[0]!=kind]
