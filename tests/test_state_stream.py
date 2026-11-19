@@ -663,6 +663,49 @@ class StateStreamChecks(unittest.TestCase):
                 error = self.query(path, 'mem-access', [*args, '--offset', '99', '--compact'], ok=False)['error']
                 self.assertEqual(error['code'], 'TRACE_ERROR')
 
+    def test_mem_access_source_table_preserves_named_rows_and_continuation(self):
+        for chunked in (False, True):
+            path = self.atomic_access_artifact(chunked)
+            options = ['--range', '0x2000,4', '--write', '--access-index']
+            table = ['--compact', '--source-table']
+            named = self.query(path, 'mem-access', options)
+            packed = self.query(path, 'mem-access', [*options, *table])
+            sources = [row['value_source'] for row in named['data']]
+            self.assertEqual(len(set(sources)), 2)
+            self.assertEqual(packed['meta']['mem_access_format'], 'columns-v3')
+            self.assertEqual(packed['meta']['columns'][-2:], ['access_index', 'value_source_ref'])
+            self.assertEqual(packed['meta']['value_source_table'], sources)
+            self.assertEqual(packed['data'], [[*(row[k] for k in packed['meta']['columns'][:-1]), ref]
+                                              for ref, row in enumerate(named['data'])])
+
+            first = self.query(path, 'mem-access', [*options, *table, '--limit', '1'])
+            argv = shlex.split(first['meta']['next'])
+            self.assertIn('--source-table', argv)
+            result = subprocess.run([str(ROOT/'cli/traceq'), *argv[1:]], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            second = json.loads(result.stdout)
+            self.assertEqual(second['data'][0][-2:], [named['data'][1]['access_index'], 0])
+            self.assertEqual(second['meta']['value_source_table'], sources[1:])
+            self.assertFalse(second['meta']['truncated'])
+
+            empty = [*options, *table, '--offset', '99']
+            packed = self.query(path, 'mem-access', empty)
+            self.assertEqual((packed['data'], packed['meta']['value_source_table']), ([], []))
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                bad = self.query(path, 'mem-access', empty, ok=False)
+                self.assertEqual(set(bad), {'error'})
+                self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
+
+            unknown = self.artifact(self.memory_access_events(), chunked)
+            opts = ['--range', '0x2000,16', '--read']
+            packed = self.query(unknown, 'mem-access', [*opts, *table])
+            self.assertNotIn('access_index', packed['meta']['columns'])
+            self.assertEqual(packed['data'][-1][-3:], [False, None, 0])
+            bad = self.query(unknown, 'mem-access', [*opts, '--source-table'], ok=False)
+            self.assertEqual(bad['error']['code'], 'ARGUMENT')
+
     def assert_mem_access_expands(self,packed,named):
         columns=['ev','pc','off','rw','addr','size','known','val']
         write_sources={r['value_source'] for r in named['data'] if r['rw']=='w'}
