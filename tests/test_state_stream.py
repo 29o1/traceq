@@ -248,6 +248,47 @@ class StateStreamChecks(unittest.TestCase):
                     error = self.query(path, 'find-pc', [*selectors, '--offset', '99'], ok=False)['error']
                     self.assertEqual(error['code'], 'TRACE_ERROR')
 
+    def test_find_pc_location_preserves_unknown_and_explicit_module_choice(self):
+        def module(base, size, name):
+            return (10, 0, base, size, len(name), *struct.unpack('<3Q', name.ljust(24, b'\0')))
+
+        metadata = [(13, 0, 0, 1, 0, 1, 0, 0),
+                    module(0x1000, 8, b'outer.so'), module(0x1004, 4, b'inner.so')]
+        for chunked in (False, True):
+            path = self.artifact([*metadata, *self.base()], chunked)
+            selectors = ['--addr', '0x1000', '--addr', '0x1004', '--addr', '0x1008']
+            plain = self.query(path, 'find-pc', selectors)
+            located = self.query(path, 'find-pc', [*selectors, '--location'])
+            self.assertEqual(located['meta'], plain['meta'])
+            self.assertEqual([{k: v for k, v in r.items() if k != 'location'} for r in located['data']],
+                             plain['data'])
+            self.assertEqual([r['location'] for r in located['data']], [
+                {'address': '0x1000', 'module': 'outer.so', 'module_base': '0x1000', 'offset': '0x0'},
+                {'address': '0x1004', 'module': None, 'module_base': None, 'offset': None},
+                {'address': '0x1008', 'module': None, 'module_base': None, 'offset': None},
+            ])
+            explicit = self.query(path, 'find-pc', ['--module', 'inner.so', '--off', '0', '--location'])
+            hit, = explicit['data']
+            self.assertEqual(hit['off'], '0x4')
+            self.assertEqual(hit['module_offset'], '0x0')
+            self.assertEqual(hit['location'], {'address': '0x1004', 'module': 'inner.so',
+                                                'module_base': '0x1004', 'offset': '0x0'})
+
+            page = self.query(path, 'find-pc', [*selectors, '--location', '--limit', '2'])
+            self.assertEqual(page['data'], located['data'][:2])
+            next_argv = shlex.split(page['meta']['next'])
+            self.assertIn('--location', next_argv)
+            result = subprocess.run([str(ROOT/'cli/traceq'), *next_argv[1:]], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(json.loads(result.stdout)['data'], located['data'][2:])
+            self.assertEqual(self.query(path, 'instructions', ['--location'], ok=False)['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damaged in (raw[:-1], raw + b'x'):
+                path.write_bytes(damaged)
+                error = self.query(path, 'find-pc', [*selectors, '--location', '--offset', '99'], ok=False)
+                self.assertEqual(set(error), {'error'})
+                self.assertEqual(error['error']['code'], 'TRACE_ERROR')
+
     def test_memory_commands_reject_ignored_time_filters(self):
         path = self.artifact(self.compact_events(), chunked=True)
         args = ['--range','0x2000,1']
