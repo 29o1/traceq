@@ -219,6 +219,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut offs = vec![];
     let mut module = None;
     let mut include_location = false;
+    let mut target_module = None;
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
@@ -304,6 +305,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--location" if name == "find-pc" && json => include_location = true,
             "--location" => {
                 return Err("--location requires find-pc --json".to_string().into());
+            }
+            "--target-module" if name == "boundaries" => {
+                let value = next(args, &mut i, a)?;
+                if value.is_empty() || target_module.replace(value).is_some() {
+                    return Err("boundaries requires one nonempty --target-module NAME"
+                        .to_string()
+                        .into());
+                }
             }
             "--read" => read_only = true,
             "--write" => write_only = true,
@@ -611,7 +620,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             let info = replay::read_selected(
                 stream,
                 |seq| (from..=through).contains(&seq),
-                |g, _| {
+                |g, state| {
                     if g.reentered
                         && let Some(exit) = pending.take()
                     {
@@ -620,7 +629,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                         }
                         total += 1;
                     }
-                    if g.exit.transfer != 0 && g.seq <= to {
+                    if g.exit.transfer != 0
+                        && g.seq <= to
+                        && target_module.is_none_or(|name| {
+                            containing_modules(g.exit.target, state)
+                                .next()
+                                .is_some_and(|base| state.modules[&base].name == name.as_bytes())
+                        })
+                    {
                         pending = Some(g.clone());
                     }
                 },
@@ -681,6 +697,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total, rows.len(), offset));
     if name == "boundaries" {
+        if let Some(name) = target_module {
+            meta.insert("target_module".into(), json!(name));
+        }
         meta.insert(
             "pairing".into(),
             json!("each exit to next observed in-scope instruction; not call/return matching"),

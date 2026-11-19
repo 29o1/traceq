@@ -1,7 +1,9 @@
 execution-state stream queries (profile 2):
   traceq stat FILE [--json]
   traceq instructions FILE [--from E --to E] [--gaps] [--limit N --offset N] [--json]
-  traceq boundaries FILE [--from E --to E] [--reg x0]... [--limit N --offset N] [--json]
+  traceq boundaries FILE [--from E --to E] [--target-module NAME] [--reg x0]... [--limit N --offset N] [--json]
+    --target-module selects exits by the exact recorded target module name.
+    Pagination counts the matches. Capture totals and reentry evidence still apply.
   traceq find-pc FILE (--off O | --addr A)... [--limit N] [--json]
   traceq find-pc FILE --module NAME --off O [--off O ...] [--limit N] [--json]
     --module selects one exact recorded module name. off stays capture-relative.
