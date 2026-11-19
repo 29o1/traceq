@@ -156,11 +156,13 @@ def expand_mem_state(document):
     meta = document['meta']
     if 'mem_state_format' not in meta:
         return document
-    with_access_source = meta['mem_state_format'] == 'hex-v2'
-    columns = ['observed_ev', 'pc_index']
-    if with_access_source:
-        columns.extend(['observed_rw', 'observed_access_index'])
-    if meta['mem_state_format'] not in ('hex-v1', 'hex-v2') or meta.get('source_columns') != columns:
+    fmt = meta['mem_state_format']
+    source_runs = fmt == 'hex-runs-v1'
+    basic = ['observed_ev', 'pc_index']
+    extended = [*basic, 'observed_rw', 'observed_access_index']
+    with_access_source = fmt == 'hex-v2' or (source_runs and meta.get('source_columns') == extended)
+    columns = extended if with_access_source else basic
+    if fmt not in ('hex-v1', 'hex-v2', 'hex-runs-v1') or meta.get('source_columns') != columns:
         raise ValueError('Unsupported memory state format or source columns')
     table = meta.get('pc_table')
     if not isinstance(table, list) or len(table) > 4096 or not isinstance(document.get('data'), list):
@@ -178,14 +180,25 @@ def expand_mem_state(document):
         address(pc['pc']); address(pc['pc_offset'])
 
     def expand(frame):
-        if not isinstance(frame, dict) or set(frame) != {'address', 'size', 'data_hex', 'sources'}:
+        source_field = 'source_runs' if source_runs else 'sources'
+        if not isinstance(frame, dict) or set(frame) != {'address', 'size', 'data_hex', source_field}:
             raise ValueError('Invalid memory state frame')
         base, size = address(frame['address']), frame['size']
-        text, sources = frame['data_hex'], frame['sources']
+        text, sources = frame['data_hex'], frame[source_field]
         if type(size) is not int or not 0 <= size <= 4096 or base + size >= 1 << 64 or \
                 not isinstance(text, str) or len(text) != 2 * size or \
                 any(c not in '0123456789abcdef' for c in text) or \
-                not isinstance(sources, list) or len(sources) != size:
+                not isinstance(sources, list):
+            raise ValueError('Invalid memory state bytes or source count')
+        if source_runs:
+            expanded = []
+            for run in sources:
+                if not isinstance(run, list) or len(run) != 2 or type(run[0]) is not int or \
+                        not 1 <= run[0] <= size - len(expanded):
+                    raise ValueError('Invalid memory state source run')
+                expanded.extend([run[1]] * run[0])
+            sources = expanded
+        if len(sources) != size:
             raise ValueError('Invalid memory state bytes or source count')
         raw = bytes.fromhex(text)
         rows = []

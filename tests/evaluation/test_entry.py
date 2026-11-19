@@ -31,6 +31,22 @@ def fixture(path):
 
 
 class Entry(unittest.TestCase):
+    def test_mem_state_source_runs_expand_exactly_and_validate_lengths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'fixture.gtsw'
+            fixture(path)
+            argv = [ROOT / 'cli/traceq', 'mem-state', path, '--range', '0x2000,2',
+                    '--at-ev', '0', '--phase', 'post', '--compact', '--json']
+            for provenance in ([], ['--access-source']):
+                original = json.loads(subprocess.check_output([*argv, *provenance], timeout=10))
+                packed = json.loads(subprocess.check_output([*argv, *provenance, '--source-runs'], timeout=10))
+                self.assertEqual(query.expand_mem_state(packed), query.expand_mem_state(original))
+                run, = packed['data'][0]['source_runs']
+                for invalid_length in (0, 1, 3, True):
+                    run[0] = invalid_length
+                    with self.assertRaisesRegex(ValueError, 'run|source count'):
+                        query.expand_mem_state(packed)
+
     def test_extended_adapter_check_requires_its_frozen_trace(self):
         result = subprocess.run(
             [sys.executable, Path(__file__).with_name('check_adapter.py')],
