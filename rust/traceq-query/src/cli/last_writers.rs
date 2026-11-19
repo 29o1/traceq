@@ -9,12 +9,14 @@ struct Selection {
     pub base: u64,
     pub len: u64,
     pub at: Option<u64>,
+    pub checkpoints: Vec<u64>,
     pub limit: u64,
     pub offset: u64,
     pub compact: bool,
     pub runs: bool,
 }
 
+#[derive(Clone)]
 struct Gap {
     seq: u64,
     pc: u64,
@@ -63,6 +65,7 @@ impl CompactGaps {
     }
 }
 
+#[derive(Clone)]
 struct ObservedWrite {
     value: u8,
     seq: u64,
@@ -77,6 +80,7 @@ impl ObservedWrite {
     }
 }
 
+#[derive(Clone)]
 struct History {
     bytes: Vec<Option<ObservedWrite>>,
     epoch: u64,
@@ -92,7 +96,7 @@ impl History {
         }
     }
 
-    fn observe(&mut self, group: replay::EvidenceGroup<'_>, base: u64) {
+    fn observe(&mut self, group: &replay::EvidenceGroup<'_>, base: u64) {
         // A reentry can annotate an earlier exit, but does not restore the bytes.
         if group.reentered {
             for write in self.bytes.iter_mut().flatten() {
@@ -219,6 +223,30 @@ impl History {
         }
         rows
     }
+
+    fn page(
+        &self,
+        base: u64,
+        info: &Info,
+        selection: &Selection,
+        gaps: &mut CompactGaps,
+    ) -> Vec<Value> {
+        if selection.runs {
+            return self.runs(base, info, gaps);
+        }
+        self.bytes
+            .iter()
+            .enumerate()
+            .map(|(index, write)| {
+                self.row(
+                    base + index as u64,
+                    write.as_ref(),
+                    info,
+                    selection.compact.then_some(&mut *gaps),
+                )
+            })
+            .collect()
+    }
 }
 
 fn profile2(
@@ -229,12 +257,28 @@ fn profile2(
 ) -> Result<Response, CliError> {
     let start = selection.offset.min(selection.len);
     let shown = selection.limit.min(selection.len - start);
+    let count = selection.checkpoints.len();
+    if shown * count as u64 > 4096 {
+        return Err("checkpoint page exceeds 4096 byte cells; reduce --limit"
+            .to_string()
+            .into());
+    }
     let page_base = selection.base + start;
     let mut history = History::new(shown as usize);
+    let mut checkpoints = selection.checkpoints.clone();
+    checkpoints.sort_unstable();
+    checkpoints.dedup();
+    let last_cutoff = checkpoints.last().copied().or(selection.at);
+    let mut snapshots = Vec::with_capacity(checkpoints.len());
+    let mut remaining = checkpoints.into_iter().peekable();
     let range_ok = stream.header.contains_data(selection.base, selection.len);
     let info = replay::read_evidence(stream, |group, _| {
-        if range_ok && shown != 0 && selection.at.is_none_or(|at| group.seq <= at) {
-            history.observe(group, page_base);
+        if range_ok && shown != 0 && last_cutoff.is_none_or(|at| group.seq <= at) {
+            history.observe(&group, page_base);
+        }
+        if remaining.next_if_eq(&group.seq).is_some() {
+            // Later reentry annotations must not change this cutoff's evidence.
+            snapshots.push((group.seq, history.clone()));
         }
     })?;
     if !range_ok {
@@ -242,40 +286,18 @@ fn profile2(
             .to_string()
             .into());
     }
-    if selection.at.is_some_and(|at| at >= info.instructions) {
+    if last_cutoff.is_some_and(|at| at >= info.instructions) {
         return Err("requested instruction is outside the capture"
             .to_string()
             .into());
     }
-    let mut gaps = CompactGaps::default();
-    let rows = if selection.runs {
-        history.runs(page_base, &info, &mut gaps)
-    } else {
-        history
-            .bytes
-            .iter()
-            .enumerate()
-            .map(|(i, write)| {
-                history.row(
-                    page_base + i as u64,
-                    write.as_ref(),
-                    &info,
-                    selection.compact.then_some(&mut gaps),
-                )
-            })
-            .collect()
-    };
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(
         args,
         selection.len,
-        history.bytes.len(),
+        shown as usize,
         selection.offset,
     ));
-    meta.insert(
-        "as_of_ev".into(),
-        json!(selection.at.or_else(|| info.instructions.checked_sub(1))),
-    );
     meta.insert(
         "state_position".into(),
         json!("after_recorded_accesses_at_event"),
@@ -283,13 +305,53 @@ fn profile2(
     if selection.runs {
         meta.insert("last_writers_format".into(), json!("runs-v1"));
     }
-    if selection.compact || selection.runs {
-        meta.insert("located_gaps".into(), Value::Array(gaps.rows));
-    }
+    let compact_gaps = selection.compact || selection.runs;
+    let rows = if count == 0 {
+        meta.insert(
+            "as_of_ev".into(),
+            json!(selection.at.or_else(|| info.instructions.checked_sub(1))),
+        );
+        let mut gaps = CompactGaps::default();
+        let rows = history.page(page_base, &info, &selection, &mut gaps);
+        if compact_gaps {
+            meta.insert("located_gaps".into(), Value::Array(gaps.rows));
+        }
+        rows
+    } else {
+        meta.extend(Map::from_iter([
+            ("writer_history_format".into(), json!("checkpoints-v1")),
+            ("pagination_unit".into(), json!("bytes_per_checkpoint")),
+            ("checkpoints".into(), json!(count)),
+            ("byte_offset".into(), json!(selection.offset)),
+            ("byte_limit".into(), json!(selection.limit)),
+            ("total".into(), json!(selection.len * count as u64)),
+            ("shown".into(), json!(shown * count as u64)),
+            ("validation".into(), json!("one stream through END")),
+        ]));
+        selection
+            .checkpoints
+            .iter()
+            .map(|&ev| {
+                let index = snapshots
+                    .binary_search_by_key(&ev, |(seq, _)| *seq)
+                    .expect("validated checkpoint was observed");
+                let mut gaps = CompactGaps::default();
+                let rows = snapshots[index]
+                    .1
+                    .page(page_base, &info, &selection, &mut gaps);
+                let mut point = json!({"ev": ev});
+                point["data"] = Value::Array(rows);
+                if compact_gaps {
+                    point["located_gaps"] = Value::Array(gaps.rows);
+                }
+                point
+            })
+            .collect()
+    };
     Ok(response(rows, Value::Object(meta), json))
 }
 
-const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--at-seq N] [--limit N] [--offset N] [--compact | --runs] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  JSON meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n  --runs --json sets meta.last_writers_format to runs-v1 for profile 2.\n  Each row has address, size, known and last_observed_write. Adjacent bytes from\n  one writer event share its provenance and a data_hex string in address order.\n  A null last_observed_write means no retained write. Only known runs have a\n  current value equal to data_hex. Gap refs are page-local. Limits, offsets,\n  meta.shown and meta.total count bytes, including unknowns.\n";
+const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--at-seq E | --checkpoint E ...] [--limit N] [--offset N] [--compact | --runs] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  For a single cutoff, JSON meta.as_of_ev gives its event or null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n  --runs --json sets meta.last_writers_format to runs-v1 for profile 2.\n  Each row has address, size, known and last_observed_write. Adjacent bytes from\n  one writer event share its provenance and a data_hex string in address order.\n  A null last_observed_write means no retained write. Only known runs have a\n  current value equal to data_hex. Gap refs are page-local. Limits, offsets,\n  meta.shown and meta.total count bytes, including unknowns.\n  --checkpoint E (profile 2 JSON) returns 1..64 after-accesses cutoffs in one scan,\n  in request order, including duplicates. meta.writer_history_format is checkpoints-v1.\n  Each cutoff has ev, data and its own located_gaps for\n  --compact or --runs. Offset and limit apply to each cutoff, with at most\n  4096 byte cells across the whole page. meta.shown and meta.total sum those cutoffs.\n";
 fn p1_failure(code: &str, message: impl Into<String>, status: i32, json_output: bool) -> Response {
     let message = message.into();
     if json_output {
@@ -311,6 +373,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut path = None;
     let mut range = None;
     let mut at = None;
+    let mut checkpoints = Vec::new();
     let mut use_at_ev = false;
     let (mut limit, mut offset) = (20, 0);
     let mut compact = false;
@@ -334,6 +397,12 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--at-ev" | "--at-seq" => {
                 at = Some(parse_u64(next(args, &mut i, flag)?, false)?);
                 use_at_ev |= flag == "--at-ev";
+            }
+            "--checkpoint" => {
+                if checkpoints.len() == 64 {
+                    return Err("at most 64 checkpoints per query".to_string().into());
+                }
+                checkpoints.push(parse_u64(next(args, &mut i, flag)?, false)?);
             }
             "--phase" => {
                 return Err("last-writers selects state after recorded accesses; use mem-state --checkpoint E:pre for pre-instruction state".to_string().into());
@@ -360,6 +429,13 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             .to_string()
             .into());
     }
+    if !checkpoints.is_empty() && (!json || at.is_some()) {
+        return Err(
+            "--checkpoint requires --json and cannot mix with --at-seq or --at-ev"
+                .to_string()
+                .into(),
+        );
+    }
     let Ok(file) = File::open(path) else {
         return Ok(p1_failure("OPEN", format!("cannot open {path}"), 1, json));
     };
@@ -372,6 +448,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         base,
         len,
         at,
+        checkpoints,
         limit,
         offset,
         compact,
@@ -394,6 +471,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             selection,
             json,
         );
+    }
+    if !selection.checkpoints.is_empty() {
+        return Err("--checkpoint requires last-writers --json (profile 2)"
+            .to_string()
+            .into());
     }
     if runs {
         return Err("--runs requires last-writers --json (profile 2)"
