@@ -1,66 +1,47 @@
-# traceq — Query ARM64 Instruction Traces
+# traceq — ARM64 Capture and Evidence Queries
 
 [简体中文](README.zh-CN.md)
 
-traceq converts [GumTrace](https://github.com/lidongyooo/GumTrace) ARM64 logs into
-compact `.gtb` binaries. Use the `gt` CLI to query execution, reconstruct observed
-state, and trace data dependencies offline.
+traceq captures ARM64 execution as structured GTSW/GTSC streams. The CLI queries
+them locally and returns bounded evidence with provenance, including instruction
+windows, register snapshots and observed memory accesses. The Android ARM64 SDK
+and macOS ARM64 host harness share the trace format. [Capture builds and SDK](capture/traceq/README.md)
 
-## Design Philosophy
+## Quick start
 
-Raw execution traces are massive (often millions of instructions and multiple gigabytes).
-Dumping raw logs into an LLM burns through token budgets, exceeds context windows,
-and dilutes attention with irrelevant execution noise.
+To build the Rust CLI, use `make`, Python 3.9 or newer, and `rustup` to
+prepare the pinned toolchain.
 
-**traceq keeps deterministic computation local.**
-
-Filtering, memory reconstruction, and dataflow correlation happen entirely on the local
-machine. traceq returns only the **smallest sufficient evidence** needed to answer a question
-or reach a conclusion. This reduces token consumption and turnaround time while strictly
-preserving provenance, truncation markers, and unknown-state boundaries.
-
-## Features
-
-| Commands | Description |
-|---|---|
-| `stat`, `find-pc`, `find-value` | Inspect trace metadata; locate instructions by address or module offset; search runtime values |
-| `mem-access`, `mem-state` | Query memory reads/writes; reconstruct observed memory buffers at any event |
-| `calls`, `calltree` | Recover runtime function calls, arguments, and annotated call trees |
-| `taint` | Trace register and memory data dependencies forward or backward |
-| `fold`, `diff` | Detect execution loops; identify the first execution divergence between two runs |
-| `export` | Export bounded slices as compact text, streaming JSONL, or upstream log format |
-
-- **Native Structured Output**: All queries support `--json` (formatted as `{"data": [...], "meta": {...}}`), designed for scripting and LLM function calling.
-- **Bounded Context**: Strict pagination controls (`--limit`, `--last`) with optional surrounding context (`--context N`) around matching events.
-- **Fast In-Memory Scanning**: Directly scans the loaded `.gtb` event buffer without requiring external databases or indexing steps.
-
-## Quick Start
-
-Requires macOS or Linux, `make`, and a C++17 compiler.
-
-```bash
+```sh
 git clone https://github.com/29o1/traceq.git
 cd traceq
+make deps-cli
 make
-
-# 1. Import a trace (using the included sample or your own GumTrace log)
-./cli/gt import bench/traces/memcpy_device.log -o trace.gtb
-
-# 2. Inspect trace metadata and find the entry point
-./cli/gt stat trace.gtb --json
-
-# 3. Query instruction execution at an offset, with 1 line of nearby context
-./cli/gt find-pc trace.gtb --mod libc.so --off 0x57490 --limit 1 --context 1 --json
 ```
 
-Replace the module name and offset with values from `stat`'s `first_at` field.
-Run `gt <command> --help` for full command parameters. Optionally run `make install`
-to install `gt` to `~/.local/bin`.
+Use a profile 2 capture for the execution-state queries below. Choose the
+instruction offset, event IDs and memory range from your capture.
 
-## Output Semantics
+```sh
+./cli/traceq stat capture.gtsw --json
+./cli/traceq find-pc capture.gtsw --off 0x0 --limit 1 --json
+./cli/traceq context capture.gtsw --at-ev 0 --at-ev 2 --before 1 --after 1 --json
+./cli/traceq last-writers capture.gtsw --range 0x2000,16 --json
+```
 
-To provide reliable, hallucination-resistant evidence boundaries for agents and automated workflows:
+Use `./cli/traceq --help` and `./cli/traceq COMMAND --help` for available options.
+`make install` installs `traceq` in `~/.local/bin` by default.
+In Codex, use `$traceq` for capture and query guidance. [TraceQ skill](.agents/skills/traceq/SKILL.md)
+For local capture and query regressions on macOS ARM64, run `make check` in a Git checkout.
 
-- **Data & Metadata Separation**: JSON queries return a single `{"data": [...], "meta": {...}}` document. `meta` reports result counts, a `truncated` boolean, and a `next` command for pagination.
-- **Explicit Unknown Memory**: In `mem-state`, unobserved bytes are padded with `00` and explicitly flagged by the `unknown` bitmask, preventing unobserved buffers from being mistaken for zero-initialized memory. Stale register values are invalidated when unobserved writes occur.
-- **Bounded Taint Coverage**: `taint` tracks dependency propagation and reports `partial: true` alongside a `stop` reason when analysis encounters trace boundaries.
+## Queries
+
+| Commands | Evidence |
+| --- | --- |
+| `stat`, `instructions`, `find-pc`, `find-value` | Capture metadata, instruction records, PC and value matches |
+| `context`, `reg-state`, `boundaries` | Event windows, register snapshots and scope transitions |
+| `mem-access`, `mem-state`, `last-writers` | Observed reads and writes, memory snapshots and the last observed write per byte |
+
+`context` gathers multiple event windows in one validated scan. Queries validate
+the complete stream and report gaps and unknown values explicitly. JSON results
+contain `data` and `meta`. Paginated results include `meta.truncated` and `meta.next`.

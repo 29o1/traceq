@@ -6,7 +6,7 @@ Prefer GitHub private vulnerability reporting when it is available. Otherwise,
 open an issue asking for a private contact channel, without including exploit
 details or sensitive trace data in the public issue.
 
-Relevant reports include memory-safety bugs in `.log` or `.gtb` parsing,
+Relevant reports include memory-safety bugs in GTSW or GTSC parsing,
 resource-exhaustion paths that bypass documented limits, and unsafe handling of
 output paths. Please include a minimal, non-sensitive reproducer when possible.
 

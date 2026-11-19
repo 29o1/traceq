@@ -1,7 +1,8 @@
-# Git source releases contain the CLI, the Android SDK and their build inputs.
+# Export the CLI, Android SDK, skill, usage docs and build inputs.
 /evaluation export-ignore
 /tests export-ignore
 /release export-ignore
 /rust/*/examples export-ignore
 /rust/*/tests export-ignore
+/AGENTS.md export-ignore
 /DEVELOPMENT.md export-ignore

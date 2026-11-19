@@ -97,7 +97,8 @@ Git 提交记录源码进度，已接受版本由验收记录关联到提交及�
 
 `.gitattributes` 从提交归档排除 `tests/`、`evaluation/`、`release/` 及开发文档。`.gitignore` 将构建缓存、二进制、trace、运行记录和隔离实验留在本地。
 忽略规则不影响已跟踪文件，应结合 `git ls-files -ci --exclude-standard` 和 `git diff --cached` 检查。
-`make check-source-release` 默认检查 `HEAD`，也可以显式指定 `RELEASE_REF`。`make source-release` 要求填写已验收的提交或标签，可用 `RELEASE_ARCHIVE` 指定输出路径。归档从选定提交读取内容，工作区改动继续留在本地。
+`make check-source-release` 默认检查 `HEAD`，也可以显式指定 `RELEASE_REF`。检查先核对该提交的全部 Git 路径，再核对归档。评测脚本放在 `evaluation/`，回归放在 `tests/` 或正式 crate 的独立测试／示例目录。新增正式构建脚本或其他构建输入时，须在 [源码发布检查](../release/source_archive.py) 中声明。
+`make source-release` 要求填写已验收的提交或标签，可用 `RELEASE_ARCHIVE` 指定输出路径。归档从选定提交读取内容，工作区改动继续留在本地。
 发布包包含 CLI、Android SDK 和共享构建输入。导出后应在解压目录验证构建，完整 checkout 才提供测试与评测命令。
 
 历史失败、冻结二进制及诊断候选继续保存在本地产物目录。诊断候选通过相关验收并正式切换之前，验收记录仍引用已接受的 SDK／CLI 身份。

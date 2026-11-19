@@ -28,10 +28,12 @@ class SourceRelease(unittest.TestCase):
         (self.root / '.gitattributes').write_text(
             '/tests export-ignore\n/evaluation export-ignore\n/release export-ignore\n'
             '/rust/*/tests export-ignore\n/rust/*/examples export-ignore\n'
+            '/AGENTS.md export-ignore\n/DEVELOPMENT.md export-ignore\n'
         )
         (self.root / '.gitignore').write_text('/build/\n*.gtsw\n')
         self.dev_paths = ('tests/regression.py', 'evaluation/runner.rs', 'release/source_archive.py',
-                          'rust/traceq-core/tests/units.rs', 'rust/traceq-core/examples/sample.rs')
+                          'rust/traceq-core/tests/units.rs', 'rust/traceq-core/examples/sample.rs',
+                          'AGENTS.md', 'DEVELOPMENT.md')
         for name in self.dev_paths:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,6 +88,44 @@ class SourceRelease(unittest.TestCase):
         self.commit()
         self.assertEqual(self.package(), 1)
         self.assertFalse(self.output.exists())
+
+    def test_misplaced_development_script_is_rejected(self):
+        (self.root / 'tools/benchmark.py').write_text('development only\n')
+        self.commit()
+        self.assertEqual(self.package(), 1)
+        self.assertFalse(self.output.exists())
+
+    def test_forced_git_add_of_a_trace_in_tests_is_rejected(self):
+        trace = 'tests/private.gtsw'
+        (self.root / trace).write_bytes(b'synthetic trace')
+        self.git('add', '-f', '--', trace)
+        self.commit()
+        self.assertEqual(self.package(), 1)
+        self.assertFalse(self.output.exists())
+
+    def test_includes_sdk_documentation_when_committed(self):
+        name = 'capture/traceq/README.md'
+        (self.root / name).write_text('Android SDK documentation\n')
+        self.commit()
+        self.assertEqual(self.package(), 0)
+        with tarfile.open(self.output) as archive:
+            self.assertEqual(archive.extractfile(name).read(), b'Android SDK documentation\n')
+
+    def test_includes_traceq_skill_when_committed(self):
+        skill_files = (
+            'SKILL.md', 'agents/openai.yaml', 'references/analysis.md', 'references/capture.md',
+        )
+        skill = self.root / '.agents/skills/traceq'
+        for name in skill_files:
+            path = skill / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name + '\n')
+        self.commit()
+        self.assertEqual(self.package(), 0)
+        with tarfile.open(self.output) as archive:
+            for name in skill_files:
+                member = f'.agents/skills/traceq/{name}'
+                self.assertEqual(archive.extractfile(member).read(), (name + '\n').encode())
 
     def test_symlink_to_outside_the_snapshot_is_rejected(self):
         path = self.root / 'tools/build_capture.py'

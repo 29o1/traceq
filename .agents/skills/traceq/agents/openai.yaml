@@ -1,0 +1,4 @@
+interface:
+  display_name: "TraceQ"
+  short_description: "采集和查询 Android ARM64 结构化执行轨迹"
+  default_prompt: "使用 $traceq 从结构化 trace 中查证这个执行问题。"
