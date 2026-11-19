@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs::File,
     io::{BufReader, Read},
+    ops::Range,
 };
 use traceq_core::{
     memory::{self, Checkpoint, Phase},
@@ -119,6 +120,24 @@ fn parse_range(text: &str) -> Result<(u64, u64), CliError> {
             .into());
     }
     Ok((base, len))
+}
+
+fn range_union(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+    if ranges.len() < 2 {
+        return ranges;
+    }
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut union: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(previous) = union.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            union.push(range);
+        }
+    }
+    union
 }
 
 const RANGE_HINT: &str = "use --range BASE,LEN (LEN is bytes), e.g. --range 0x1000,16";

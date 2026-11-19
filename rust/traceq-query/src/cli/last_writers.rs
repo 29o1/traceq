@@ -6,8 +6,7 @@ use std::{
 use traceq_core::wire::{CHUNK_MAGIC, Event, FLAT_MAGIC};
 
 struct Selection {
-    pub base: u64,
-    pub len: u64,
+    pub ranges: Vec<Range<u64>>,
     pub at: Option<u64>,
     pub checkpoints: Vec<u64>,
     pub limit: u64,
@@ -82,21 +81,23 @@ impl ObservedWrite {
 
 #[derive(Clone)]
 struct History {
+    base: u64,
     bytes: Vec<Option<ObservedWrite>>,
     epoch: u64,
     last_gap_seq: u64,
 }
 
 impl History {
-    fn new(len: usize) -> Self {
+    fn new(base: u64, len: usize) -> Self {
         Self {
+            base,
             bytes: (0..len).map(|_| None).collect(),
             epoch: 0,
             last_gap_seq: 0,
         }
     }
 
-    fn observe(&mut self, group: &replay::EvidenceGroup<'_>, base: u64) {
+    fn observe(&mut self, group: &replay::EvidenceGroup<'_>) {
         // A reentry can annotate an earlier exit, but does not restore the bytes.
         if group.reentered {
             for write in self.bytes.iter_mut().flatten() {
@@ -123,6 +124,7 @@ impl History {
                 }
             }
         }
+        let base = self.base;
         let end = base + self.bytes.len() as u64;
         for access in group.accesses.iter().filter(|a| a.kind == Kind::Write) {
             for address in base.max(access.address)..end.min(access.address + access.size) {
@@ -195,11 +197,11 @@ impl History {
         evidence
     }
 
-    fn runs(&self, mut address: u64, info: &Info, gaps: &mut CompactGaps) -> Vec<Value> {
+    fn append_runs(&self, info: &Info, gaps: &mut CompactGaps, rows: &mut Vec<Value>) {
         // Writes from the same event share the PC and the same subsequent gap
         // history. Group only adjacent bytes and only within the current page.
         let event = |byte: &Option<ObservedWrite>| byte.as_ref().map(|write| write.seq);
-        let mut rows = Vec::new();
+        let mut address = self.base;
         for run in self.bytes.chunk_by(|a, b| event(a) == event(b)) {
             let first = run[0].as_ref();
             let evidence = if let Some(write) = first {
@@ -221,31 +223,27 @@ impl History {
             }));
             address += run.len() as u64;
         }
-        rows
     }
 
-    fn page(
+    fn append_page(
         &self,
-        base: u64,
         info: &Info,
         selection: &Selection,
         gaps: &mut CompactGaps,
-    ) -> Vec<Value> {
+        rows: &mut Vec<Value>,
+    ) {
         if selection.runs {
-            return self.runs(base, info, gaps);
+            self.append_runs(info, gaps, rows);
+            return;
         }
-        self.bytes
-            .iter()
-            .enumerate()
-            .map(|(index, write)| {
-                self.row(
-                    base + index as u64,
-                    write.as_ref(),
-                    info,
-                    selection.compact.then_some(&mut *gaps),
-                )
-            })
-            .collect()
+        rows.extend(self.bytes.iter().enumerate().map(|(index, write)| {
+            self.row(
+                self.base + index as u64,
+                write.as_ref(),
+                info,
+                selection.compact.then_some(&mut *gaps),
+            )
+        }));
     }
 }
 
@@ -255,30 +253,55 @@ fn profile2(
     selection: Selection,
     json: bool,
 ) -> Result<Response, CliError> {
-    let start = selection.offset.min(selection.len);
-    let shown = selection.limit.min(selection.len - start);
+    let ranges = range_union(selection.ranges.clone());
+    let total = ranges
+        .iter()
+        .map(|range| range.end - range.start)
+        .sum::<u64>();
+    let start = selection.offset.min(total);
+    let shown = selection.limit.min(total - start);
     let count = selection.checkpoints.len();
     if shown * count as u64 > 4096 {
         return Err("checkpoint page exceeds 4096 byte cells; reduce --limit"
             .to_string()
             .into());
     }
-    let page_base = selection.base + start;
-    let mut history = History::new(shown as usize);
+    let mut skip = start;
+    let mut remaining_bytes = shown;
+    let mut histories = Vec::new();
+    for range in &ranges {
+        let len = range.end - range.start;
+        let offset = skip.min(len);
+        skip -= offset;
+        let take = remaining_bytes.min(len - offset);
+        if take != 0 {
+            histories.push(History::new(range.start + offset, take as usize));
+            remaining_bytes -= take;
+        }
+        if remaining_bytes == 0 {
+            break;
+        }
+    }
     let mut checkpoints = selection.checkpoints.clone();
     checkpoints.sort_unstable();
     checkpoints.dedup();
     let last_cutoff = checkpoints.last().copied().or(selection.at);
     let mut snapshots = Vec::with_capacity(checkpoints.len());
     let mut remaining = checkpoints.into_iter().peekable();
-    let range_ok = stream.header.contains_data(selection.base, selection.len);
+    let range_ok = ranges.iter().all(|range| {
+        stream
+            .header
+            .contains_data(range.start, range.end - range.start)
+    });
     let info = replay::read_evidence(stream, |group, _| {
-        if range_ok && shown != 0 && last_cutoff.is_none_or(|at| group.seq <= at) {
-            history.observe(&group, page_base);
+        if range_ok && last_cutoff.is_none_or(|at| group.seq <= at) {
+            for history in &mut histories {
+                history.observe(&group);
+            }
         }
         if remaining.next_if_eq(&group.seq).is_some() {
             // Later reentry annotations must not change this cutoff's evidence.
-            snapshots.push((group.seq, history.clone()));
+            snapshots.push((group.seq, histories.clone()));
         }
     })?;
     if !range_ok {
@@ -292,12 +315,7 @@ fn profile2(
             .into());
     }
     let mut meta = capture_meta(&info);
-    meta.extend(page_meta(
-        args,
-        selection.len,
-        shown as usize,
-        selection.offset,
-    ));
+    meta.extend(page_meta(args, total, shown as usize, selection.offset));
     meta.insert(
         "state_position".into(),
         json!("after_recorded_accesses_at_event"),
@@ -305,16 +323,34 @@ fn profile2(
     if selection.runs {
         meta.insert("last_writers_format".into(), json!("runs-v1"));
     }
+    if selection.ranges.len() > 1 {
+        meta.insert(
+            "writer_ranges".into(),
+            json!(
+                ranges
+                    .iter()
+                    .map(|range| json!({"base":hx(range.start), "size":range.end-range.start}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     let compact_gaps = selection.compact || selection.runs;
+    let render = |histories: &[History]| {
+        let mut gaps = CompactGaps::default();
+        let mut rows = Vec::new();
+        for history in histories {
+            history.append_page(&info, &selection, &mut gaps, &mut rows);
+        }
+        (rows, gaps.rows)
+    };
     let rows = if count == 0 {
         meta.insert(
             "as_of_ev".into(),
             json!(selection.at.or_else(|| info.instructions.checked_sub(1))),
         );
-        let mut gaps = CompactGaps::default();
-        let rows = history.page(page_base, &info, &selection, &mut gaps);
+        let (rows, gaps) = render(&histories);
         if compact_gaps {
-            meta.insert("located_gaps".into(), Value::Array(gaps.rows));
+            meta.insert("located_gaps".into(), Value::Array(gaps));
         }
         rows
     } else {
@@ -324,7 +360,7 @@ fn profile2(
             ("checkpoints".into(), json!(count)),
             ("byte_offset".into(), json!(selection.offset)),
             ("byte_limit".into(), json!(selection.limit)),
-            ("total".into(), json!(selection.len * count as u64)),
+            ("total".into(), json!(total * count as u64)),
             ("shown".into(), json!(shown * count as u64)),
             ("validation".into(), json!("one stream through END")),
         ]));
@@ -335,14 +371,11 @@ fn profile2(
                 let index = snapshots
                     .binary_search_by_key(&ev, |(seq, _)| *seq)
                     .expect("validated checkpoint was observed");
-                let mut gaps = CompactGaps::default();
-                let rows = snapshots[index]
-                    .1
-                    .page(page_base, &info, &selection, &mut gaps);
+                let (rows, gaps) = render(&snapshots[index].1);
                 let mut point = json!({"ev": ev});
                 point["data"] = Value::Array(rows);
                 if compact_gaps {
-                    point["located_gaps"] = Value::Array(gaps.rows);
+                    point["located_gaps"] = Value::Array(gaps);
                 }
                 point
             })
@@ -351,7 +384,7 @@ fn profile2(
     Ok(response(rows, Value::Object(meta), json))
 }
 
-const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--at-seq E | --checkpoint E ...] [--limit N] [--offset N] [--compact | --runs] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  For a single cutoff, JSON meta.as_of_ev gives its event or null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n  --runs --json sets meta.last_writers_format to runs-v1 for profile 2.\n  Each row has address, size, known and last_observed_write. Adjacent bytes from\n  one writer event share its provenance and a data_hex string in address order.\n  A null last_observed_write means no retained write. Only known runs have a\n  current value equal to data_hex. Gap refs are page-local. Limits, offsets,\n  meta.shown and meta.total count bytes, including unknowns.\n  --checkpoint E (profile 2 JSON) returns 1..64 after-accesses cutoffs in one scan,\n  in request order, including duplicates. meta.writer_history_format is checkpoints-v1.\n  Each cutoff has ev, data and its own located_gaps for\n  --compact or --runs. Offset and limit apply to each cutoff, with at most\n  4096 byte cells across the whole page. meta.shown and meta.total sum those cutoffs.\n";
+const HELP: &str = "usage: traceq last-writers trace.gtsw --range BASE,LEN [--range BASE,LEN ...] [--at-seq E | --checkpoint E ...] [--limit N] [--offset N] [--compact | --runs] [--json]\n  last observed completed store per byte, inside the declared scope\n  LEN and limit must be 1..4096\n  Profile 2 accepts up to 64 ranges in one validated scan.\n  Each cutoff pages the union in address order. Overlaps count once and holes are skipped.\n  profile 2 / GTSC also exposes last_observed_write.first_located_gap\n  for the earliest positioned loss of continuity; external memory effects remain unobserved\n  For a single cutoff, JSON meta.as_of_ev gives its event or null for an empty capture\n  profile 2: --compact --json replaces first_located_gap with first_located_gap_ref, indexing this page's meta.located_gaps\n  --runs --json sets meta.last_writers_format to runs-v1 for profile 2.\n  Each row has address, size, known and last_observed_write. Adjacent bytes from\n  one writer event share its provenance and a data_hex string in address order.\n  A null last_observed_write means no retained write. Only known runs have a\n  current value equal to data_hex. Gap refs are page-local. Limits, offsets,\n  meta.shown and meta.total count bytes, including unknowns.\n  --checkpoint E (profile 2 JSON) returns 1..64 after-accesses cutoffs in one scan,\n  in request order, including duplicates. meta.writer_history_format is checkpoints-v1.\n  Each cutoff has ev, data and its own located_gaps for\n  --compact or --runs. Offset and limit apply to each cutoff, with at most\n  4096 byte cells across the whole page. meta.shown and meta.total sum those cutoffs.\n";
 fn p1_failure(code: &str, message: impl Into<String>, status: i32, json_output: bool) -> Response {
     let message = message.into();
     if json_output {
@@ -371,7 +404,7 @@ fn p1_failure(code: &str, message: impl Into<String>, status: i32, json_output: 
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let json = args.iter().any(|arg| arg == "--json");
     let mut path = None;
-    let mut range = None;
+    let mut ranges = Vec::new();
     let mut at = None;
     let mut checkpoints = Vec::new();
     let mut use_at_ev = false;
@@ -388,11 +421,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             "--compact" => compact = true,
             "--runs" => runs = true,
             "--range" => {
-                let value = next(args, &mut i, flag)?;
-                if range.is_some() {
-                    return Err("one --range BASE,LEN is required".to_string().into());
+                if ranges.len() == 64 {
+                    return Err("last-writers accepts at most 64 ranges".to_string().into());
                 }
-                range = Some(parse_range(value)?);
+                let (base, len) = parse_range(next(args, &mut i, flag)?)?;
+                ranges.push(base..base + len);
             }
             "--at-ev" | "--at-seq" => {
                 at = Some(parse_u64(next(args, &mut i, flag)?, false)?);
@@ -421,9 +454,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let Some(path) = path.filter(|_| (1..=4096).contains(&limit)) else {
         return Err("invalid file, limits, window or phase".to_string().into());
     };
-    let Some((base, len)) = range else {
+    if ranges.is_empty() {
         return Err(format!("--range is required; {RANGE_HINT}").into());
-    };
+    }
     if runs && !json {
         return Err("--runs requires last-writers --json (profile 2)"
             .to_string()
@@ -445,8 +478,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         return Ok(p1_failure("FORMAT", "expected a GTSW v1 header", 1, json));
     }
     let selection = Selection {
-        base,
-        len,
+        ranges,
         at,
         checkpoints,
         limit,
@@ -477,6 +509,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             .to_string()
             .into());
     }
+    if selection.ranges.len() != 1 {
+        return Err("multiple --range options require profile 2"
+            .to_string()
+            .into());
+    }
     if runs {
         return Err("--runs requires last-writers --json (profile 2)"
             .to_string()
@@ -489,7 +526,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     if &header[..8] != FLAT_MAGIC {
         return Ok(p1_failure("FORMAT", "expected a GTSW v1 header", 1, json));
     }
-    if offset > len {
+    if offset > selection.ranges[0].end - selection.ranges[0].start {
         return Err("invalid path, range, limit or offset".to_string().into());
     }
     profile1(file, header, path, selection, json)
@@ -503,13 +540,14 @@ fn profile1(
     json_output: bool,
 ) -> Result<Response, CliError> {
     let Selection {
-        base,
-        len: length,
+        ranges,
         at,
         limit,
         offset,
         ..
     } = selection;
+    let base = ranges[0].start;
+    let length = ranges[0].end - base;
     let at = at.unwrap_or(u64::MAX);
     let word =
         |index: usize| u64::from_le_bytes(frame[index * 8..index * 8 + 8].try_into().unwrap());

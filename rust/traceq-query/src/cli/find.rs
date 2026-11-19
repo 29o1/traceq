@@ -5,7 +5,6 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::Write as _,
     io::Seek,
-    ops::Range,
 };
 use traceq_core::wire::{Event, Header};
 
@@ -413,22 +412,10 @@ impl<'a> BytePatterns<'a> {
             };
             candidates[edge as usize].push(key);
         }
-        let mut sorted = options.ranges.clone();
-        sorted.sort_unstable_by_key(|range| range.start);
-        let mut ranges: Vec<Range<u64>> = Vec::new();
-        for range in sorted {
-            if let Some(previous) = ranges.last_mut()
-                && range.start <= previous.end
-            {
-                previous.end = previous.end.max(range.end);
-            } else {
-                ranges.push(range);
-            }
-        }
         Self {
             patterns,
             candidates,
-            ranges,
+            ranges: range_union(options.ranges.clone()),
         }
     }
 

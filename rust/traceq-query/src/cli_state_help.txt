@@ -53,14 +53,14 @@ execution-state stream queries (profile 2):
     To give ranges different checkpoints, place --range-checkpoint E:pre or E:post
     after its --range. Each range needs at least one, with up to 64 in total.
     This mode uses meta.checkpoint_pairs and cannot mix with --checkpoint or --at-ev/--at-seq/--phase.
-  traceq last-writers FILE --range BASE,LEN [--at-seq E] [--compact | --runs] [--json]
+  traceq last-writers FILE --range BASE,LEN [--range BASE,LEN ...] [--at-seq E | --checkpoint E ...] [--compact | --runs] [--json]
+    Profile 2 pages up to 64 ranges as one union in address order, skipping holes.
     --compact requires JSON; first_located_gap_ref indexes the current page's meta.located_gaps.
     --runs --json combines adjacent bytes with the same writer event and uses byte-count pagination.
     last_observed_write.first_located_gap explains the earliest positioned gap after that write.
     Scope-exit memory effects remain unobserved; global unpositioned gaps are reported in meta.
     meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture.
   Profile2 memory ranges use --range BASE,LEN; LEN is 1..4096 bytes.
-  last-writers accepts one range per query.
     Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
     --addr selects instruction PCs in find-pc; --len and --size are unsupported.
 
