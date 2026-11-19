@@ -890,6 +890,52 @@ class StateStreamChecks(unittest.TestCase):
                     error = self.query(path, 'mem-access', [*args, '--compact'], ok=False)
                     self.assertEqual(error['error']['code'], 'TRACE_ERROR')
 
+    def test_mem_access_selects_instruction_pcs_before_paging(self):
+        for chunked in (False, True):
+            path = self.artifact(self.memory_access_events(), chunked)
+            ranges = ['--range', '0x2000,4', '--range', '0x2008,1', '--range', '0x2002,1']
+            pcs = ['--pc', '0x1010', '--pc', '0x1008', '--pc', '0x1008']
+            args = [*ranges, *pcs, '--access-index', '--from', '0', '--to', '4']
+            full = self.query(path, 'mem-access', args)
+            self.assertEqual(full['meta']['instruction_pcs'], ['0x1008', '0x1010'])
+            self.assertEqual([(row['ev'], row['access_index'], row['size'], row['val']) for row in full['data']],
+                             [(2, 0, 8, None), (2, 1, 1, '0x55'), (4, 0, 2, '0xaabb')])
+            self.assertFalse(full['data'][0]['known'])
+            scoped_write = self.query(path, 'mem-access',
+                                      [*ranges, *pcs, '--write', '--from', '3', '--to', '4', '--access-index'])
+            self.assertEqual(scoped_write['data'], full['data'][2:])
+
+            page = self.query(path, 'mem-access', [*args, '--compact', '--source-table', '--limit', '2'])
+            self.assertEqual(page['meta']['total'], 3)
+            argv = shlex.split(page['meta']['next'])
+            self.assertEqual([argv[i + 1] for i, arg in enumerate(argv) if arg == '--pc'],
+                             ['0x1010', '0x1008', '0x1008'])
+            following = json.loads(subprocess.check_output([str(ROOT/'cli/traceq'), *argv[1:]], timeout=10))
+            for packed, expected in ((page, full['data'][:2]), (following, full['data'][2:])):
+                decoded = []
+                for cells in packed['data']:
+                    row = dict(zip(packed['meta']['columns'], cells))
+                    row['value_source'] = packed['meta']['value_source_table'][row.pop('value_source_ref')]
+                    decoded.append(row)
+                self.assertEqual(decoded, expected)
+            self.assertFalse(following['meta']['truncated'])
+
+    def test_mem_access_pc_selection_keeps_whole_stream_validation(self):
+        for chunked in (False, True):
+            path = self.artifact(self.memory_access_events(), chunked)
+            empty = ['--range', '0x2000,16', '--pc', '0x9000']
+            self.assertEqual(self.query(path, 'mem-access', empty)['data'], [])
+            for invalid in (['--pc'], ['--pc', '-1'], ['--pc', '0x1000'] * 65):
+                bad = self.query(path, 'mem-access', ['--range', '0x2000,16', *invalid], ok=False)
+                self.assertEqual(bad['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damaged in (raw[:-1], raw + b'x'):
+                path.write_bytes(damaged)
+                for args in (empty, ['--range', '0x2000,16', '--pc', '0x1000', '--offset', '99']):
+                    failure = self.query(path, 'mem-access', args, ok=False)
+                    self.assertEqual(set(failure), {'error'})
+                    self.assertEqual(failure['error']['code'], 'TRACE_ERROR')
+
     def test_mem_access_compact_validates_empty_pages_and_corrupt_suffix(self):
         for chunked in [False,True]:
             path=self.artifact(self.memory_access_events(),chunked);original=path.read_bytes()
