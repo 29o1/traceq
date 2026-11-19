@@ -137,6 +137,43 @@ class FindValueChecks(unittest.TestCase):
                     self.assertEqual(set(failure), {'error'})
                     self.assertEqual(failure['error']['code'], 'TRACE_ERROR')
 
+    def test_numeric_value_sources_are_page_local_by_pc_and_direction(self):
+        read_source = 'load destination bits after completion'
+        write_source = 'store source bits; post callback confirmed'
+        for chunked in (False, True):
+            path = self.artifact(chunked=chunked)
+            args = ['--value', '0x5a', '--value-source']
+            mixed = self.query(path, *args)
+            self.assertEqual(mixed['data'], self.query(path, '--value', '0x5a')['data'])
+            self.assertTrue(any(row['kind'] == 'reg' for row in mixed['data']))
+            self.assertEqual(mixed['meta']['pc_value_source_refs'],
+                             {'0x1004': {'r': 0, 'w': 1}, '0x100c': {'w': 1}})
+            self.assertEqual(mixed['meta']['value_source_table'], [read_source, write_source])
+
+            first = self.query(path, *args, '--memory', '--limit', 2)
+            self.assertEqual(first['meta']['scans'], 1)
+            self.assertEqual(first['meta']['pc_value_source_refs'], {'0x1004': {'r': 0, 'w': 1}})
+            argv = shlex.split(first['meta']['next'])
+            self.assertIn('--value-source', argv)
+            following = json.loads(subprocess.check_output([str(CLI), *argv[1:]], timeout=10))
+            self.assertEqual(following['meta']['pc_value_source_refs'], {'0x100c': {'w': 0}})
+            self.assertEqual(following['meta']['value_source_table'], [write_source])
+
+            for direction in ('--read', '--write'):
+                doc = self.query(path, *args, direction)
+                self.assertTrue(doc['meta']['scope'].startswith('recorded memory access values'))
+            empty = self.query(path, *args, '--offset', 99)
+            self.assertEqual(empty['meta']['pc_value_source_refs'], {})
+            self.assertEqual(empty['meta']['value_source_table'], [])
+            self.assertEqual(self.query(path, '--bytes', '5a', '--value-source', ok=False)['error']['code'],
+                             'ARGUMENT')
+            raw = path.read_bytes()
+            for broken in (raw[:-1], raw + b'x'):
+                path.write_bytes(broken)
+                bad = self.query(path, *args, '--offset', 99, ok=False)
+                self.assertEqual(set(bad), {'error'})
+                self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
+
     def test_full_width_and_slot_64(self):
         for chunked in (False,True):
             path=self.artifact(chunked=chunked);q=self.query(path,'--value',hex(WIDE))
