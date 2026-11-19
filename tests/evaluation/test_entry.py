@@ -31,6 +31,37 @@ def fixture(path):
 
 
 class Entry(unittest.TestCase):
+    def test_python_adapter_trace_help_lists_supported_commands_without_running_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'fixture.gtsw'
+            fixture(path)
+            work = bench.pack(root, 'fixture', {'sample': {'path': str(path)}}, bench.COMMON, entry='python')
+
+            def invoke(*args):
+                return subprocess.run([sys.executable, 'query.py', *args], cwd=work,
+                                      capture_output=True, timeout=10)
+
+            result = invoke('sample', '--help')
+            self.assertEqual((result.returncode, result.stderr), (0, b''))
+            commands = result.stdout.decode().splitlines()[1].removeprefix('Commands: ')
+            self.assertEqual(commands.split(', '), sorted(query.COMMANDS))
+            self.assertLess(len(result.stdout), 300)
+            self.assertIn(b'python3 query.py sample context --help', result.stdout)
+            call = json.loads((work / 'queries/calls.jsonl').read_text())
+            self.assertFalse(call['launched_cli'])
+            self.assertIsNone(call['failure_origin'])
+
+            help_result = invoke('sample', 'context', '--help')
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn(b'--at-ev', help_result.stdout)
+            stat = invoke('sample', 'stat', '--json')
+            self.assertEqual(stat.returncode, 0, stat.stderr)
+            self.assertEqual(json.loads(stat.stdout)['meta']['instructions'], 1)
+            unknown = invoke('missing', '--help')
+            self.assertEqual(unknown.returncode, 2)
+            self.assertEqual(json.loads(unknown.stdout)['error']['code'], 'ARGUMENT')
+
     def test_mem_state_source_runs_expand_exactly_and_validate_lengths(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'fixture.gtsw'

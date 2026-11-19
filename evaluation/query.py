@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import time
@@ -314,6 +315,13 @@ def main():
         return reject('tools.json requires a traceq path and traces object', 'ADAPTER_CONFIG')
     if len(args) < 2 or trace_id not in traces:
         return reject('Use python3 query.py TRACE_ID COMMAND [options]; available trace IDs: ' + ', '.join(traces))
+    if args[1:] == ['--help']:
+        help_text = (
+            'Usage: python3 query.py TRACE_ID COMMAND [options]\n'
+            + 'Commands: ' + ', '.join(sorted(COMMANDS)) + '\n'
+            + f'Command help: python3 query.py {shlex.quote(trace_id)} context --help\n'
+        )
+        return finish(help_text.encode(), b'', 0, None, False)
     if command not in COMMANDS or any(o in FORBIDDEN_OPTIONS for o in options):
         return reject('Use an allowed read query with bounded --limit and shell redirection for output.')
     trace = traces[trace_id]
