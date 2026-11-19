@@ -38,6 +38,9 @@ execution-state stream queries (profile 2):
     --access-source --json adds observed_rw (r/w) and observed_access_index to known bytes.
     The index is zero-based within that instruction's recorded memory accesses.
     With --compact this selects hex-v2: [observed_ev,pc_index,observed_rw,observed_access_index].
+    --source-runs --compact --json selects hex-runs-v1. Its source_runs contain
+    [byte_count, source] pairs in byte order. A source uses meta.source_columns
+    or null for unknown bytes. Each run covers adjacent bytes with that source.
     Sources describe the last observation at the checkpoint, which may be a read.
     Counts/limits still measure bytes, including unknowns; empty frames have size 0.
     All input validation, gap/completion semantics and checkpoint fields are retained.
