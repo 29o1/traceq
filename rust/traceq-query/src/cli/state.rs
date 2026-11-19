@@ -696,11 +696,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         }
         "boundaries" => {
             let mut total = 0;
-            let mut spans: Vec<(Group, Option<Group>)> = Vec::new();
+            let mut spans = Vec::new();
             let mut pending = None;
             // An exit at the right edge can reenter at the next instruction.
             let through = to.saturating_add(1);
-            let info = replay::read_selected(
+            let info = replay::read_boundary_pre(
                 stream,
                 |seq| (from..=through).contains(&seq),
                 |g, state| {
@@ -708,7 +708,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                         && let Some(exit) = pending.take()
                     {
                         if total >= offset && (spans.len() as u64) < limit {
-                            spans.push((exit, Some(g.clone())));
+                            spans.push((exit, Some(BoundarySnapshot::from_boundary(&g))));
                         }
                         total += 1;
                     }
@@ -720,7 +720,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                                 .is_some_and(|base| state.modules[&base].name == name.as_bytes())
                         })
                     {
-                        pending = Some(g.clone());
+                        pending = Some(BoundarySnapshot::from_boundary(&g));
                     }
                 },
             )?;
@@ -813,7 +813,30 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     Ok(response(rows, Value::Object(meta), json))
 }
 
-fn boundary_row(g: &Group, entry: Option<&Group>, registers: &[Register], info: &Info) -> Value {
+struct BoundarySnapshot {
+    seq: u64,
+    pc: u64,
+    pre: Registers,
+    exit: replay::Exit,
+}
+
+impl BoundarySnapshot {
+    fn from_boundary(group: &replay::BoundaryPre<'_>) -> Self {
+        Self {
+            seq: group.seq,
+            pc: group.pc,
+            pre: group.pre.clone(),
+            exit: group.exit.clone(),
+        }
+    }
+}
+
+fn boundary_row(
+    g: &BoundarySnapshot,
+    entry: Option<&BoundarySnapshot>,
+    registers: &[Register],
+    info: &Info,
+) -> Value {
     let expected = (g.exit.expected_return != 0).then_some(g.exit.expected_return);
     json!({
         "exit_ev": g.seq,

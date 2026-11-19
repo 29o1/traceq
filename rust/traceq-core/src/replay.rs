@@ -74,6 +74,14 @@ pub struct EvidenceGroup<'a> {
     pub gap_count: u64,
     pub gap_reason_mask: u64,
 }
+/// The pre-instruction state at a recorded scope exit or reentry.
+pub struct BoundaryPre<'a> {
+    pub seq: u64,
+    pub pc: u64,
+    pub pre: &'a Registers,
+    pub exit: &'a Exit,
+    pub reentered: bool,
+}
 /// Explicit values recorded at one event. Inherited register values are not
 /// exposed by this view, so callers cannot confuse an observation with carry.
 pub struct RegisterObservations<'a> {
@@ -226,6 +234,16 @@ impl Active {
             self.post_started = true;
         }
     }
+
+    #[inline]
+    fn materialize_boundary_pre(&mut self, carry: &Registers) {
+        if self.capture && !self.observations {
+            self.group.pre.bits.copy_from_slice(&carry.bits);
+            // Retain any additional validated pre observations before this
+            // group closes. No full post snapshot is needed by the callback.
+            self.observations = true;
+        }
+    }
 }
 #[derive(Default)]
 struct Boundary {
@@ -323,7 +341,30 @@ pub fn read_selected<R: Read, P: FnMut(u64) -> bool, F: FnMut(&Group, &Info)>(
     selected: P,
     callback: F,
 ) -> Result<Info> {
-    read_impl::<true, false, _, _, _>(input, selected, callback)
+    read_impl::<true, false, false, _, _, _>(input, selected, callback)
+}
+
+/// Validate the complete stream and materialize pre states only at selected
+/// scope exits and reentries. Callbacks remain provisional until success.
+pub fn read_boundary_pre<R: Read, P: FnMut(u64) -> bool, F: FnMut(BoundaryPre<'_>, &Info)>(
+    input: Input<R>,
+    selected: P,
+    mut callback: F,
+) -> Result<Info> {
+    read_impl::<false, false, true, _, _, _>(input, selected, |g, info| {
+        if g.exit.transfer != 0 || g.reentered {
+            callback(
+                BoundaryPre {
+                    seq: g.seq,
+                    pc: g.pc,
+                    pre: &g.pre,
+                    exit: &g.exit,
+                    reentered: g.reentered,
+                },
+                info,
+            );
+        }
+    })
 }
 
 /// Validate the complete stream while exposing only explicitly recorded
@@ -333,7 +374,7 @@ pub fn read_observations<R: Read, F: FnMut(ObservationGroup<'_>, &Info)>(
     input: Input<R>,
     mut callback: F,
 ) -> Result<Info> {
-    read_impl::<false, true, _, _, _>(
+    read_impl::<false, true, false, _, _, _>(
         input,
         |_| true,
         |g, info| {
@@ -366,7 +407,7 @@ pub fn read_evidence<R: Read, F: FnMut(EvidenceGroup<'_>, &Info)>(
     input: Input<R>,
     mut callback: F,
 ) -> Result<Info> {
-    read_impl::<false, false, _, _, _>(
+    read_impl::<false, false, false, _, _, _>(
         input,
         |_| true,
         |g, info| {
@@ -393,6 +434,7 @@ pub fn read_evidence<R: Read, F: FnMut(EvidenceGroup<'_>, &Info)>(
 fn read_impl<
     const REGISTERS: bool,
     const OBSERVATIONS: bool,
+    const BOUNDARY_PRE: bool,
     R: Read,
     P: FnMut(u64) -> bool,
     F: FnMut(&Group, &Info),
@@ -600,6 +642,9 @@ fn read_impl<
                 boundary.open = true;
                 boundary.seq = g.seq;
                 info.exits += 1;
+                if BOUNDARY_PRE {
+                    a.materialize_boundary_pre(&carry);
+                }
             }
             Kind::ScopeReenter => {
                 let g = &mut a.group;
@@ -624,6 +669,9 @@ fn read_impl<
                 g.exit_seq = boundary.seq;
                 boundary.open = false;
                 info.reentries += 1;
+                if BOUNDARY_PRE {
+                    a.materialize_boundary_pre(&carry);
+                }
             }
             Kind::Gap => {
                 let g = &mut a.group;
