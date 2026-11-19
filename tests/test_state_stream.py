@@ -913,6 +913,42 @@ class StateStreamChecks(unittest.TestCase):
         for args in [['--at-ev','0'],['--range','0x2000,1'],['--phase','post']]:
             self.assertEqual(self.query(path,'boundaries',args,ok=False)['error']['code'],'ARGUMENT')
 
+    def test_scope_boundaries_target_filter_preserves_pairing_and_validation(self):
+        options = ['--reg', 'x0']
+        filtered = [*options, '--target-module', 'external.so']
+        for chunked in (False, True):
+            events = self.boundary_events()
+            path = self.artifact(events, chunked)
+            plain = self.query(path, 'boundaries', options)
+            self.assertEqual(len(plain['data']), 2)
+            page = self.query(path, 'boundaries', [*filtered, '--to', '0'])
+            self.assertEqual(page['data'], plain['data'][:1])
+            self.assertEqual(page['data'][0]['reentry_ev'], 1)
+            self.assertEqual(page['meta']['target_module'], 'external.so')
+            self.assertEqual(page['meta']['scope_exits'], 2)
+            self.assertEqual(self.query(path, 'boundaries', filtered)['meta']['total'], 1)
+
+            other_instance = (10, 0, 0x5000, *events[1][3:])
+            both = self.artifact([*events[:2], other_instance, *events[2:]], chunked)
+            full = self.query(both, 'boundaries', filtered)
+            self.assertEqual([r['target']['module_base'] for r in full['data']], ['0x3000', '0x5000'])
+            self.assertEqual(full['data'][1]['status'], 'no_reentry_observed')
+            first = self.query(both, 'boundaries', [*filtered, '--limit', '1'])
+            self.assertEqual(first['data'], full['data'][:1])
+            argv = shlex.split(first['meta']['next'])
+            self.assertIn('--target-module', argv)
+            result = subprocess.run([str(ROOT/'cli/traceq'), *argv[1:]], capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertEqual(json.loads(result.stdout)['data'], full['data'][1:])
+
+            empty = ['--target-module', 'absent.so']
+            self.assertEqual(self.query(path, 'boundaries', empty)['meta']['total'], 0)
+            self.assertEqual(self.query(path, 'boundaries', [*filtered, *empty], ok=False)['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                self.assertEqual(self.query(path, 'boundaries', empty, ok=False)['error']['code'], 'TRACE_ERROR')
+
     def test_scope_boundary_cannot_hide_missing_gap_or_reentry(self):
         for kind in (3,12,4):
             events=[e for e in self.boundary_events() if e[0]!=kind]
