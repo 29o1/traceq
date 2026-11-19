@@ -1087,6 +1087,30 @@ class StateStreamChecks(unittest.TestCase):
             self.assertTrue(all(not b['known']for b in q['data'][3]['data']))
             self.assertEqual(q['data'][3]['instruction_completion'],'unobserved')
 
+    def test_mem_state_source_runs_keep_access_ordinals_and_unknown_bytes(self):
+        for chunked in (False, True):
+            events = self.base()
+            events[2:2] = [(2, 0, 0x1000, 0x2000, 2, 0xaa, 0, 1),
+                           (2, 0, 0x1000, 0x2002, 1, 0xbb, 0, 1)]
+            events[-1] = (4, 3, 0, 2, 0, 0, 2, 2)
+            path = self.artifact(events, chunked)
+            args = ['--range', '0x2000,5', '--at-ev', '0', '--phase', 'post']
+            plain = self.query(path, 'mem-state', [*args, '--compact', '--source-runs'])
+            self.assertEqual(plain['data'][0]['source_runs'], [[3, [0, 0]], [2, None]])
+            extended = [*args, '--compact', '--source-runs', '--access-source']
+            response = self.query(path, 'mem-state', extended)
+            self.assertEqual(response['meta']['mem_state_format'], 'hex-runs-v1')
+            frame, = response['data']
+            self.assertEqual(frame['data_hex'], 'aa00bb0000')
+            self.assertEqual(frame['source_runs'], [[2, [0, 0, 'w', 0]], [1, [0, 0, 'w', 1]], [2, None]])
+            self.assertEqual(self.query(path, 'mem-state', [*extended, '--offset', '99'])['data'][0]['source_runs'], [])
+            raw = path.read_bytes()
+            for damaged in (raw[:-1], raw + b'x'):
+                path.write_bytes(damaged)
+                bad = self.query(path, 'mem-state', [*extended, '--offset', '99'], ok=False)
+                self.assertEqual(set(bad), {'error'})
+                self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
+
     def test_mem_state_access_source_uses_the_latest_access_and_exact_ordinal(self):
         for chunked in [False,True]:
             events=self.base()
