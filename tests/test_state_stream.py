@@ -384,6 +384,106 @@ class StateStreamChecks(unittest.TestCase):
                 path.write_bytes(damage)
                 self.assertEqual(self.query(path, 'last-writers', empty, ok=False)['error']['code'], 'TRACE_ERROR')
 
+    def test_writer_checkpoints_match_single_pages_in_request_order(self):
+        cutoffs = ['2', '0', '1', '2']
+        checkpoints = [part for cutoff in cutoffs for part in ('--checkpoint', cutoff)]
+        for chunked in (False, True):
+            path = self.artifact(self.compact_events(), chunked)
+            for mode in ([], ['--compact'], ['--runs']):
+                base = ['--range', '0x2000,4', '--limit', '2', *mode]
+                batch = self.query(path, 'last-writers', [*base, *checkpoints])
+                for offset in (0, 2):
+                    with self.subTest(chunked=chunked, mode=mode, offset=offset):
+                        meta = batch['meta']
+                        self.assertEqual(meta['writer_history_format'], 'checkpoints-v1')
+                        self.assertEqual(meta['pagination_unit'], 'bytes_per_checkpoint')
+                        self.assertEqual(meta['validation'], 'one stream through END')
+                        self.assertEqual((meta['checkpoints'], meta['total'], meta['shown']), (4, 16, 8))
+                        self.assertEqual((meta['byte_offset'], meta['byte_limit']), (offset, 2))
+                        self.assertEqual([row['ev'] for row in batch['data']], list(map(int, cutoffs)))
+                        for cutoff, point in zip(cutoffs, batch['data']):
+                            single = self.query(path, 'last-writers',
+                                [*base, '--offset', str(offset), '--at-seq', cutoff])
+                            self.assertEqual(point['data'], single['data'])
+                            self.assertEqual(point.get('located_gaps'), single['meta'].get('located_gaps'))
+                        if offset == 0:
+                            # Byte 0x2001 retains the old writer across the exit
+                            # and learns the reentry only at the later cutoff.
+                            at_reentry, _, at_exit, duplicate = batch['data']
+                            self.assertEqual(duplicate, at_reentry)
+                            if mode:
+                                self.assertEqual(at_reentry['located_gaps'][0]['scope_exit']['reentry_ev'], 2)
+                                self.assertIsNone(at_exit['located_gaps'][0]['scope_exit']['reentry_ev'])
+                            self.assertTrue(meta['truncated'])
+                            argv = shlex.split(meta['next'])
+                            result = subprocess.run([str(ROOT/'cli/traceq'), *argv[1:]],
+                                                    capture_output=True, text=True, timeout=10)
+                            self.assertEqual(result.returncode, 0, result.stdout)
+                            batch = json.loads(result.stdout)
+                        else:
+                            self.assertFalse(meta['truncated'])
+                            self.assertEqual(meta['next'], '')
+
+    def test_writer_checkpoints_keep_global_gap_and_validate_suffix(self):
+        for chunked in (False, True):
+            events = self.compact_events()
+            events.insert(-1, (3,6,0,0,0,0,0,4))
+            events[-1] = (4,6,0,3,3,0,3,2)
+            path = self.artifact(events, chunked)
+            arguments = ['--range', '0x2000,8', '--compact', '--limit', '8']
+            checkpoints = ['--checkpoint', '0', '--checkpoint', '2']
+            batch = self.query(path, 'last-writers', [*arguments, *checkpoints])
+            self.assertTrue(batch['meta']['unpositioned_gap'])
+            for point in batch['data']:
+                single = self.query(path, 'last-writers', [*arguments, '--at-seq', str(point['ev'])])
+                self.assertEqual(point['data'], single['data'])
+                self.assertEqual(point['located_gaps'], single['meta']['located_gaps'])
+                self.assertTrue(all(not row['known'] and row['last_observed_write'] is not None
+                                    for row in point['data']))
+            original = path.read_bytes()
+            damaged_gap = [(kind, ev, pc, 1 if kind == 3 and ev == 3 else address, size, lo, hi, detail)
+                           for kind, ev, pc, address, size, lo, hi, detail in events]
+            damaged_end = [*events[:-1], (4,6,0,2,3,0,3,2)]
+            empty = [*arguments, *checkpoints, '--offset', '8']
+            valid = self.query(path, 'last-writers', empty)
+            self.assertEqual([(row['ev'], row['data']) for row in valid['data']], [(0, []), (2, [])])
+            self.assertEqual(valid['meta']['shown'], 0)
+            for raw in (original[:-1], original + b'x', self.artifact(damaged_gap, chunked).read_bytes(),
+                        self.artifact(damaged_end, chunked).read_bytes()):
+                path.write_bytes(raw)
+                bad = self.query(path, 'last-writers', empty, ok=False)
+                self.assertEqual(set(bad), {'error'})
+                self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
+
+    def test_writer_checkpoint_selector_bounds_and_legacy_output(self):
+        path = self.artifact(self.compact_events(), data_size=4096)
+        arguments = ['--range', '0x2000,4096']
+        for options in (
+            ['--checkpoint', '0:post'],
+            ['--checkpoint', '0', '--at-seq', '1'],
+            ['--checkpoint', '0', '--at-ev', '1'],
+            ['--checkpoint', '0'] * 65,
+            ['--checkpoint', '0', '--checkpoint', '1', '--limit', '2049'],
+        ):
+            bad = self.query(path, 'last-writers', [*arguments, *options], ok=False)
+            self.assertEqual(bad['error']['code'], 'ARGUMENT')
+        bad = self.query(path, 'last-writers',
+                         [*arguments, '--checkpoint', '6', '--offset', '4096'], ok=False)
+        self.assertIn('outside the capture', bad['error']['message'])
+        legacy = self.out/'writer-checkpoints-profile-one.gtsw'
+        legacy.write_bytes(b'GTSW001\0' + struct.pack('<7Q', 0x1000,0x100,0x2000,32,1,1,64)
+                           + struct.pack('<8Q', 4,0,0,0,0,0,0,1))
+        old = self.query(legacy, 'last-writers', ['--range', '0x2000,8'])
+        self.assertEqual(len(old['data']), 8)
+        bad = self.query(legacy, 'last-writers', ['--range', '0x2000,8', '--checkpoint', '0'], ok=False)
+        self.assertEqual(bad['error']['code'], 'ARGUMENT')
+        self.assertIn('profile 2', bad['error']['message'])
+        text = subprocess.run([str(ROOT/'cli/traceq'), 'last-writers', str(path), *arguments,
+                              '--checkpoint', '0'], capture_output=True, text=True, timeout=10)
+        self.assertEqual(text.returncode, 2)
+        self.assertEqual(text.stdout, '')
+        self.assertIn('--json', text.stderr)
+
     def test_compact_gap_references_preserve_cutoffs_overwrites_and_all_facts(self):
         for chunked in [False,True]:
             path=self.artifact(self.compact_events(),chunked)
