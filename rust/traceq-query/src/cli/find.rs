@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt::Write as _,
     io::Seek,
+    ops::Range,
 };
 use traceq_core::wire::Event;
 
@@ -62,6 +63,7 @@ struct Options {
     last: u64,
     context: u64,
     memory_only: bool,
+    ranges: Vec<Range<u64>>,
     read: bool,
     write: bool,
     across_events: bool,
@@ -78,6 +80,7 @@ impl Default for Options {
             last: 0,
             context: 0,
             memory_only: false,
+            ranges: Vec::new(),
             read: false,
             write: false,
             across_events: false,
@@ -85,7 +88,7 @@ impl Default for Options {
         }
     }
 }
-const NUMERIC_HELP: &str = "traceq find-value V FILE [--memory] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  --memory selects both recorded reads and writes before pagination.\n  --read/--write select one memory direction. Register phases describe snapshots.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
+const NUMERIC_HELP: &str = "traceq find-value V FILE [--memory] [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  --memory selects both recorded reads and writes before pagination.\n  Repeat --range up to 64 times to select memory accesses overlapping their union.\n  Each matching access is returned whole and once. Values match the full access.\n  --read/--write select one memory direction. Register phases describe snapshots.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
 const BYTES_HELP: &str = "traceq find-value FILE --bytes HEX [--bytes HEX ...] [--across-events] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\n  Profile 2 GTSW/GTSC: exact patterns in known recorded memory bytes.\n  Up to64 distinct patterns of1..64 bytes; contiguous hexadecimal digits.\n  Contiguous accesses may join within one instruction/direction without gaps.\n  Unknown accesses and event/direction/address changes break byte spans.\n  --across-events joins adjacent increasing addresses across events in a64-byte window.\n  With --read/--write, known disjoint opposite accesses may be skipped; overlaps break.\n  All unknown accesses, gaps and selected address/direction changes break runs.\n  An unpositioned gap suppresses joins across events or skipped accesses.\n  Historical recorded runs only; no current-memory or last-writer claim.\n  Reordered stores can leave complete content with no sequence hit.\n  Locate/disambiguate a shorter prefix; use mem-access --range B,L to choose the last required observation E, then mem-state --range B,L --checkpoint E:post before later gaps.\n  Run hits use first ev/access_index and last_ev/last_access_index, ordered by completion byte.\n  Pagination applies per pattern, at most4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  In run mode --context selects bounded windows at both endpoints of the first hit.\n  Numeric --value matching stays exact; do not mix --bytes and numeric values.\n";
 
 fn pattern(text: &str) -> Result<Vec<u8>, CliError> {
@@ -161,6 +164,14 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 values.push(number128(next(args, &mut i, arg)?)?);
             }
             "--memory" => options.memory_only = true,
+            "--range" if !byte_mode => {
+                if options.ranges.len() == 64 {
+                    return Err("find-value accepts at most 64 ranges".to_string().into());
+                }
+                let (base, len) = parse_range(next(args, &mut i, arg)?)?;
+                options.ranges.push(base..base + len);
+            }
+            "--range" => return Err("--range applies to numeric searches".to_string().into()),
             "--read" => options.read = true,
             "--write" => options.write = true,
             "--across-events" => options.across_events = true,
@@ -268,8 +279,14 @@ fn find_numbers(
     options: Options,
     values: Vec<u128>,
 ) -> Result<Response, CliError> {
+    let stream = buffered_input(&mut *file)?;
+    let range_ok = options
+        .ranges
+        .iter()
+        .all(|r| stream.header.contains_data(r.start, r.end - r.start));
     let index: HashMap<_, _> = values.iter().enumerate().map(|(i, v)| (*v, i)).collect();
-    let registers = !options.memory_only && !options.read && !options.write;
+    let registers =
+        !options.memory_only && options.ranges.is_empty() && !options.read && !options.write;
     let mut all: Vec<Page> = (0..values.len()).map(|_| Page::default()).collect();
     let mut memory: Vec<Page> = (0..values.len()).map(|_| Page::default()).collect();
     let (mut order, mut unknown_reads) = (0, 0u64);
@@ -286,7 +303,7 @@ fn find_numbers(
         all[key].add(hit, &options);
     };
     let mut observe = |seq, pc, accesses: &[Event], state: Option<replay::ObservationGroup<'_>>| {
-        if seq < options.from || seq > options.to {
+        if !range_ok || seq < options.from || seq > options.to {
             return;
         }
         if let Some(state) = state {
@@ -318,7 +335,14 @@ fn find_numbers(
         }
         for (access, a) in accesses.iter().enumerate() {
             let write = a.kind == Kind::Write;
-            if options.read && write || options.write && !write {
+            if options.read && write
+                || options.write && !write
+                || !options.ranges.is_empty()
+                    && !options
+                        .ranges
+                        .iter()
+                        .any(|r| a.address < r.end && a.address + a.size > r.start)
+            {
                 continue;
             }
             if a.detail == 0 {
@@ -339,12 +363,16 @@ fn find_numbers(
             );
         }
     };
-    let stream = buffered_input(&mut *file)?;
     let info = if registers {
         replay::read_observations(stream, |g, _| observe(g.seq, g.pc, g.accesses, Some(g)))?
     } else {
         replay::read_evidence(stream, |g, _| observe(g.seq, g.pc, g.accesses, None))?
     };
+    if !range_ok {
+        return Err("query extends outside declared data range"
+            .to_string()
+            .into());
+    }
     let pages = if registers && info.unpositioned_gap {
         memory
     } else {
@@ -690,6 +718,15 @@ fn finish(
         if options.memory_only {
             continuation += " --memory";
         }
+        for range in &options.ranges {
+            write!(
+                continuation,
+                " --range 0x{:x},{}",
+                range.start,
+                range.end - range.start
+            )
+            .expect("write to a string");
+        }
         if options.read {
             continuation += " --read";
         }
@@ -819,7 +856,7 @@ fn finish(
             "recorded_memory_byte_subsequence",
             "known recorded memory bytes; contiguous spans stay within one instruction/direction without gaps; no current-memory or writer-provenance claim",
         )
-    } else if options.memory_only {
+    } else if options.memory_only || !options.ranges.is_empty() {
         (
             "exact_unsigned_numeric_value",
             "recorded memory access values; no current-memory or writer-provenance claim",
@@ -861,6 +898,18 @@ fn finish(
         if byte_mode { "patterns" } else { "values" }.into(),
         json!(per_key),
     );
+    if !options.ranges.is_empty() {
+        meta.insert(
+            "search_ranges".into(),
+            json!(
+                options
+                    .ranges
+                    .iter()
+                    .map(|r| json!({"base":hx(r.start),"size":r.end-r.start}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     if options.across_events {
         meta.insert("matching".into(), json!("recorded_memory_byte_run"));
         meta.insert("scope".into(), json!("adjacent increasing recorded byte accesses across events; selected direction may skip known disjoint opposite accesses; gaps, unknowns, overlaps and selected address/direction changes break runs; historical observations only, no current-memory or writer-provenance claim"));
