@@ -31,6 +31,13 @@ EVALUATION_PROFILE = 'traceq-eval'
 EVALUATION_TEMP_ENV_KEYS = ('TMPDIR', 'TMPPREFIX', 'PYTHONPYCACHEPREFIX')
 ENTRY_COMMANDS = {'python': 'python3 query.py', 'rust': './traceq agent-query --manifest tools.json'}
 TEMP_GUIDANCE = 'Keep query responses and analysis temporaries in ./scratch; never write to /tmp or outside this task directory.'
+INPUT_EVIDENCE_GUIDANCE = (
+    'When a task only asks to locate the input and link it to a call, samples suffice. '
+    'State the checked range and limit conclusions to that evidence. '
+    'An N/M report is required only when the task explicitly asks to prove the complete input. '
+    'N counts distinct input byte positions verified to match byte-for-byte, and M is the total input size in bytes. '
+    'In that case, full credit for input coverage requires N = M.'
+)
 
 
 def write(path, value):
@@ -145,6 +152,8 @@ def pack(run, task, traces, task_text, *, entry=DEFAULT_ENTRY):
     task_text = task_text.replace('Examples: python3 query.py sample0 instructions --from 0 --limit 80 --json',
         'Examples: python3 query.py sample0 context --at-ev 0 --before 0 --after 39 --limit 40 --json\n'
         'python3 query.py sample0 instructions --from 0 --limit 80 --json')
+    if INPUT_EVIDENCE_GUIDANCE not in task_text:
+        task_text = task_text.rstrip() + '\n\n' + INPUT_EVIDENCE_GUIDANCE + '\n'
     (work / 'TASK.md').write_text(entry_text(task_text, entry))
     (run / task / 'prompt.txt').write_text(entry_text(COMMON, entry))
     return work
@@ -400,7 +409,7 @@ def score(run, task):
         'evidence': {'claims': len(evidence.get('claims', [])), 'anchors': len(anchors),
                      'anchors_in_query_results': sum(e in seen.get(t, set()) for t, e in anchors),
                      'invalid_context_outputs': invalid_context_outputs,
-                     'note': 'Coordinate audit only; semantic support requires review.'},
+                     'note': 'Coordinate audit only. Semantic support requires review. ' + INPUT_EVIDENCE_GUIDANCE},
         'scope_audit': 'Review command-audit.json; workspace separation is not a read-security boundary.',
         'scorer_sha256': sha(Path(__file__))}
     write(dest / 'score.json', report)
