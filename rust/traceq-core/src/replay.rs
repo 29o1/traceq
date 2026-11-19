@@ -700,6 +700,11 @@ fn read_impl<
                         && (e.kind != Kind::Write || e.detail == 1),
                     "invalid memory event",
                 )?;
+                let value = u128::from(e.low) | (u128::from(e.high) << 64);
+                require(
+                    e.detail == 0 || e.size == 16 || value >> (e.size * 8) == 0,
+                    "memory value exceeds access width",
+                )?;
                 g.accesses.push(e);
                 if e.kind == Kind::Read {
                     info.reads += 1;
