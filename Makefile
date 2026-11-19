@@ -32,4 +32,4 @@ capture-android:
 
 .PHONY: deps-cli capture-android
 
--include tests/Makefile evaluation/Makefile
+-include tests/Makefile evaluation/Makefile release/Makefile

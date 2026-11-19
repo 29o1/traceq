@@ -3,12 +3,16 @@ import contextlib
 import io
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import check_source_release as release
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'release'))
+
+import source_archive as release
 
 
 class SourceRelease(unittest.TestCase):
@@ -21,9 +25,14 @@ class SourceRelease(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('frozen source\n')
-        (self.root / '.gitattributes').write_text('/tests export-ignore\n/evaluation export-ignore\n')
+        (self.root / '.gitattributes').write_text(
+            '/tests export-ignore\n/evaluation export-ignore\n/release export-ignore\n'
+            '/rust/*/tests export-ignore\n/rust/*/examples export-ignore\n'
+        )
         (self.root / '.gitignore').write_text('/build/\n*.gtsw\n')
-        for name in ('tests/regression.py', 'evaluation/runner.rs'):
+        self.dev_paths = ('tests/regression.py', 'evaluation/runner.rs', 'release/source_archive.py',
+                          'rust/traceq-core/tests/units.rs', 'rust/traceq-core/examples/sample.rs')
+        for name in self.dev_paths:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('development only\n')
@@ -53,8 +62,7 @@ class SourceRelease(unittest.TestCase):
         with tarfile.open(self.output) as archive:
             self.assertEqual(archive.extractfile('Makefile').read(), b'frozen source\n')
             names = archive.getnames()
-        self.assertNotIn('tests/regression.py', names)
-        self.assertNotIn('evaluation/runner.rs', names)
+        self.assertTrue(set(self.dev_paths).isdisjoint(names))
         self.assertNotIn('local.gtsw', names)
 
     def test_missing_dependency_manifest_does_not_replace_a_previous_archive(self):
@@ -66,13 +74,15 @@ class SourceRelease(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), b'previous archive')
 
     def test_unexcluded_evaluation_files_are_rejected(self):
-        (self.root / '.gitattributes').write_text('/tests export-ignore\n')
+        attributes = self.root / '.gitattributes'
+        attributes.write_text(attributes.read_text().replace('/evaluation export-ignore\n', ''))
         self.commit()
         self.assertEqual(self.package(), 1)
         self.assertFalse(self.output.exists())
 
     def test_unexcluded_tests_are_rejected(self):
-        (self.root / '.gitattributes').write_text('/evaluation export-ignore\n')
+        attributes = self.root / '.gitattributes'
+        attributes.write_text(attributes.read_text().replace('/tests export-ignore\n', ''))
         self.commit()
         self.assertEqual(self.package(), 1)
         self.assertFalse(self.output.exists())
@@ -90,6 +100,26 @@ class SourceRelease(unittest.TestCase):
         self.output.write_bytes(b'previous archive')
         self.assertEqual(self.package('missing-commit'), 1)
         self.assertEqual(self.output.read_bytes(), b'previous archive')
+
+    def test_git_attributes_cannot_hide_a_tracked_product_module(self):
+        name = 'rust/traceq-query/src/cli/find.rs'
+        module = self.root / name
+        module.parent.mkdir()
+        module.write_text('mod query_support;\n')
+        self.commit()
+        self.assertEqual(self.package(), 0)
+        original = self.output.read_bytes()
+        (self.root / '.git/info/attributes').write_text(f'/{name} export-ignore\n')
+        self.assertEqual(self.package(), 1)
+        self.assertEqual(self.output.read_bytes(), original)
+
+    def test_export_requires_an_explicit_ref(self):
+        result = subprocess.run(
+            [sys.executable, release.__file__, '--output', self.output], capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b'explicit commit or tag', result.stderr)
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == '__main__':

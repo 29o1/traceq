@@ -20,15 +20,6 @@ check-cli: cli
 check-cli-clean:
 	$(PYTHON) tests/check_cli_clean.py
 
-RELEASE_REF ?= HEAD
-RELEASE_ARCHIVE ?= build/release/traceq-source.tar.gz
-check-source-release:
-	$(PYTHON) tests/test_source_release.py
-	$(PYTHON) tests/check_source_release.py "$(RELEASE_REF)"
-
-source-release:
-	$(PYTHON) tests/check_source_release.py "$(RELEASE_REF)" --output "$(RELEASE_ARCHIVE)"
-
 check-find-value: cli
 	$(PYTHON) tests/test_find_value_stream.py
 
@@ -91,7 +82,7 @@ check-gum-context-android: capture-android
 	$(PYTHON) tests/integration/check_gum_context.py
 
 .PHONY: deps-host capture-host
-.PHONY: check check-cli check-cli-clean check-source-release source-release check-capture-build check-find-value
+.PHONY: check check-cli check-cli-clean check-capture-build check-find-value
 .PHONY: check-multiply check-literal check-registers check-transpose check-polymul
 .PHONY: check-aes check-bitops check-prefetch check-st2 check-structure check-simd
 .PHONY: check-invoke-android check-allocator-android check-gum-context-android

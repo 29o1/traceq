@@ -30,6 +30,11 @@ LOCAL_PARTS = {'.deps', '.git', 'artifacts', 'build', 'evaluation', 'examples', 
 LOCAL_SUFFIXES = {'.a', '.dylib', '.gtb', '.gtsc', '.gtsw', '.o', '.pyc', '.so'}
 
 
+def product_path(path):
+    return (path.parts[0] in PRODUCT_ROOTS
+            and not (path.parts[0] == 'rust' and path.parts[2:3] in (('tests',), ('examples',))))
+
+
 def main(ref, output=None):
     try:
         commit = subprocess.check_output(
@@ -39,14 +44,18 @@ def main(ref, output=None):
     except subprocess.CalledProcessError:
         print(f'Invalid release commit or tag: {ref}', file=sys.stderr)
         return 1
+    tree = subprocess.check_output(['git', 'ls-tree', '-r', '-z', '--name-only', commit], cwd=ROOT, timeout=30)
+    tracked = [PurePosixPath(os.fsdecode(name)) for name in tree.split(b'\0') if name]
+    # Archive attributes can hide nested product inputs, even via .git/info/attributes.
+    expected = REQUIRED | {path.as_posix() for path in tracked if product_path(path)}
     archive = subprocess.check_output(['git', 'archive', '--format=tar', commit], cwd=ROOT, timeout=30)
     with tarfile.open(fileobj=io.BytesIO(archive)) as source:
         members = [member for member in source if not member.isdir()]
         files = {PurePosixPath(member.name) for member in members}
     non_files = {member.name for member in members if not member.isfile()}
-    missing = REQUIRED.difference(path.as_posix() for path in files)
+    missing = expected.difference(path.as_posix() for path in files)
     extra = non_files | {path.as_posix() for path in files if (
-        path.parts[0] not in PRODUCT_ROOTS
+        not product_path(path)
         or LOCAL_PARTS.intersection(path.parts)
         or path.suffix in LOCAL_SUFFIXES
         or path.as_posix() == 'cli/traceq'
@@ -78,7 +87,9 @@ def main(ref, output=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('ref', nargs='?', default='HEAD', help='commit or tag to check (default: HEAD)')
+    parser.add_argument('ref', nargs='?', help='commit or tag to check (checks default to HEAD)')
     parser.add_argument('--output', type=Path, help='atomically save the checked snapshot as a .tar.gz archive')
     args = parser.parse_args()
-    sys.exit(main(args.ref, args.output))
+    if args.output is not None and not args.ref:
+        parser.error('export requires an explicit commit or tag (RELEASE_REF in make source-release)')
+    sys.exit(main(args.ref or 'HEAD', args.output))

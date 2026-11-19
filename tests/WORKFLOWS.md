@@ -37,7 +37,7 @@ Mac 宿主采集器、普通 C／汇编对照、旧 C++ 参考和观察实验均
 | 评分负对照 | `python3 tests/evaluation/check_controls.py --baseline /path/to/frozen-run --run /path/to/new-control` | 显式任务包和独立原生预期，需要已有宿主夹具 |
 | 模型评测 | `python3 evaluation/run_product_evaluation.py --artifact-dir /path/to/paired-packs` | 显式启动配对任务包中的 Terra/max 评测 |
 | 源码发布边界 | `make check-source-release RELEASE_REF=HEAD` | 打包器回归及所选提交的归档检查 |
-| 导出源码包 | `make source-release RELEASE_REF=HEAD RELEASE_ARCHIVE=build/release/traceq-source.tar.gz` | 固定一次提交身份，校验通过后原子写入同一份快照 |
+| 导出源码包 | `make source-release RELEASE_REF=<已验收提交或标签>` | `release/` 校验选定提交的完整产品树，原子写入 `build/release/traceq-source.tar.gz` |
 
 采集改动按影响范围选择宿主与一加 11 验收。设备操作统一通过 `/Users/fanjiahao05/.local/bin/revkit-phone` 串行执行。
 构建、CLI 回归和评测入口检查不会自动启动模型评测或操作设备。
@@ -95,9 +95,9 @@ traceq mem-state FILE \
 Git 提交记录源码进度，已接受版本由验收记录关联到提交及二进制哈希；普通开发提交不会自动成为产品发布。
 使用明确路径暂存本轮文件，通过 `git diff --cached --stat`、`git diff --cached --check` 和完整暂存差异核对后提交。工作区含用户修改或待验收候选时，避免整仓暂存。
 
-`.gitattributes` 从提交归档排除 `tests/`、`evaluation/` 及开发文档。`.gitignore` 将构建缓存、二进制、trace、运行记录和隔离实验留在本地。
+`.gitattributes` 从提交归档排除 `tests/`、`evaluation/`、`release/` 及开发文档。`.gitignore` 将构建缓存、二进制、trace、运行记录和隔离实验留在本地。
 忽略规则不影响已跟踪文件，应结合 `git ls-files -ci --exclude-standard` 和 `git diff --cached` 检查。
-`git archive` 与 `make source-release` 从所选提交读取内容，未提交的工作区修改不会进入快照。
+`make check-source-release` 默认检查 `HEAD`，也可以显式指定 `RELEASE_REF`。`make source-release` 要求填写已验收的提交或标签，可用 `RELEASE_ARCHIVE` 指定输出路径。归档从选定提交读取内容，工作区改动继续留在本地。
 发布包包含 CLI、Android SDK 和共享构建输入。导出后应在解压目录验证构建，完整 checkout 才提供测试与评测命令。
 
 历史失败、冻结二进制及诊断候选继续保存在本地产物目录。诊断候选通过相关验收并正式切换之前，验收记录仍引用已接受的 SDK／CLI 身份。
