@@ -99,7 +99,7 @@ def expand_context(document):
 
 
 def expand_mem_access(document):
-    """Restore named access rows, including the source label hoisted by rw."""
+    """Restore named access rows and their full value-source labels."""
     if not isinstance(document, dict) or not isinstance(document.get('meta'), dict):
         return document
     meta = document['meta']
@@ -107,30 +107,46 @@ def expand_mem_access(document):
         if meta.get('compact_fallback') == 'mixed_write_sources':
             return {**document, 'meta': {k: v for k, v in meta.items() if k != 'compact_fallback'}}
         return document
-    indexed = meta['mem_access_format'] == 'columns-v2'
-    if not indexed and meta['mem_access_format'] != 'columns-v1':
+    fmt = meta['mem_access_format']
+    if fmt not in ('columns-v1', 'columns-v2', 'columns-v3'):
         raise ValueError('Unsupported mem_access_format')
-    expected = (*MEM_ACCESS_COLUMNS, 'access_index') if indexed else MEM_ACCESS_COLUMNS
-    columns, sources = meta.get('columns'), meta.get('value_sources')
+    table_encoded = fmt == 'columns-v3'
+    columns = meta.get('columns')
+    indexed = fmt == 'columns-v2' or (table_encoded and isinstance(columns, list) and 'access_index' in columns)
+    expected = (*MEM_ACCESS_COLUMNS, *(['access_index'] if indexed else []),
+                *(['value_source_ref'] if table_encoded else []))
     if not isinstance(columns, list) or len(columns) != len(expected) or \
             any(not isinstance(c, str) for c in columns) or set(columns) != set(expected):
         raise ValueError('Invalid memory access columns')
-    if not isinstance(sources, dict) or set(sources) != {'r', 'w'} or \
-            any(not isinstance(v, str) for v in sources.values()) or not isinstance(document.get('data'), list):
-        raise ValueError('Invalid memory access value_sources or data')
+    if not isinstance(document.get('data'), list):
+        raise ValueError('Invalid memory access data')
+    source_column = 'value_source_table' if table_encoded else 'value_sources'
+    sources = meta.get(source_column)
+    if table_encoded:
+        if not isinstance(sources, list) or any(not isinstance(v, str) for v in sources):
+            raise ValueError('Invalid memory access value_source_table')
+    elif not isinstance(sources, dict) or set(sources) != {'r', 'w'} or \
+            any(not isinstance(v, str) for v in sources.values()):
+        raise ValueError('Invalid memory access value_sources')
     rows = []
     for cells in document['data']:
         if not isinstance(cells, list) or len(cells) != len(columns):
             raise ValueError('Invalid memory access row length')
         row = dict(zip(columns, cells))
-        if not isinstance(row['rw'], str) or row['rw'] not in sources:
+        if row['rw'] not in ('r', 'w'):
             raise ValueError('Invalid memory access rw')
         if indexed and (type(row['access_index']) is not int or row['access_index'] < 0):
             raise ValueError('Invalid memory access index')
-        row['value_source'] = sources[row['rw']]
+        source_key = row['rw']
+        if table_encoded:
+            source_key = row.pop('value_source_ref')
+            if type(source_key) is not int or not 0 <= source_key < len(sources):
+                raise ValueError('Invalid memory access value_source_ref')
+        row['value_source'] = sources[source_key]
         rows.append(row)
     return {**document, 'data': rows,
-            'meta': {k: v for k, v in meta.items() if k not in {'mem_access_format', 'columns', 'value_sources'}}}
+            'meta': {k: v for k, v in meta.items()
+                     if k not in {'mem_access_format', 'columns', source_column}}}
 
 
 def expand_mem_state(document):
