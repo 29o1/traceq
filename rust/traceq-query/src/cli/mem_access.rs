@@ -1,5 +1,8 @@
 use super::*;
-use std::ops::{Range, RangeInclusive};
+use std::{
+    collections::BTreeSet,
+    ops::{Range, RangeInclusive},
+};
 
 const COLUMNS: [&str; 9] = [
     "ev",
@@ -24,6 +27,7 @@ struct Options<'a> {
     compact: bool,
     access_index: bool,
     source_table: bool,
+    include_location: bool,
     json: bool,
 }
 
@@ -37,6 +41,7 @@ impl<'a> Options<'a> {
         let (mut read, mut write, mut compact) = (false, false, false);
         let mut access_index = false;
         let mut source_table = false;
+        let mut include_location = false;
         let mut i = 1;
         while i < args.len() {
             let flag = &args[i];
@@ -67,6 +72,10 @@ impl<'a> Options<'a> {
                 "--compact" => compact = true,
                 "--access-index" => access_index = true,
                 "--source-table" => source_table = true,
+                "--location" if json => include_location = true,
+                "--location" => {
+                    return Err("--location requires mem-access --json".to_string().into());
+                }
                 "--addr" | "--len" | "--size" => {
                     return Err(format!("unsupported memory selector {flag}; {RANGE_HINT}").into());
                 }
@@ -121,6 +130,7 @@ impl<'a> Options<'a> {
             compact,
             access_index,
             source_table,
+            include_location,
             json,
         }))
     }
@@ -132,6 +142,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     };
     let mut rows = Vec::new();
     let mut sources = Vec::new();
+    let mut shown_pcs = BTreeSet::new();
     let mut total = 0;
     let stream = input(options.path)?;
     let header = stream.header;
@@ -160,6 +171,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             total += 1;
             if index < options.offset || rows.len() >= options.limit {
                 continue;
+            }
+            if options.include_location {
+                shown_pcs.insert(g.pc);
             }
             let rw = if a.kind == Kind::Read { "r" } else { "w" };
             let source = memory_source(a.kind, g.word);
@@ -219,6 +233,17 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     }
     if options.compact {
         compact_page(&mut rows, sources, &options, &mut meta);
+    }
+    if options.include_location {
+        meta.insert(
+            "pc_locations".into(),
+            Value::Object(
+                shown_pcs
+                    .into_iter()
+                    .map(|pc| (format!("0x{pc:x}"), instruction_location(pc, &info, None)))
+                    .collect(),
+            ),
+        );
     }
     Ok(response(rows, Value::Object(meta), options.json))
 }
