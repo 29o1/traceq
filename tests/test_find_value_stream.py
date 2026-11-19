@@ -129,7 +129,6 @@ class FindValueChecks(unittest.TestCase):
             self.assertEqual(unknown['meta']['skipped_unknown_reads'], 1)
             outside = ['--value', '0x5a', '--range', '0x1000,1']
             self.assertEqual(self.query(path, *outside, ok=False)['error']['code'], 'ARGUMENT')
-            self.assertEqual(self.query(path, '--bytes', '5a', '--range', '0x2001,1', ok=False)['error']['code'], 'ARGUMENT')
             raw = path.read_bytes()
             for damage in (raw[:-1], raw + b'x'):
                 path.write_bytes(damage)
@@ -325,6 +324,79 @@ class FindValueChecks(unittest.TestCase):
             tail=self.query(path,*args,'--last',1);self.assertEqual([(r['addr'],r['bytes']) for r in tail['data']],[('0x2002','aaaa'),('0x2003','aa')]);self.assertEqual(tail['meta']['next'],'')
             self.assertEqual(self.query(path,*args,'--read')['data'],[])
             self.assertEqual(self.query(path,*args,'--from',1)['data'],[])
+
+    def test_byte_ranges_require_full_match_before_pagination(self):
+        groups = [
+            [('w', 0x2020, b'ab', True)],
+            [('w', 0x2000, b'ab', True), ('w', 0x2002, b'ab', True), ('w', 0x2004, b'abcd', True)],
+            [('w', 0x2008, b'ab', True), ('w', 0x200a, b'ab', True)],
+        ]
+        ranges = ['0x2008,4', '0x2001,2', '0x2002,1', '0x2003,2']
+        select = [arg for span in ranges for arg in ('--range', span)]
+        for chunked in (False, True):
+            path = self.byte_artifact(groups, chunked)
+            for mode in ([], ['--across-events']):
+                args = ['--bytes', '6162', '--bytes', '6261', '--write', *mode, *select]
+                full = self.query(path, *args)
+                self.assertEqual([p['total'] for p in full['meta']['patterns']], [3, 3])
+                self.assertEqual(
+                    [(r['bytes'], r['addr'], r['access_index'], r['last_access_index'])
+                     for r in full['data']],
+                    [('6261', '0x2001', 0, 1), ('6162', '0x2002', 1, 1),
+                     ('6261', '0x2003', 1, 2), ('6162', '0x2008', 0, 0),
+                     ('6261', '0x2009', 0, 1), ('6162', '0x200a', 1, 1)],
+                )
+                page = self.query(path, *args, '--limit', 1)
+                self.assertEqual(page['data'], full['data'][:2])
+                argv = shlex.split(page['meta']['next'])
+                self.assertEqual([argv[i + 1] for i, arg in enumerate(argv) if arg == '--range'], ranges)
+                following = json.loads(subprocess.check_output([str(CLI), *argv[1:]], timeout=10))
+                self.assertEqual(following['data'], full['data'][2:4])
+                self.assertEqual(self.query(path, *args, '--last', 1)['data'], full['data'][-2:])
+                # A hole cannot be bridged even when both ends are selected.
+                self.assertEqual(self.query(
+                    path, '--bytes', '616261', *mode, '--range', '0x2000,1',
+                    '--range', '0x2002,1',
+                )['data'], [])
+
+    def test_byte_ranges_keep_outside_uncertainty_and_late_gap(self):
+        groups = [
+            [('w', 0x2000, b'a', True)],
+            [('r', 0x2080, b'X', False)],
+            [('w', 0x2001, b'b', True)],
+            [('r', 0x2001, b'X', False), ('w', 0x2002, b'ab', True)],
+        ]
+        for chunked in (False, True):
+            path = self.byte_artifact(groups, chunked)
+            args = ['--bytes', '6162', '--across-events', '--range', '0x2000,4']
+            result = self.query(path, *args)
+            self.assertEqual(result['meta']['skipped_unknown_reads'], 1)
+            self.assertEqual([(r['ev'], r['last_ev'], r['addr']) for r in result['data']],
+                             [(3, 3, '0x2002')])
+            # A late unpositioned gap invalidates even fully in-range cross-event matches.
+            groups[1] = [('r', 0x2080, b'X', True)]
+            gap_path = self.byte_artifact(groups, chunked, global_gap=True)
+            result = self.query(gap_path, *args, '--write', '--limit', 1)
+            self.assertTrue(result['meta']['cross_event_matches_suppressed'])
+            self.assertEqual(result['meta']['total'], 1)
+            self.assertEqual(result['data'][0]['ev'], 3)
+            groups[1] = [('r', 0x2080, b'X', False)]
+
+    def test_byte_ranges_validate_input_even_for_invalid_scope_or_empty_page(self):
+        for chunked in (False, True):
+            path = self.byte_artifact([[('w', 0x2000, b'ab', True)]], chunked)
+            raw = path.read_bytes()
+            for mode in ([], ['--across-events']):
+                args = ['--bytes', '6162', *mode, '--offset', 99]
+                outside = ['--range', '0x1000,1']
+                path.write_bytes(raw)
+                self.assertEqual(self.query(path, *args, *outside, ok=False)['error']['code'], 'ARGUMENT')
+                for damage in (raw[:-1], raw + b'x'):
+                    path.write_bytes(damage)
+                    for select in (outside, ['--range', '0x2000,2']):
+                        error = self.query(path, *args, *select, ok=False)
+                        self.assertEqual(set(error), {'error'})
+                        self.assertEqual(error['error']['code'], 'TRACE_ERROR')
 
     def test_byte_zero_known_is_distinct_from_unknown_and_registers(self):
         for chunked in (False,True):
