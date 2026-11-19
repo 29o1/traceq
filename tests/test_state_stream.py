@@ -625,6 +625,26 @@ class StateStreamChecks(unittest.TestCase):
         q=self.query(self.artifact(events),'mem-access',['--range','0x2000,8','--read'])
         self.assertFalse(q['data'][0]['known']);self.assertIsNone(q['data'][0]['val'])
 
+    def test_known_memory_value_width_is_validated_beyond_selected_page(self):
+        for chunked in (False, True):
+            for kind, size, low, bad_low, bad_high in (
+                (2, 1, 0xff, 0x1ff, 0),
+                (7, 8, (1 << 64) - 1, (1 << 64) - 1, 1),
+            ):
+                events = self.base()
+                events.insert(-2, (kind, 2, 0x1008, 0x2000, size, low, 0, 1))
+                events[-1] = (4, 3, 0, int(kind == 2), 0, int(kind == 7), 2, 2)
+                valid = self.artifact(events, chunked)
+                rows = self.query(valid, 'mem-access', ['--range', '0x2000,8'])['data']
+                self.assertEqual([row['val'] for row in rows], [hex(low)])
+                events[-3] = (kind, 2, 0x1008, 0x2000, size, bad_low, bad_high, 1)
+                damaged = self.artifact(events, chunked)
+                bad = self.query(damaged, 'mem-access',
+                                 ['--range', '0x2000,8', '--to', '0', '--offset', '99'], ok=False)
+                self.assertEqual(set(bad), {'error'})
+                self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
+                self.assertIn('exceeds access width', bad['error']['message'])
+
     def memory_access_events(self):
         events=self.compact_events()
         events.insert(next(i for i,e in enumerate(events) if e[0]==2),
