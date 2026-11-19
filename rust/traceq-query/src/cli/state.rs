@@ -108,6 +108,8 @@ struct Instruction {
     word: u64,
     committed: bool,
     gap: bool,
+    gap_count: u64,
+    gap_reason_mask: u64,
 }
 
 struct HexWord(u64);
@@ -124,6 +126,10 @@ struct InstructionRow<'a> {
     ev: u64,
     gap: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    gap_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap_reasons: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     module_offset: Option<HexWord>,
@@ -138,6 +144,7 @@ fn instruction_row<'a>(
     info: &'a Info,
     module_base: Option<u64>,
     include_location: bool,
+    include_gap_reasons: bool,
 ) -> InstructionRow<'a> {
     InstructionRow {
         completion: if g.committed {
@@ -147,6 +154,8 @@ fn instruction_row<'a>(
         },
         ev: g.seq,
         gap: g.gap,
+        gap_count: include_gap_reasons.then_some(g.gap_count),
+        gap_reasons: include_gap_reasons.then(|| reasons(g.gap_reason_mask)),
         location: include_location.then(|| instruction_location(g.pc, info, module_base)),
         module_offset: module_base.map(|base| HexWord(g.pc - base)),
         off: HexWord(g.pc.wrapping_sub(info.header.code_base)),
@@ -219,6 +228,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut offs = vec![];
     let mut module = None;
     let mut include_location = false;
+    let mut include_gap_reasons = false;
     let mut target_module = None;
     let mut i = 1;
     while i < args.len() {
@@ -235,6 +245,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                     .into());
             }
             "--gaps" => gaps_only = true,
+            "--gap-reasons" if name == "instructions" => include_gap_reasons = true,
             "--range" if memory_query => {
                 let value = next(args, &mut i, a)?;
                 if ranges.len() == 64 {
@@ -592,6 +603,8 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                         word: g.word,
                         committed: g.committed,
                         gap: g.gap,
+                        gap_count: g.gap_count,
+                        gap_reason_mask: g.gap_reason_mask,
                     });
                 }
                 total += 1;
@@ -601,7 +614,15 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 .transpose()?;
             let rows: Vec<_> = page
                 .iter()
-                .map(|g| instruction_row(g, &info, selected_base, include_location))
+                .map(|g| {
+                    instruction_row(
+                        g,
+                        &info,
+                        selected_base,
+                        include_location,
+                        include_gap_reasons,
+                    )
+                })
                 .collect();
             let mut meta = capture_meta(&info);
             if let Some(base) = selected_base {

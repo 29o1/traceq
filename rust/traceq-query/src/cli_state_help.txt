@@ -1,6 +1,8 @@
 execution-state stream queries (profile 2):
   traceq stat FILE [--json]
-  traceq instructions FILE [--from E --to E] [--gaps] [--limit N --offset N] [--json]
+  traceq instructions FILE [--from E --to E] [--gaps] [--gap-reasons] [--limit N --offset N] [--json]
+    --gap-reasons adds the positioned gap_count and distinct gap_reasons for each instruction.
+    Unpositioned loss is reported in capture metadata.
   traceq boundaries FILE [--from E --to E] [--target-module NAME] [--reg x0]... [--limit N --offset N] [--json]
     --target-module selects exits by the exact recorded target module name.
     Pagination counts the matches. Capture totals and reentry evidence still apply.
