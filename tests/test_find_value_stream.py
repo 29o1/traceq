@@ -86,6 +86,29 @@ class FindValueChecks(unittest.TestCase):
         filtered=self.query(path,'--value','0x5a','--from',1,'--to',1)
         self.assertEqual([r['rw'] for r in filtered['data']],['r','w'])
 
+    def test_numeric_memory_search_limits_memory_rows_and_keeps_continuation(self):
+        for chunked in (False, True):
+            path = self.artifact(chunked=chunked)
+            args = ['--value', '0x5a']
+            all_hits = self.query(path, *args)
+            wanted = [row for row in all_hits['data'] if row['kind'] == 'mem']
+            full = self.query(path, *args, '--memory')
+            self.assertEqual(full['data'], wanted)
+            self.assertEqual({row['rw'] for row in wanted}, {'r', 'w'})
+            self.assertEqual(full['meta']['skipped_unknown_reads'], all_hits['meta']['skipped_unknown_reads'])
+            self.assertEqual(full['meta']['scans'], 1)
+
+            page = self.query(path, *args, '--memory', '--limit', 2)
+            self.assertEqual(page['data'], wanted[:2])
+            self.assertEqual(page['meta']['total'], len(wanted))
+            argv = shlex.split(page['meta']['next'])
+            self.assertIn('--memory', argv)
+            following = json.loads(subprocess.check_output([str(CLI), *argv[1:]], timeout=10))
+            self.assertEqual(following['data'], wanted[2:])
+            tail = self.query(path, *args, '--memory', '--last', 1)
+            self.assertEqual(tail['data'], wanted[-1:])
+            self.assertEqual(self.query(path, '--bytes', '5a', '--memory', ok=False)['error']['code'], 'ARGUMENT')
+
     def test_full_width_and_slot_64(self):
         for chunked in (False,True):
             path=self.artifact(chunked=chunked);q=self.query(path,'--value',hex(WIDE))
@@ -167,7 +190,7 @@ class FindValueChecks(unittest.TestCase):
         for chunked in (False,True):
             for damage in ['truncate','trailing']:
                 path=self.artifact(chunked=chunked);data=path.read_bytes();path.write_bytes(data[:-1] if damage=='truncate' else data+b'x')
-                for args in [['--limit',1],['--last',1],['--to',0,'--context',1]]:
+                for args in [['--limit',1],['--last',1],['--to',0,'--context',1],['--memory','--offset',99]]:
                     q=self.query(path,'--value','0x5a',*args,ok=False);self.assertEqual(set(q),{'error'})
                     self.assertEqual(q['error']['code'],'TRACE_ERROR')
 
