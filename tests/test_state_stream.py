@@ -425,6 +425,63 @@ class StateStreamChecks(unittest.TestCase):
                 path.write_bytes(damage)
                 self.assertEqual(self.query(path, 'last-writers', empty, ok=False)['error']['code'], 'TRACE_ERROR')
 
+    def test_writer_range_union_pages_across_holes_and_keeps_cutoff_evidence(self):
+        ranges = ['--range', '0x2006,2', '--range', '0x2001,2',
+                  '--range', '0x2000,2', '--range', '0x2006,1']
+        checkpoints = ['--checkpoint', '2', '--checkpoint', '1', '--checkpoint', '2']
+        for chunked in (False, True):
+            path = self.artifact(self.compact_events(), chunked)
+            union = self.query(path, 'last-writers', [*ranges, *checkpoints])
+            self.assertEqual(union['meta']['writer_ranges'], [{'base': '0x2000', 'size': 3},
+                                                             {'base': '0x2006', 'size': 2}])
+            broad = self.query(path, 'last-writers', ['--range', '0x2000,8', *checkpoints])
+            for selected, full in zip(union['data'], broad['data']):
+                self.assertEqual(selected['ev'], full['ev'])
+                self.assertEqual(selected['data'], [full['data'][i] for i in (0, 1, 2, 6, 7)])
+            self.assertEqual(union['data'][0], union['data'][2])
+            for point, reentry in zip(union['data'], (2, None, 2)):
+                gap = point['data'][1]['last_observed_write']['first_located_gap']
+                self.assertEqual(gap['scope_exit']['reentry_ev'], reentry)
+
+            args = [*ranges, '--at-seq', '1', '--limit', '3', '--offset', '1']
+            first = self.query(path, 'last-writers', [*args, '--runs'])
+            self.assertEqual((first['meta']['total'], first['meta']['shown']), (5, 3))
+            self.assertEqual([(r['address'], r['size']) for r in first['data']], [('0x2001', 2), ('0x2006', 1)])
+            self.assertEqual(len(first['meta']['located_gaps']), 1)
+            self.assertEqual(self.expand_writer_runs(first), self.query(path, 'last-writers', [*args, '--compact']))
+            argv = shlex.split(first['meta']['next'])
+            self.assertEqual(argv.count('--range'), 4)
+            second = json.loads(subprocess.check_output([str(ROOT/'cli/traceq'), *argv[1:]], timeout=10))
+            self.assertEqual([(r['address'], r['size']) for r in second['data']], [('0x2007', 1)])
+            self.assertFalse(second['meta']['truncated'])
+
+    def test_writer_range_union_caps_and_validates_empty_pages(self):
+        for chunked in (False, True):
+            path = self.artifact(self.compact_events(), chunked, data_size=8192)
+            span = ['--range', '0x2000,4096']
+            other = ['--range', '0x3000,4096']
+            cap = [*span, *other, '--checkpoint', '1', '--checkpoint', '2', '--limit', '2049']
+            self.assertEqual(self.query(path, 'last-writers', cap, ok=False)['error']['code'], 'ARGUMENT')
+            self.assertEqual(self.query(path, 'last-writers', span * 65, ok=False)['error']['code'], 'ARGUMENT')
+            empty = [*span, *other, '--offset', '9999', '--runs']
+            valid = self.query(path, 'last-writers', empty)
+            self.assertEqual((valid['meta']['total'], valid['data']), (8192, []))
+            outside = [*empty, '--range', '0x4000,1']
+            self.assertEqual(self.query(path, 'last-writers', outside, ok=False)['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                for args in (empty, outside):
+                    error = self.query(path, 'last-writers', args, ok=False)
+                    self.assertEqual(set(error), {'error'})
+                    self.assertEqual(error['error']['code'], 'TRACE_ERROR')
+
+        legacy = self.out/'writer-ranges-profile-one.gtsw'
+        legacy.write_bytes(b'GTSW001\0' + struct.pack('<7Q', 0x1000, 0x100, 0x2000, 32, 1, 1, 64)
+                           + struct.pack('<8Q', 4, 0, 0, 0, 0, 0, 0, 1))
+        bad = self.query(legacy, 'last-writers', ['--range', '0x2000,4', '--range', '0x2008,4'], ok=False)
+        self.assertIn('profile 2', bad['error']['message'])
+
     def test_writer_checkpoints_match_single_pages_in_request_order(self):
         cutoffs = ['2', '0', '1', '2']
         checkpoints = [part for cutoff in cutoffs for part in ('--checkpoint', cutoff)]
