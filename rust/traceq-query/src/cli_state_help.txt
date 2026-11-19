@@ -16,6 +16,9 @@ execution-state stream queries (profile 2):
     Each page is self-contained; limits still count actual accesses and validate the full stream.
     --access-index --json adds the zero-based index within the instruction before filtering.
     With --compact it selects columns-v2, with access_index appended to each row.
+    --source-table --compact --json selects columns-v3, including for mixed sources.
+    Each row ends in value_source_ref, a zero-based index into meta.value_source_table.
+    The table is page-local. An empty page has an empty table. --access-index is optional.
   traceq mem-state FILE --range BASE,LEN --at-ev E [--phase pre|post] [--compact] [--json]
   traceq mem-state FILE --range BASE,LEN --checkpoint E:pre --checkpoint E2:post [--json]
     Profile2 checkpoints share one validated scan; 1..64 requests, input order retained.

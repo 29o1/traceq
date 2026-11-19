@@ -22,6 +22,7 @@ struct Options<'a> {
     offset: u64,
     compact: bool,
     access_index: bool,
+    source_table: bool,
     json: bool,
 }
 
@@ -33,6 +34,7 @@ impl<'a> Options<'a> {
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
         let mut access_index = false;
+        let mut source_table = false;
         let mut i = 1;
         while i < args.len() {
             let flag = &args[i];
@@ -56,6 +58,7 @@ impl<'a> Options<'a> {
                 "--write" => write = true,
                 "--compact" => compact = true,
                 "--access-index" => access_index = true,
+                "--source-table" => source_table = true,
                 "--addr" | "--len" | "--size" => {
                     return Err(format!("unsupported memory selector {flag}; {RANGE_HINT}").into());
                 }
@@ -85,6 +88,11 @@ impl<'a> Options<'a> {
                 .to_string()
                 .into());
         }
+        if source_table && !compact {
+            return Err("--source-table requires mem-access --compact --json"
+                .to_string()
+                .into());
+        }
         let direction = if read {
             Some(Kind::Read)
         } else if write {
@@ -101,6 +109,7 @@ impl<'a> Options<'a> {
             offset,
             compact,
             access_index,
+            source_table,
             json,
         }))
     }
@@ -188,7 +197,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total, rows.len(), options.offset));
     if options.compact {
-        compact_page(&mut rows, sources, options.access_index, &mut meta);
+        compact_page(&mut rows, sources, &options, &mut meta);
     }
     Ok(response(rows, Value::Object(meta), options.json))
 }
@@ -196,14 +205,36 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
 fn compact_page(
     rows: &mut [Value],
     sources: Vec<&'static str>,
-    indexed: bool,
+    options: &Options<'_>,
     meta: &mut Map<String, Value>,
 ) {
-    let columns = if indexed {
+    let columns = if options.access_index {
         &COLUMNS[..]
     } else {
         &COLUMNS[..COLUMNS.len() - 1]
     };
+    if options.source_table {
+        let mut table = Vec::new();
+        for (row, source) in rows.iter_mut().zip(sources) {
+            let reference = table
+                .iter()
+                .position(|&entry| entry == source)
+                .unwrap_or_else(|| {
+                    table.push(source);
+                    table.len() - 1
+                });
+            let Value::Array(cells) = row else {
+                unreachable!()
+            };
+            cells.push(json!(reference));
+        }
+        let mut columns = columns.to_vec();
+        columns.push("value_source_ref");
+        meta.insert("mem_access_format".into(), json!("columns-v3"));
+        meta.insert("columns".into(), json!(columns));
+        meta.insert("value_source_table".into(), json!(table));
+        return;
+    }
     let mut writes = rows
         .iter()
         .zip(&sources)
@@ -227,7 +258,11 @@ fn compact_page(
         }
         meta.insert("compact_fallback".into(), json!("mixed_write_sources"));
     } else {
-        let format = if indexed { "columns-v2" } else { "columns-v1" };
+        let format = if options.access_index {
+            "columns-v2"
+        } else {
+            "columns-v1"
+        };
         meta.insert("mem_access_format".into(), json!(format));
         meta.insert("columns".into(), json!(columns));
         meta.insert(
