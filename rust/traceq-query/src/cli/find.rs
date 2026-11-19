@@ -7,7 +7,7 @@ use std::{
     io::Seek,
     ops::Range,
 };
-use traceq_core::wire::Event;
+use traceq_core::wire::{Event, Header};
 
 #[derive(Clone, Default)]
 struct Hit {
@@ -88,8 +88,23 @@ impl Default for Options {
         }
     }
 }
+impl Options {
+    fn check_ranges(&self, header: Header) -> Result<(), CliError> {
+        if self
+            .ranges
+            .iter()
+            .all(|range| header.contains_data(range.start, range.end - range.start))
+        {
+            Ok(())
+        } else {
+            Err("query extends outside declared data range"
+                .to_string()
+                .into())
+        }
+    }
+}
 const NUMERIC_HELP: &str = "traceq find-value V FILE [--memory] [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  --memory selects both recorded reads and writes before pagination.\n  Repeat --range up to 64 times to select memory accesses overlapping their union.\n  Each matching access is returned whole and once. Values match the full access.\n  --read/--write select one memory direction. Register phases describe snapshots.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
-const BYTES_HELP: &str = "traceq find-value FILE --bytes HEX [--bytes HEX ...] [--across-events] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\n  Profile 2 GTSW/GTSC: exact patterns in known recorded memory bytes.\n  Up to64 distinct patterns of1..64 bytes; contiguous hexadecimal digits.\n  Contiguous accesses may join within one instruction/direction without gaps.\n  Unknown accesses and event/direction/address changes break byte spans.\n  --across-events joins adjacent increasing addresses across events in a64-byte window.\n  With --read/--write, known disjoint opposite accesses may be skipped; overlaps break.\n  All unknown accesses, gaps and selected address/direction changes break runs.\n  An unpositioned gap suppresses joins across events or skipped accesses.\n  Historical recorded runs only; no current-memory or last-writer claim.\n  Reordered stores can leave complete content with no sequence hit.\n  Locate/disambiguate a shorter prefix; use mem-access --range B,L to choose the last required observation E, then mem-state --range B,L --checkpoint E:post before later gaps.\n  Run hits use first ev/access_index and last_ev/last_access_index, ordered by completion byte.\n  Pagination applies per pattern, at most4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  In run mode --context selects bounded windows at both endpoints of the first hit.\n  Numeric --value matching stays exact; do not mix --bytes and numeric values.\n";
+const BYTES_HELP: &str = "traceq find-value FILE --bytes HEX [--bytes HEX ...] [--range BASE,LEN ...] [--across-events] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\n  Profile 2 GTSW/GTSC: exact patterns in known recorded memory bytes.\n  Up to64 distinct patterns of1..64 bytes; contiguous hexadecimal digits.\n  Contiguous accesses may join within one instruction/direction without gaps.\n  Repeat --range up to 64 times. Every matched byte must lie in the union.\n  Ranges filter matches before pagination. Accesses outside the ranges can still break runs.\n  Unknown accesses and event/direction/address changes break byte spans.\n  --across-events joins adjacent increasing addresses across events in a64-byte window.\n  With --read/--write, known disjoint opposite accesses may be skipped; overlaps break.\n  All unknown accesses, gaps and selected address/direction changes break runs.\n  An unpositioned gap suppresses joins across events or skipped accesses.\n  Historical recorded runs only; no current-memory or last-writer claim.\n  Reordered stores can leave complete content with no sequence hit.\n  Locate/disambiguate a shorter prefix; use mem-access --range B,L to choose the last required observation E, then mem-state --range B,L --checkpoint E:post before later gaps.\n  Run hits use first ev/access_index and last_ev/last_access_index, ordered by completion byte.\n  Pagination applies per pattern, at most4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  In run mode --context selects bounded windows at both endpoints of the first hit.\n  Numeric --value matching stays exact; do not mix --bytes and numeric values.\n";
 
 fn pattern(text: &str) -> Result<Vec<u8>, CliError> {
     let text = text
@@ -164,14 +179,13 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 values.push(number128(next(args, &mut i, arg)?)?);
             }
             "--memory" => options.memory_only = true,
-            "--range" if !byte_mode => {
+            "--range" => {
                 if options.ranges.len() == 64 {
                     return Err("find-value accepts at most 64 ranges".to_string().into());
                 }
                 let (base, len) = parse_range(next(args, &mut i, arg)?)?;
                 options.ranges.push(base..base + len);
             }
-            "--range" => return Err("--range applies to numeric searches".to_string().into()),
             "--read" => options.read = true,
             "--write" => options.write = true,
             "--across-events" => options.across_events = true,
@@ -280,10 +294,7 @@ fn find_numbers(
     values: Vec<u128>,
 ) -> Result<Response, CliError> {
     let stream = buffered_input(&mut *file)?;
-    let range_ok = options
-        .ranges
-        .iter()
-        .all(|r| stream.header.contains_data(r.start, r.end - r.start));
+    let range_check = options.check_ranges(stream.header);
     let index: HashMap<_, _> = values.iter().enumerate().map(|(i, v)| (*v, i)).collect();
     let registers =
         !options.memory_only && options.ranges.is_empty() && !options.read && !options.write;
@@ -303,7 +314,7 @@ fn find_numbers(
         all[key].add(hit, &options);
     };
     let mut observe = |seq, pc, accesses: &[Event], state: Option<replay::ObservationGroup<'_>>| {
-        if !range_ok || seq < options.from || seq > options.to {
+        if range_check.is_err() || seq < options.from || seq > options.to {
             return;
         }
         if let Some(state) = state {
@@ -368,11 +379,7 @@ fn find_numbers(
     } else {
         replay::read_evidence(stream, |g, _| observe(g.seq, g.pc, g.accesses, None))?
     };
-    if !range_ok {
-        return Err("query extends outside declared data range"
-            .to_string()
-            .into());
-    }
+    range_check?;
     let pages = if registers && info.unpositioned_gap {
         memory
     } else {
@@ -388,6 +395,61 @@ fn find_numbers(
         unknown_reads,
         registers,
     )
+}
+
+struct BytePatterns<'a> {
+    patterns: &'a [Vec<u8>],
+    candidates: [Vec<usize>; 256],
+    ranges: Vec<Range<u64>>,
+}
+impl<'a> BytePatterns<'a> {
+    fn new(patterns: &'a [Vec<u8>], options: &Options) -> Self {
+        let mut candidates = std::array::from_fn(|_| Vec::new());
+        for (key, pattern) in patterns.iter().enumerate() {
+            let edge = if options.across_events {
+                pattern[pattern.len() - 1]
+            } else {
+                pattern[0]
+            };
+            candidates[edge as usize].push(key);
+        }
+        let mut sorted = options.ranges.clone();
+        sorted.sort_unstable_by_key(|range| range.start);
+        let mut ranges: Vec<Range<u64>> = Vec::new();
+        for range in sorted {
+            if let Some(previous) = ranges.last_mut()
+                && range.start <= previous.end
+            {
+                previous.end = previous.end.max(range.end);
+            } else {
+                ranges.push(range);
+            }
+        }
+        Self {
+            patterns,
+            candidates,
+            ranges,
+        }
+    }
+
+    fn contains(&self, address: u64, len: usize) -> bool {
+        self.ranges.is_empty()
+            || self
+                .ranges
+                .get(self.ranges.partition_point(|range| range.end <= address))
+                .is_some_and(|range| address >= range.start && len as u64 <= range.end - address)
+    }
+
+    fn overlaps(&self, access: &Event) -> bool {
+        self.ranges.is_empty()
+            || self
+                .ranges
+                .get(
+                    self.ranges
+                        .partition_point(|range| range.end <= access.address),
+                )
+                .is_some_and(|range| range.start < access.address + access.size)
+    }
 }
 
 struct Span {
@@ -410,16 +472,18 @@ impl Span {
     fn flush(
         &mut self,
         g: &replay::EvidenceGroup<'_>,
-        patterns: &[Vec<u8>],
-        candidates: &[Vec<usize>; 256],
+        search: &BytePatterns<'_>,
         pages: &mut [Page],
         options: &Options,
         order: &mut u64,
     ) {
         for pos in 0..self.bytes.len() {
-            for &key in &candidates[self.bytes[pos] as usize] {
-                let pattern = &patterns[key];
-                if !self.bytes[pos..].starts_with(pattern) {
+            let address = self.base + pos as u64;
+            for &key in &search.candidates[self.bytes[pos] as usize] {
+                let pattern = &search.patterns[key];
+                if !self.bytes[pos..].starts_with(pattern)
+                    || !search.contains(address, pattern.len())
+                {
                     continue;
                 }
                 let first = self.starts.partition_point(|&at| at <= pos) - 1;
@@ -431,7 +495,7 @@ impl Span {
                         order: *order,
                         ev: g.seq,
                         pc: g.pc,
-                        address: self.base + pos as u64,
+                        address,
                         size: pattern.len(),
                         write: Some(self.write),
                         access,
@@ -458,26 +522,25 @@ fn find_bytes(
     if options.across_events {
         return find_byte_runs(file, options, patterns);
     }
-    let mut candidates: [Vec<usize>; 256] = std::array::from_fn(|_| vec![]);
-    for (key, p) in patterns.iter().enumerate() {
-        candidates[p[0] as usize].push(key);
-    }
+    let search = BytePatterns::new(&patterns, &options);
+    let stream = buffered_input(&mut *file)?;
+    let range_check = options.check_ranges(stream.header);
     let mut pages: Vec<Page> = (0..patterns.len()).map(|_| Page::default()).collect();
     let (mut order, mut unknown_reads) = (0, 0);
     let mut span = Span::new();
-    let info = replay::read_evidence(buffered_input(&mut *file)?, |g, _| {
-        if g.seq < options.from || g.seq > options.to {
+    let info = replay::read_evidence(stream, |g, _| {
+        if range_check.is_err() || g.seq < options.from || g.seq > options.to {
             return;
         }
         for (access, a) in g.accesses.iter().enumerate() {
             let write = a.kind == Kind::Write;
             if options.read && write || options.write && !write {
-                span.flush(&g, &patterns, &candidates, &mut pages, &options, &mut order);
+                span.flush(&g, &search, &mut pages, &options, &mut order);
                 continue;
             }
             if a.detail == 0 {
-                unknown_reads += 1;
-                span.flush(&g, &patterns, &candidates, &mut pages, &options, &mut order);
+                unknown_reads += u64::from(search.overlaps(a));
+                span.flush(&g, &search, &mut pages, &options, &mut order);
                 continue;
             }
             if !span.bytes.is_empty()
@@ -485,7 +548,7 @@ fn find_bytes(
                     || write != span.write
                     || a.address != span.base + span.bytes.len() as u64)
             {
-                span.flush(&g, &patterns, &candidates, &mut pages, &options, &mut order);
+                span.flush(&g, &search, &mut pages, &options, &mut order);
             }
             if span.bytes.is_empty() {
                 span.base = a.address;
@@ -497,8 +560,9 @@ fn find_bytes(
                 &(a.low as u128 | ((a.high as u128) << 64)).to_le_bytes()[..a.size as usize],
             );
         }
-        span.flush(&g, &patterns, &candidates, &mut pages, &options, &mut order);
+        span.flush(&g, &search, &mut pages, &options, &mut order);
     })?;
+    range_check?;
     finish(
         file,
         options,
@@ -564,18 +628,17 @@ fn find_byte_runs(
     options: Options,
     patterns: Vec<Vec<u8>>,
 ) -> Result<Response, CliError> {
-    let mut candidates: [Vec<usize>; 256] = std::array::from_fn(|_| vec![]);
-    for (key, p) in patterns.iter().enumerate() {
-        candidates[*p.last().unwrap() as usize].push(key);
-    }
+    let search = BytePatterns::new(&patterns, &options);
+    let stream = buffered_input(&mut *file)?;
+    let range_check = options.check_ranges(stream.header);
     let mut pages: Vec<Page> = (0..patterns.len()).map(|_| Page::default()).collect();
     // A late unpositioned gap invalidates joins. Keep independently paginated
     // intra-instruction matches during the same scan; filtering a page is wrong.
     let mut local_pages: Vec<Page> = (0..patterns.len()).map(|_| Page::default()).collect();
     let (mut order, mut unknown_reads, mut local_epoch) = (0, 0, 0u64);
     let mut run = ByteRun::new();
-    let info = replay::read_evidence(buffered_input(&mut *file)?, |g, _| {
-        if g.seq < options.from || g.seq > options.to {
+    let info = replay::read_evidence(stream, |g, _| {
+        if range_check.is_err() || g.seq < options.from || g.seq > options.to {
             return;
         }
         local_epoch = local_epoch.wrapping_add(1);
@@ -586,7 +649,7 @@ fn find_byte_runs(
             let write = a.kind == Kind::Write;
             let selected = !(options.read && write || options.write && !write);
             if a.detail == 0 {
-                if selected {
+                if selected && search.overlaps(a) {
                     unknown_reads += 1;
                 }
                 run.clear();
@@ -623,12 +686,15 @@ fn find_byte_runs(
                     local_epoch,
                 };
                 run.push(byte, last);
-                for &key in &candidates[byte as usize] {
-                    let pattern = &patterns[key];
+                for &key in &search.candidates[byte as usize] {
+                    let pattern = &search.patterns[key];
                     if !run.matches(pattern) {
                         continue;
                     }
                     let first = run.location(pattern.len());
+                    if !search.contains(first.address, pattern.len()) {
+                        continue;
+                    }
                     let hit = Hit {
                         key,
                         order,
@@ -657,6 +723,7 @@ fn find_byte_runs(
             run.clear();
         }
     })?;
+    range_check?;
     finish(
         file,
         options,
