@@ -593,6 +593,27 @@ class StateStreamChecks(unittest.TestCase):
         events=self.base();events.insert(5,(3,1,0x1004,0,0,0,0,1));events[-1]=(4,3,0,0,1,0,2,2)
         self.assertFalse(self.query(self.artifact(events),args=['--at-ev','2','--reg','x0'])['data'][0]['known'])
 
+    def test_instruction_gap_reasons_separate_positioned_and_global_loss(self):
+        for chunked in (False, True):
+            events = self.base()
+            events[5:5] = [(3, 1, 0x1004, 0, 0, 0, 0, reason) for reason in (1, 1, 6)]
+            events.insert(-1, (3, 3, 0, 0, 0, 0, 0, 4))
+            events[-1] = (4, 3, 0, 0, 4, 0, 2, 2)
+            path = self.artifact(events, chunked)
+            page = self.query(path, 'instructions', ['--gap-reasons'])
+            self.assertTrue(page['meta']['unpositioned_gap'])
+            self.assertEqual(page['meta']['capture_gaps'], 4)
+            self.assertEqual([(r['ev'], r['gap_count'], r['gap_reasons']) for r in page['data']],
+                             [(0, 0, []), (1, 3, ['unsupported', 'outside_code_range']), (2, 0, [])])
+            self.assertEqual(self.query(path, 'instructions', ['--gaps', '--gap-reasons'])['data'],
+                             page['data'][1:2])
+            raw = path.read_bytes()
+            for bad in (raw[:-1], raw + b'x'):
+                path.write_bytes(bad)
+                doc = self.query(path, 'instructions', ['--gap-reasons', '--offset', '99'], ok=False)
+                self.assertEqual(set(doc), {'error'})
+                self.assertEqual(doc['error']['code'], 'TRACE_ERROR')
+
     def test_future_gap_does_not_erase_historical_write(self):
         events=self.base();events.insert(2,(2,0,0x1000,0x2000,1,0xab,0,1))
         events.insert(6,(3,1,0x1004,0,0,0,0,1));events[-1]=(4,3,0,1,1,0,2,2)
