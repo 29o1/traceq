@@ -455,6 +455,15 @@ fn memory_source(kind: Kind, word: u64) -> &'static str {
         MEMORY_WRITE_SOURCE
     }
 }
+fn source_reference(table: &mut Vec<&'static str>, source: &'static str) -> usize {
+    if let Some(index) = table.iter().position(|&entry| entry == source) {
+        index
+    } else {
+        let index = table.len();
+        table.push(source);
+        index
+    }
+}
 pub(crate) fn memory_json(g: &Group) -> Value {
     Value::Array(
         g.accesses

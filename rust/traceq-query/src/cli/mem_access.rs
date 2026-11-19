@@ -262,13 +262,7 @@ fn compact_page(
     if options.source_table {
         let mut table = Vec::new();
         for (row, source) in rows.iter_mut().zip(sources) {
-            let reference = table
-                .iter()
-                .position(|&entry| entry == source)
-                .unwrap_or_else(|| {
-                    table.push(source);
-                    table.len() - 1
-                });
+            let reference = source_reference(&mut table, source);
             let Value::Array(cells) = row else {
                 unreachable!()
             };

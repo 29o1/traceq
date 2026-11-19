@@ -62,6 +62,7 @@ struct Options {
     last: u64,
     context: u64,
     memory_only: bool,
+    include_value_source: bool,
     ranges: Vec<Range<u64>>,
     read: bool,
     write: bool,
@@ -79,6 +80,7 @@ impl Default for Options {
             last: 0,
             context: 0,
             memory_only: false,
+            include_value_source: false,
             ranges: Vec::new(),
             read: false,
             write: false,
@@ -102,7 +104,7 @@ impl Options {
         }
     }
 }
-const NUMERIC_HELP: &str = "traceq find-value V FILE [--memory] [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  --memory selects both recorded reads and writes before pagination.\n  Repeat --range up to 64 times to select memory accesses overlapping their union.\n  Each matching access is returned whole and once. Values match the full access.\n  --read/--write select one memory direction. Register phases describe snapshots.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
+const NUMERIC_HELP: &str = "traceq find-value V FILE [--memory] [--value-source] [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\ntraceq find-value FILE --value V [--value V ...] [same options]\n  Profile 2 GTSW/GTSC: exact unsigned numeric values, up to 128 bits.\n  Search known recorded register pre/post observations and memory accesses.\n  --memory selects both recorded reads and writes before pagination.\n  Repeat --range up to 64 times to select memory accesses overlapping their union.\n  Each matching access is returned whole and once. Values match the full access.\n  --read/--write select one memory direction. Register phases describe snapshots.\n  --value-source adds observation sources for shown memory hits.\n  Resolve meta.pc_value_source_refs[pc][rw] in the page-local meta.value_source_table.\n  Inherited register state is not repeated. No subword or byte-substring matching.\n  Up to 64 distinct values; limit/offset/last apply per value, at most 4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  Context for a register hit selects that register's full-width view.\n";
 const BYTES_HELP: &str = "traceq find-value FILE --bytes HEX [--bytes HEX ...] [--range BASE,LEN ...] [--across-events] [--read|--write] [--from E --to E] [--limit N --offset M | --last N] [--context N] [--json]\n  Profile 2 GTSW/GTSC: exact patterns in known recorded memory bytes.\n  Up to64 distinct patterns of1..64 bytes; contiguous hexadecimal digits.\n  Contiguous accesses may join within one instruction/direction without gaps.\n  Repeat --range up to 64 times. Every matched byte must lie in the union.\n  Ranges filter matches before pagination. Accesses outside the ranges can still break runs.\n  Unknown accesses and event/direction/address changes break byte spans.\n  --across-events joins adjacent increasing addresses across events in a64-byte window.\n  With --read/--write, known disjoint opposite accesses may be skipped; overlaps break.\n  All unknown accesses, gaps and selected address/direction changes break runs.\n  An unpositioned gap suppresses joins across events or skipped accesses.\n  Historical recorded runs only; no current-memory or last-writer claim.\n  Reordered stores can leave complete content with no sequence hit.\n  Locate/disambiguate a shorter prefix; use mem-access --range B,L to choose the last required observation E, then mem-state --range B,L --checkpoint E:post before later gaps.\n  Run hits use first ev/access_index and last_ev/last_access_index, ordered by completion byte.\n  Pagination applies per pattern, at most4096 output hits.\n  One full validated scan; --context 1..200 adds a scan around the first shown hit.\n  In run mode --context selects bounded windows at both endpoints of the first hit.\n  Numeric --value matching stays exact; do not mix --bytes and numeric values.\n";
 
 fn pattern(text: &str) -> Result<Vec<u8>, CliError> {
@@ -178,6 +180,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 values.push(number128(next(args, &mut i, arg)?)?);
             }
             "--memory" => options.memory_only = true,
+            "--value-source" => options.include_value_source = true,
             "--range" => {
                 if options.ranges.len() == 64 {
                     return Err("find-value accepts at most 64 ranges".to_string().into());
@@ -222,6 +225,12 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     }
     if byte_mode && options.memory_only {
         return Err(CliError("--memory applies to numeric searches".into(), 2));
+    }
+    if byte_mode && options.include_value_source {
+        return Err(CliError(
+            "--value-source applies to numeric searches".into(),
+            2,
+        ));
     }
     if byte_mode {
         if positional.len() != 1 || patterns.is_empty() {
@@ -772,6 +781,9 @@ fn finish(
         if options.memory_only {
             continuation += " --memory";
         }
+        if options.include_value_source {
+            continuation += " --value-source";
+        }
         for range in &options.ranges {
             write!(
                 continuation,
@@ -863,6 +875,8 @@ fn finish(
             }
         }
     }
+    let mut value_source_table = Vec::new();
+    let mut pc_value_source_refs = BTreeMap::<u64, BTreeMap<&str, usize>>::new();
     let rows = hits
         .iter()
         .map(|hit| {
@@ -879,11 +893,26 @@ fn finish(
                 row["val"] = hx(values[hit.key]);
             }
             if let Some(write) = hit.write {
+                let (rw, kind) = if write {
+                    ("w", Kind::Write)
+                } else {
+                    ("r", Kind::Read)
+                };
                 row["kind"] = json!("mem");
                 row["lane"] = json!(if write { "mem_w" } else { "mem_r" });
-                row["rw"] = json!(if write { "w" } else { "r" });
+                row["rw"] = json!(rw);
                 row["addr"] = hx(hit.address);
                 row["access_index"] = json!(hit.access);
+                if options.include_value_source {
+                    pc_value_source_refs
+                        .entry(hit.pc)
+                        .or_default()
+                        .entry(rw)
+                        .or_insert_with(|| {
+                            let source = memory_source(kind, u64::from(info.sites[&hit.pc].word));
+                            source_reference(&mut value_source_table, source)
+                        });
+                }
                 if byte_mode {
                     row["byte_offset"] = json!(hit.byte_offset);
                     row["access_size"] = json!(hit.access_size);
@@ -910,7 +939,7 @@ fn finish(
             "recorded_memory_byte_subsequence",
             "known recorded memory bytes; contiguous spans stay within one instruction/direction without gaps; no current-memory or writer-provenance claim",
         )
-    } else if options.memory_only || !options.ranges.is_empty() {
+    } else if !registers {
         (
             "exact_unsigned_numeric_value",
             "recorded memory access values; no current-memory or writer-provenance claim",
@@ -961,6 +990,18 @@ fn finish(
                     .iter()
                     .map(|r| json!({"base":hx(r.start),"size":r.end-r.start}))
                     .collect::<Vec<_>>()
+            ),
+        );
+    }
+    if options.include_value_source {
+        meta.insert("value_source_table".into(), json!(value_source_table));
+        meta.insert(
+            "pc_value_source_refs".into(),
+            Value::Object(
+                pc_value_source_refs
+                    .into_iter()
+                    .map(|(pc, directions)| (format!("0x{pc:x}"), json!(directions)))
+                    .collect(),
             ),
         );
     }
