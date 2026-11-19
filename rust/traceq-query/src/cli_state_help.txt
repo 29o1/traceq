@@ -1,7 +1,12 @@
 execution-state stream queries (profile 2):
   traceq stat FILE [--json]
-  traceq instructions FILE [--from E --to E] [--gaps] [--gap-reasons] [--limit N --offset N] [--json]
+  traceq instructions FILE [--from E --to E] [--gaps] [--gap-reasons] [--gap-reason REASON ...] [--limit N --offset N] [--json [--location]]
     --gap-reasons adds the positioned gap_count and distinct gap_reasons for each instruction.
+    --gap-reason matches any selected reason before pagination and includes all reasons for each match.
+    Accepted reasons are unsupported, unconfirmed_store, foreign_thread, exclusive_region,
+    outside_data_range, outside_code_range.
+    --location --json adds the unique recorded module name, base and offset.
+    PCs with no unique recorded module keep null module fields.
     Unpositioned loss is reported in capture metadata.
   traceq boundaries FILE [--from E --to E] [--target-module NAME] [--reg x0]... [--limit N --offset N] [--json]
     --target-module selects exits by the exact recorded target module name.

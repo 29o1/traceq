@@ -262,6 +262,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut module = None;
     let mut include_location = false;
     let mut include_gap_reasons = false;
+    let mut gap_reason_filter = 0;
     let mut target_module = None;
     let mut i = 1;
     while i < args.len() {
@@ -280,6 +281,16 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             }
             "--gaps" => gaps_only = true,
             "--gap-reasons" if name == "instructions" => include_gap_reasons = true,
+            "--gap-reason" if name == "instructions" => {
+                let reason = next(args, &mut i, a)?;
+                let id = LABELS
+                    .iter()
+                    .position(|&label| label == reason)
+                    .filter(|&id| id != 0)
+                    .ok_or_else(|| CliError(format!("unknown gap reason: {reason}"), 2))?;
+                gap_reason_filter |= 1 << id;
+                include_gap_reasons = true;
+            }
             "--range" if memory_query => {
                 let value = next(args, &mut i, a)?;
                 if ranges.len() == 64 {
@@ -347,9 +358,13 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                         .into());
                 }
             }
-            "--location" if name == "find-pc" && json => include_location = true,
+            "--location" if matches!(name, "instructions" | "find-pc") && json => {
+                include_location = true;
+            }
             "--location" => {
-                return Err("--location requires find-pc --json".to_string().into());
+                return Err("--location requires instructions or find-pc --json"
+                    .to_string()
+                    .into());
             }
             "--target-module" if name == "boundaries" => {
                 let value = next(args, &mut i, a)?;
@@ -614,7 +629,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             let mut page = Vec::new();
             let mut resolved = None;
             let info = replay::read_evidence(stream, |g, state| {
-                if g.seq < from || g.seq > to || gaps_only && !g.gap {
+                if g.seq < from
+                    || g.seq > to
+                    || gaps_only && !g.gap
+                    || gap_reason_filter != 0 && g.gap_reason_mask & gap_reason_filter == 0
+                {
                     return;
                 }
                 if name == "find-pc" {
@@ -668,6 +687,9 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
             if let Some(base) = selected_base {
                 meta.insert("module".into(), json!(module));
                 meta.insert("module_base".into(), hx(base));
+            }
+            if gap_reason_filter != 0 {
+                meta.insert("gap_reason_filter".into(), reasons(gap_reason_filter));
             }
             meta.extend(page_meta(args, total, rows.len(), offset));
             return Ok(response(rows, Value::Object(meta), json));
