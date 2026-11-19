@@ -16,6 +16,7 @@ const COLUMNS: [&str; 9] = [
 struct Options<'a> {
     path: &'a str,
     ranges: Vec<Range<u64>>,
+    instruction_pcs: Vec<u64>,
     events: RangeInclusive<u64>,
     direction: Option<Kind>,
     limit: usize,
@@ -31,6 +32,7 @@ impl<'a> Options<'a> {
         let json = args.iter().any(|a| a == "--json");
         let mut path = "";
         let mut ranges = Vec::new();
+        let mut instruction_pcs = Vec::new();
         let (mut from, mut to, mut limit, mut offset) = (0, u64::MAX, 20, 0);
         let (mut read, mut write, mut compact) = (false, false, false);
         let mut access_index = false;
@@ -49,6 +51,12 @@ impl<'a> Options<'a> {
                     }
                     let (base, len) = parse_range(value)?;
                     ranges.push(base..base + len);
+                }
+                "--pc" => {
+                    if instruction_pcs.len() == 64 {
+                        return Err("mem-access accepts at most 64 PCs".to_string().into());
+                    }
+                    instruction_pcs.push(parse_u64(next(args, &mut i, flag)?, false)?);
                 }
                 "--from" => from = parse_u64(next(args, &mut i, flag)?, false)?,
                 "--to" => to = parse_u64(next(args, &mut i, flag)?, false)?,
@@ -100,9 +108,12 @@ impl<'a> Options<'a> {
         } else {
             None
         };
+        instruction_pcs.sort_unstable();
+        instruction_pcs.dedup();
         Ok(Some(Self {
             path,
             ranges,
+            instruction_pcs,
             events: from..=to,
             direction,
             limit: limit as usize,
@@ -129,7 +140,11 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         .iter()
         .all(|r| header.contains_data(r.start, r.end - r.start));
     let info = replay::read_evidence(stream, |g, _| {
-        if !range_ok || !options.events.contains(&g.seq) {
+        if !range_ok
+            || !options.events.contains(&g.seq)
+            || (!options.instruction_pcs.is_empty()
+                && options.instruction_pcs.binary_search(&g.pc).is_err())
+        {
             return;
         }
         for (ordinal, a) in g.accesses.iter().enumerate() {
@@ -196,6 +211,12 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     }
     let mut meta = capture_meta(&info);
     meta.extend(page_meta(args, total, rows.len(), options.offset));
+    if !options.instruction_pcs.is_empty() {
+        meta.insert(
+            "instruction_pcs".into(),
+            Value::Array(options.instruction_pcs.iter().copied().map(hx).collect()),
+        );
+    }
     if options.compact {
         compact_page(&mut rows, sources, &options, &mut meta);
     }

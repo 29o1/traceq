@@ -15,9 +15,11 @@ execution-state stream queries (profile 2):
     A PC with zero or multiple containing modules has null module fields unless
     --module selects an exact recorded instance. off stays capture-relative.
   traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
-  traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--compact] [--json]
+  traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--pc PC ...] [--read|--write] [--from E --to E] [--compact] [--json]
     Up to 64 ranges share one validated scan. Each matching recorded access is
     returned whole and once, in trace order. Filters and pagination apply to the union.
+    Repeat --pc up to 64 times to select exact recorded instruction addresses.
+    PC selection combines with ranges, direction and event windows before pagination.
     --compact --json uses columns-v1 arrays, with columns and rw-indexed value_sources in meta.
     Rows retain ev/pc/off/rw/addr/size/known/val; unknown values stay null.
     Each page is self-contained; limits still count actual accesses and validate the full stream.
