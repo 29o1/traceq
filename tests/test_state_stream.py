@@ -1038,6 +1038,51 @@ class StateStreamChecks(unittest.TestCase):
                     self.assertEqual(set(failure), {'error'})
                     self.assertEqual(failure['error']['code'], 'TRACE_ERROR')
 
+    def test_mem_access_locations_are_page_local_and_keep_ambiguous_pcs_unresolved(self):
+        def module(base, size, name):
+            return (10, 0, base, size, len(name), *struct.unpack('<3Q', name.ljust(24, b'\0')))
+
+        expected = {
+            '0x1000': {'address': '0x1000', 'module': 'outer.so', 'module_base': '0x1000', 'offset': '0x0'},
+            '0x1008': {'address': '0x1008', 'module': None, 'module_base': None, 'offset': None},
+            '0x1010': {'address': '0x1010', 'module': None, 'module_base': None, 'offset': None},
+        }
+        args = ['--range', '0x2000,16', '--access-index']
+        for chunked in (False, True):
+            events = self.memory_access_events()
+            events[1:1] = [module(0x1000, 16, b'outer.so'), module(0x1008, 4, b'inner.so')]
+            path = self.artifact(events, chunked)
+            for mode in ([], ['--compact'], ['--compact', '--source-table']):
+                plain = self.query(path, 'mem-access', [*args, *mode])
+                located = self.query(path, 'mem-access', [*args, *mode, '--location'])
+                self.assertEqual(located['meta'].pop('pc_locations'), expected)
+                self.assertEqual(located, plain)
+
+            first = self.query(path, 'mem-access', [*args, '--location', '--limit', '2'])
+            self.assertEqual(first['meta']['pc_locations'], {'0x1000': expected['0x1000']})
+            self.assertEqual(len(first['data']), 2)
+            argv = shlex.split(first['meta']['next'])
+            self.assertIn('--location', argv)
+            second = json.loads(subprocess.check_output([str(ROOT/'cli/traceq'), *argv[1:]], timeout=10))
+            self.assertEqual(second['meta']['pc_locations'], {'0x1008': expected['0x1008']})
+            self.assertFalse(second['data'][0]['known'])
+            self.assertIsNone(second['data'][0]['val'])
+            self.assertEqual(second['data'][0]['off'], '0x8')
+
+            empty = [*args, '--location', '--offset', '99']
+            self.assertEqual(self.query(path, 'mem-access', empty)['meta']['pc_locations'], {})
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                error = self.query(path, 'mem-access', empty, ok=False)
+                self.assertEqual(set(error), {'error'})
+                self.assertEqual(error['error']['code'], 'TRACE_ERROR')
+            text = subprocess.run([str(ROOT/'cli/traceq'), 'mem-access', str(path),
+                                   '--range', '0x2000,16', '--location'],
+                                  capture_output=True, text=True, timeout=10)
+            self.assertEqual(text.returncode, 2)
+            self.assertIn('--json', text.stderr)
+
     def test_mem_access_compact_validates_empty_pages_and_corrupt_suffix(self):
         for chunked in [False,True]:
             path=self.artifact(self.memory_access_events(),chunked);original=path.read_bytes()
