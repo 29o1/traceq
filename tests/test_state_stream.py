@@ -281,7 +281,7 @@ class StateStreamChecks(unittest.TestCase):
             result = subprocess.run([str(ROOT/'cli/traceq'), *next_argv[1:]], capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertEqual(json.loads(result.stdout)['data'], located['data'][2:])
-            self.assertEqual(self.query(path, 'instructions', ['--location'], ok=False)['error']['code'], 'ARGUMENT')
+            self.assertEqual(self.query(path, 'instructions', ['--location'])['data'], located['data'])
             raw = path.read_bytes()
             for damaged in (raw[:-1], raw + b'x'):
                 path.write_bytes(damaged)
@@ -670,6 +670,51 @@ class StateStreamChecks(unittest.TestCase):
                 doc = self.query(path, 'instructions', ['--gap-reasons', '--offset', '99'], ok=False)
                 self.assertEqual(set(doc), {'error'})
                 self.assertEqual(doc['error']['code'], 'TRACE_ERROR')
+
+    def test_instruction_gap_reason_filters_before_paging_without_attributing_global_loss(self):
+        args = ['--gap-reason', 'outside_data_range', '--gap-reason', 'unsupported',
+                '--gap-reason', 'outside_code_range', '--gap-reason', 'unsupported', '--location']
+        for chunked in (False, True):
+            events = self.base()
+            events[5:5] = [(3, 1, 0x1004, 0, 0, 0, 0, reason) for reason in (1, 1, 6)]
+            events[-1:] = [(1, 3, 0x100c, 0x91000400, 0, 0, 0, 0),
+                           (3, 3, 0x100c, 0, 0, 0, 0, 5),
+                           (3, 4, 0, 0, 0, 0, 0, 4),
+                           (4, 4, 0, 0, 5, 0, 2, 2)]
+            path = self.artifact(events, chunked)
+            all_matches = self.query(path, 'instructions', args)
+            self.assertEqual(
+                [(r['ev'], r['gap_count'], r['gap_reasons']) for r in all_matches['data']],
+                [(1, 3, ['unsupported', 'outside_code_range']), (3, 1, ['outside_data_range'])],
+            )
+            meta = all_matches['meta']
+            self.assertEqual(meta['gap_reason_filter'], ['unsupported', 'outside_data_range', 'outside_code_range'])
+            self.assertEqual((meta['total'], meta['capture_gaps'], meta['unpositioned_gap']), (2, 5, True))
+            self.assertTrue(all(r['location']['module'] is None for r in all_matches['data']))
+
+            first = self.query(path, 'instructions', [*args, '--limit', '1'])
+            self.assertEqual(first['data'], all_matches['data'][:1])
+            argv = shlex.split(first['meta']['next'])
+            self.assertEqual(argv.count('--gap-reason'), 4)
+            second = json.loads(subprocess.check_output([str(ROOT/'cli/traceq'), *argv[1:]], timeout=10))
+            self.assertEqual(second['data'], all_matches['data'][1:])
+            self.assertFalse(second['meta']['truncated'])
+            self.assertEqual(self.query(path, 'instructions', [*args, '--from', '3'])['data'],
+                             all_matches['data'][1:])
+
+            only_global = ['--gap-reason', 'exclusive_region', '--location']
+            self.assertEqual(self.query(path, 'instructions', only_global)['data'], [])
+            for cmd, flags in (('instructions', ['--gap-reason', 'unknown']),
+                               ('find-pc', ['--addr', '0x1004', '--gap-reason', 'unsupported'])):
+                error = self.query(path, cmd, flags, ok=False)
+                self.assertEqual(error['error']['code'], 'ARGUMENT')
+            raw = path.read_bytes()
+            for damage in (raw[:-1], raw + b'x'):
+                path.write_bytes(damage)
+                for flags in (only_global, [*args, '--offset', '99']):
+                    bad = self.query(path, 'instructions', flags, ok=False)
+                    self.assertEqual(set(bad), {'error'})
+                    self.assertEqual(bad['error']['code'], 'TRACE_ERROR')
 
     def test_future_gap_does_not_erase_historical_write(self):
         events=self.base();events.insert(2,(2,0,0x1000,0x2000,1,0xab,0,1))
