@@ -124,6 +124,8 @@ struct InstructionRow<'a> {
     ev: u64,
     gap: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     module_offset: Option<HexWord>,
     off: HexWord,
     opcode: HexWord,
@@ -135,6 +137,7 @@ fn instruction_row<'a>(
     g: &Instruction,
     info: &'a Info,
     module_base: Option<u64>,
+    include_location: bool,
 ) -> InstructionRow<'a> {
     InstructionRow {
         completion: if g.committed {
@@ -144,6 +147,7 @@ fn instruction_row<'a>(
         },
         ev: g.seq,
         gap: g.gap,
+        location: include_location.then(|| instruction_location(g.pc, info, module_base)),
         module_offset: module_base.map(|base| HexWord(g.pc - base)),
         off: HexWord(g.pc.wrapping_sub(info.header.code_base)),
         opcode: HexWord(g.word),
@@ -214,6 +218,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let mut pcs = vec![];
     let mut offs = vec![];
     let mut module = None;
+    let mut include_location = false;
     let mut i = 1;
     while i < args.len() {
         let a = &args[i];
@@ -295,6 +300,10 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                         .to_string()
                         .into());
                 }
+            }
+            "--location" if name == "find-pc" && json => include_location = true,
+            "--location" => {
+                return Err("--location requires find-pc --json".to_string().into());
             }
             "--read" => read_only = true,
             "--write" => write_only = true,
@@ -583,7 +592,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
                 .transpose()?;
             let rows: Vec<_> = page
                 .iter()
-                .map(|g| instruction_row(g, &info, selected_base))
+                .map(|g| instruction_row(g, &info, selected_base, include_location))
                 .collect();
             let mut meta = capture_meta(&info);
             if let Some(base) = selected_base {

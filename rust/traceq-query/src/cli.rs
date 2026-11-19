@@ -346,14 +346,34 @@ fn register_value(values: &Registers, r: &Register, unknown: bool) -> Value {
 pub(crate) fn location(address: u64, info: &Info) -> Value {
     // Reverse declaration order matches the prior C++ unordered map's normal
     // insertion traversal for nested module envelopes; explicit scope is separate.
-    for base in info.module_order.iter().rev() {
-        let m = &info.modules[base];
-        if address >= *base && address - *base < m.size {
-            return json!({"address":hx(address),"module":String::from_utf8_lossy(&m.name),"module_base":hx(*base),"offset":hx(address-*base)});
-        }
+    module_location(address, info, containing_modules(address, info).next())
+}
+
+fn containing_modules(address: u64, info: &Info) -> impl Iterator<Item = u64> + '_ {
+    info.module_order
+        .iter()
+        .rev()
+        .copied()
+        .filter(move |&base| address >= base && address - base < info.modules[&base].size)
+}
+
+fn module_location(address: u64, info: &Info, base: Option<u64>) -> Value {
+    if let Some(base) = base {
+        let module = &info.modules[&base];
+        return json!({"address":hx(address),"module":String::from_utf8_lossy(&module.name),"module_base":hx(base),"offset":hx(address-base)});
     }
     json!({"address":hx(address),"module":null,"module_base":null,"offset":null})
 }
+
+fn instruction_location(address: u64, info: &Info, selected_base: Option<u64>) -> Value {
+    let base = selected_base.or_else(|| {
+        let mut matches = containing_modules(address, info);
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    });
+    module_location(address, info, base)
+}
+
 pub(crate) fn transfer(t: u64) -> &'static str {
     match t {
         1 => "call",

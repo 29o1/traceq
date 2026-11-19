@@ -7,6 +7,9 @@ execution-state stream queries (profile 2):
     --module selects one exact recorded module name. off stays capture-relative.
     Module queries also return module_offset and meta.module_base. Without --module,
     --off selects an offset from meta.code_base.
+    --location --json adds each hit's recorded module name, base and offset.
+    A PC with zero or multiple containing modules has null module fields unless
+    --module selects an exact recorded instance. off stays capture-relative.
   traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
   traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--read|--write] [--from E --to E] [--compact] [--json]
     Up to 64 ranges share one validated scan. Each matching recorded access is
