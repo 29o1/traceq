@@ -29,10 +29,10 @@ class StreamChecks(unittest.TestCase):
         cls.out=ROOT/'artifacts'/('query-checks-'+str(time.time_ns()));cls.out.mkdir(parents=True)
         cls.counter=0
 
-    def artifact(self,events,raw_suffix=b''):
+    def artifact(self,events,raw_suffix=b'',*,code_base=0x1000):
         type(self).counter+=1
         path=self.out/(str(self.counter)+'.gtsw')
-        data=b'GTSW001\0'+struct.pack('<7Q',0x1000,0x100,0x2000,32,1,1,64)
+        data=b'GTSW001\0'+struct.pack('<7Q',code_base,0x100,0x2000,32,1,1,64)
         path.write_bytes(data+b''.join(struct.pack('<8Q',*e) for e in events)+raw_suffix)
         return path
 
@@ -54,6 +54,18 @@ class StreamChecks(unittest.TestCase):
         self.assertEqual([rows[i]['writer_seq'] for i in range(8)],[0,0,2,2,0,0,0,0])
         self.assertEqual(rows[2]['value'],'0xbb');self.assertFalse(rows[8]['known'])
         self.assertIsNone(rows[8]['writer_seq']);self.assertIsNone(rows[8]['value'])
+
+    def test_single_range_alignment_uses_instruction_pc(self):
+        for start in (0x1004, 0x1005, 0x1104):
+            with self.subTest(pc=hex(start)):
+                events = [(kind, seq, pc + start - 0x1000 if pc else pc, *rest)
+                          for kind, seq, pc, *rest in self.base()]
+                result = self.query(self.artifact(events, code_base=0x1001), ok=start == 0x1004)
+                if start == 0x1004:
+                    self.assertEqual(result['data'][0]['pc'], '0x1004')
+                    self.assertEqual(result['data'][0]['value'], '0x88')
+                else:
+                    self.assertEqual(result['error']['code'], 'FORMAT')
 
     def test_state_cutoff_is_explicit_for_default_historical_empty_and_paged_results(self):
         path=self.artifact(self.base())

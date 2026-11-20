@@ -59,6 +59,20 @@ class ScopeRangeChecks(unittest.TestCase):
    p=self.artifact(rows,chunked);q=self.q(p,'instructions','--limit',len(pcs));self.assertEqual([int(x['pc'],0) for x in q['data']],pcs)
    for invalid_pc in [0x10fd,0x10ff,0x1100,0x2000,0x30fd,0x3100]:
     damaged=list(rows);damaged.insert(len(prefix),self.site(invalid_pc,b'nop',0xd503201f));self.q(self.artifact(damaged,chunked),'stat',ok=False)
+ def test_single_range_alignment_uses_instruction_pc(self):
+  for chunked in (False,True):
+   for pc in (0x1004,0x1005,0x1104):
+    with self.subTest(chunked=chunked,pc=hex(pc)):
+     rows=[self.site(pc,b'nop',0xd503201f),(1,0,pc,0xd503201f,0,0,0,0),(4,1,0,0,0,0,0,2)]
+     path=self.artifact(rows,chunked)
+     data=bytearray(path.read_bytes())
+     struct.pack_into('<2Q',data,8,0x1001,0x100)
+     path.write_bytes(data)
+     result=self.q(path,'instructions',ok=pc==0x1004)
+     if pc==0x1004:
+      self.assertEqual([(row['pc'],row['off']) for row in result['data']],[('0x1004','0x3')])
+     else:
+      self.assertEqual(result['error']['code'],'TRACE_ERROR')
  def test_implicit_range_cannot_end_inside_an_instruction(self):
   pc=0x1004
   rows=[self.site(pc,b'nop',0xd503201f),(1,0,pc,0xd503201f,0,0,0,0),(4,1,0,0,0,0,0,2)]

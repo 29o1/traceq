@@ -600,7 +600,7 @@ fn profile1(
                 if e.seq != instructions
                     || e.pc < code_base
                     || e.pc - code_base >= code_size
-                    || (e.pc - code_base) % 4 != 0
+                    || !e.pc.is_multiple_of(4)
                     || e.address != 0
                     || e.size != 0
                     || e.low != 0

@@ -575,7 +575,7 @@ fn read_impl<
                 require(
                     e.seq == info.instructions
                         && info.in_code(e.pc)
-                        && (e.pc - info.header.code_base).is_multiple_of(4)
+                        && e.pc.is_multiple_of(4)
                         && e.address <= u32::MAX as u64
                         && e.detail <= 1
                         && e.size == 0
