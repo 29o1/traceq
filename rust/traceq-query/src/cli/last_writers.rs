@@ -599,7 +599,8 @@ fn profile1(
             Kind::Exec => {
                 if e.seq != instructions
                     || e.pc < code_base
-                    || e.pc - code_base >= code_size
+                    || code_size < 4
+                    || e.pc - code_base > code_size - 4
                     || !e.pc.is_multiple_of(4)
                     || e.address != 0
                     || e.size != 0

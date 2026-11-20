@@ -55,14 +55,16 @@ class StreamChecks(unittest.TestCase):
         self.assertEqual(rows[2]['value'],'0xbb');self.assertFalse(rows[8]['known'])
         self.assertIsNone(rows[8]['writer_seq']);self.assertIsNone(rows[8]['value'])
 
-    def test_single_range_alignment_uses_instruction_pc(self):
-        for start in (0x1004, 0x1005, 0x1104):
-            with self.subTest(pc=hex(start)):
-                events = [(kind, seq, pc + start - 0x1000 if pc else pc, *rest)
-                          for kind, seq, pc, *rest in self.base()]
-                result = self.query(self.artifact(events, code_base=0x1001), ok=start == 0x1004)
-                if start == 0x1004:
-                    self.assertEqual(result['data'][0]['pc'], '0x1004')
+    def test_single_range_requires_a_complete_aligned_instruction(self):
+        for pc, valid in ((0x1004, True), (0x1005, False), (0x10fc, True),
+                          (0x1100, False), (0x1104, False)):
+            with self.subTest(pc=hex(pc)):
+                events = [(1, 0, pc, 0, 0, 0, 0, 0),
+                          (2, 0, pc, 0x2000, 1, 0x88, 0, 1),
+                          (4, 1, 0, 1, 0, 0, 0, 1)]
+                result = self.query(self.artifact(events, code_base=0x1001), ok=valid)
+                if valid:
+                    self.assertEqual(result['data'][0]['pc'], hex(pc))
                     self.assertEqual(result['data'][0]['value'], '0x88')
                 else:
                     self.assertEqual(result['error']['code'], 'FORMAT')
