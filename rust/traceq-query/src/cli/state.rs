@@ -20,7 +20,9 @@ fn byte_row(
     } else {
         row["value"] = Value::Null;
         row["writer_seq"] = Value::Null;
+        row["observed_ev"] = Value::Null;
         row["pc"] = Value::Null;
+        row["pc_offset"] = Value::Null;
     }
     row
 }

@@ -208,7 +208,7 @@ def expand_mem_state(document):
             if source is None:
                 if raw[i] != 0:
                     raise ValueError('Unknown memory byte requires zero placeholder')
-                row.update(value=None, writer_seq=None, pc=None)
+                row.update(value=None, writer_seq=None, observed_ev=None, pc=None, pc_offset=None)
             else:
                 if not isinstance(source, list) or len(source) != len(columns) or \
                         type(source[0]) is not int or not 0 <= source[0] < 1 << 64 or \

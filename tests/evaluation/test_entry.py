@@ -15,7 +15,7 @@ import bench
 import query
 
 
-def fixture(path):
+def fixture(path, *, data_size=2):
     site = int.from_bytes(b'strh', 'little')
     rows = [
         (8, 0, 0x1000, 0x79000020, 4, site, 0, 0),
@@ -25,7 +25,7 @@ def fixture(path):
         (4, 1, 0, 1, 0, 0, 1, 2),
     ]
     path.write_bytes(
-        b'GTSW001\0' + struct.pack('<7Q', 0x1000, 4, 0x2000, 2, 1, 2, 64)
+        b'GTSW001\0' + struct.pack('<7Q', 0x1000, 4, 0x2000, data_size, 1, 2, 64)
         + b''.join(struct.pack('<8Q', *row) for row in rows)
     )
 
@@ -65,18 +65,26 @@ class Entry(unittest.TestCase):
     def test_mem_state_source_runs_expand_exactly_and_validate_lengths(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'fixture.gtsw'
-            fixture(path)
-            argv = [ROOT / 'cli/traceq', 'mem-state', path, '--range', '0x2000,2',
-                    '--at-ev', '0', '--phase', 'post', '--compact', '--json']
+            fixture(path, data_size=3)
+            argv = [ROOT / 'cli/traceq', 'mem-state', path, '--range', '0x2000,3',
+                    '--at-ev', '0', '--phase', 'post', '--json']
             for provenance in ([], ['--access-source']):
                 original = json.loads(subprocess.check_output([*argv, *provenance], timeout=10))
-                packed = json.loads(subprocess.check_output([*argv, *provenance, '--source-runs'], timeout=10))
-                self.assertEqual(query.expand_mem_state(packed), query.expand_mem_state(original))
-                run, = packed['data'][0]['source_runs']
+                self.assertEqual([row['known'] for row in original['data']], [True, True, False])
+                self.assertEqual(original['data'][2], {
+                    'address': '0x2002', 'known': False, 'value': None, 'writer_seq': None,
+                    'observed_ev': None, 'pc': None, 'pc_offset': None,
+                })
+                compact = [*argv, *provenance, '--compact']
+                packed = json.loads(subprocess.check_output(compact, timeout=10))
+                self.assertEqual(query.expand_mem_state(packed), original)
+                runs = json.loads(subprocess.check_output([*compact, '--source-runs'], timeout=10))
+                self.assertEqual(query.expand_mem_state(runs), original)
+                run = runs['data'][0]['source_runs'][0]
                 for invalid_length in (0, 1, 3, True):
                     run[0] = invalid_length
                     with self.assertRaisesRegex(ValueError, 'run|source count'):
-                        query.expand_mem_state(packed)
+                        query.expand_mem_state(runs)
 
     def test_extended_adapter_check_requires_its_frozen_trace(self):
         result = subprocess.run(
