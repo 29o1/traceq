@@ -8,6 +8,29 @@ pub const CHUNK_MAGIC: &[u8; 8] = b"GTSC001\0";
 pub const BLOCK_MAGIC: &[u8; 8] = b"GTBL001\0";
 pub const MAX_RECORDS: usize = 1024;
 pub const MAX_RECORD_BYTES: usize = 61;
+pub const MAX_MODULE_NAME_BYTES: usize = 4096;
+pub const METADATA_FRAGMENT_BYTES: usize = 24;
+pub const MAX_METADATA_FRAGMENTS: usize = 1 << 20;
+
+/// Shared producer/reader bound for retained profile 2 module and site metadata.
+/// Each fragment can introduce at most one entry and 24 bytes of text.
+pub struct MetadataBudget(usize);
+
+impl Default for MetadataBudget {
+    fn default() -> Self {
+        Self(MAX_METADATA_FRAGMENTS)
+    }
+}
+
+impl MetadataBudget {
+    pub fn take(&mut self, fragments: usize) -> bool {
+        if fragments > self.0 {
+            return false;
+        }
+        self.0 -= fragments;
+        true
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

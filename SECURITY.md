@@ -10,6 +10,14 @@ Relevant reports include memory-safety bugs in GTSW or GTSC parsing,
 resource-exhaustion paths that bypass documented limits, and unsafe handling of
 output paths. Please include a minimal, non-sensitive reproducer when possible.
 
+## Trace metadata limits
+
+Profile 2 capture and replay share a per-trace limit of 1,048,576 module and
+instruction-site metadata fragments across all blocks. Each fragment contains
+up to 24 bytes of name or disassembly text. Repeated execution of a recorded
+site uses no additional fragments. Capture reports failure if it exceeds this
+limit, and queries reject over-limit files with `TRACE_ERROR`.
+
 ## Responsible use
 
 Only capture or analyze devices, processes, binaries, and trace data that you

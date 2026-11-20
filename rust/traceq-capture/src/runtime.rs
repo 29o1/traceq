@@ -8,10 +8,14 @@ use crate::{
     storage::{Mode, Storage},
 };
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use traceq_core::wire::{Event, Header, Kind};
+use traceq_core::replay::Module;
+use traceq_core::wire::{
+    Event, Header, Kind, MAX_MODULE_NAME_BYTES, METADATA_FRAGMENT_BYTES, MetadataBudget,
+};
 use traceq_observer::CpuContext;
 
 static ACTIVE: AtomicPtr<Session> = AtomicPtr::new(ptr::null_mut());
@@ -57,6 +61,7 @@ struct Session {
     gpr_bank: [u64; 29],
     complete: bool,
     sites: Sites,
+    metadata: MetadataBudget,
     failed: bool,
     exclusive: bool,
     pending: Option<Pending>,
@@ -157,14 +162,14 @@ fn gap(s: &mut Session, seq: u64, pc: u64, reason: u64) {
     s.dczid = None;
 }
 fn fragments(s: &mut Session, kind: Kind, pc: u64, address: u64, bytes: &[u8]) {
-    for (i, b) in bytes.chunks(24).enumerate() {
+    for (i, b) in bytes.chunks(METADATA_FRAGMENT_BYTES).enumerate() {
         let mut words = [0; 24];
         words[..b.len()].copy_from_slice(b);
         emit_to(
             s,
             event(
                 kind,
-                (i * 24) as u64,
+                (i * METADATA_FRAGMENT_BYTES) as u64,
                 pc,
                 address,
                 b.len() as u64,
@@ -200,6 +205,10 @@ pub fn emit_site(ins: &gum::Insn) {
         text[..mnemonic_len].copy_from_slice(&ins.mnemonic[..mnemonic_len]);
         text[mnemonic_len] = b' ';
         let len = mnemonic_len + 1 + operands_len;
+        if !s.metadata.take(len.div_ceil(METADATA_FRAGMENT_BYTES)) {
+            s.failed = true;
+            return;
+        }
         text[mnemonic_len + 1..len].copy_from_slice(&ins.op_str[..operands_len]);
         fragments(
             s,
@@ -210,27 +219,62 @@ pub fn emit_site(ins: &gum::Insn) {
         );
     }
 }
+#[derive(Default)]
+struct ModuleSnapshot {
+    modules: HashMap<u64, Module>,
+    order: Vec<u64>,
+    budget: MetadataBudget,
+    failed: bool,
+}
+
+impl ModuleSnapshot {
+    fn record(&mut self, base: u64, size: u64, name: &[u8]) -> bool {
+        if name.is_empty() {
+            return true; // Unnamed modules have no wire record.
+        }
+        if size == 0 || base.checked_add(size).is_none() || name.len() > MAX_MODULE_NAME_BYTES {
+            return false;
+        }
+        if let Some(previous) = self.modules.get(&base) {
+            return previous.size == size && previous.name == name;
+        }
+        if !self
+            .budget
+            .take(name.len().div_ceil(METADATA_FRAGMENT_BYTES))
+        {
+            return false;
+        }
+        self.modules.insert(
+            base,
+            Module {
+                size,
+                name: name.to_vec(),
+            },
+        );
+        self.order.push(base);
+        true
+    }
+}
+
 unsafe extern "C" fn record_module(module: *mut gum::Module, data: *mut core::ffi::c_void) -> i32 {
-    // Enumeration is synchronous and the unpublished Session stays live.
-    let s = unsafe { &mut *data.cast::<Session>() };
-    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        let r = &*gum::gum_module_get_range(module);
+    // Gum enumerates synchronously, before the trace file is opened.
+    let snapshot = unsafe { &mut *data.cast::<ModuleSnapshot>() };
+    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         let name = gum::gum_module_get_name(module);
-        if !name.is_null() {
-            fragments(
-                s,
-                Kind::Module,
+        if name.is_null() {
+            return true;
+        }
+        gum::gum_module_get_range(module).as_ref().is_some_and(|r| {
+            snapshot.record(
                 r.base_address,
                 r.size as u64,
                 std::ffi::CStr::from_ptr(name).to_bytes(),
-            );
-        }
+            )
+        })
     }))
-    .is_err()
-    {
-        s.failed = true;
-    }
-    i32::from(!s.failed)
+    .unwrap_or(false);
+    snapshot.failed = !ok;
+    i32::from(ok)
 }
 pub fn begin(path: &Path, header: Header, observation: u32, mode: Mode, external: bool) -> bool {
     begin_scoped(
@@ -278,10 +322,22 @@ pub fn begin_scoped(
         }
     }
     let mut reservation = Reservation(true);
-    let Ok(storage) = Storage::open(path, header, mode) else {
+    let Some(sites) = Sites::new(&code_scope) else {
         return false;
     };
-    let Some(sites) = Sites::new(&code_scope) else {
+    let mut snapshot = ModuleSnapshot::default();
+    if header.profile == 2 {
+        unsafe {
+            gum::gum_process_enumerate_modules(
+                Some(record_module),
+                (&mut snapshot as *mut ModuleSnapshot).cast(),
+            );
+        }
+        if snapshot.failed {
+            return false;
+        }
+    }
+    let Ok(storage) = Storage::open(path, header, mode) else {
         return false;
     };
     let mut s = Box::new(Session {
@@ -295,6 +351,7 @@ pub fn begin_scoped(
         gpr_bank: [0; 29],
         complete: false,
         sites,
+        metadata: snapshot.budget,
         failed: false,
         exclusive: false,
         pending: None,
@@ -339,13 +396,9 @@ pub fn begin_scoped(
                 );
             }
         }
-        if !s.failed {
-            unsafe {
-                gum::gum_process_enumerate_modules(
-                    Some(record_module),
-                    (&mut *s as *mut Session).cast(),
-                );
-            }
+        for base in snapshot.order {
+            let module = &snapshot.modules[&base];
+            fragments(&mut s, Kind::Module, base, module.size, &module.name);
         }
     }
     if s.failed {
@@ -826,6 +879,38 @@ pub unsafe fn shared_boundary(c: *mut CpuContext, previous: *const Plan, current
 #[cfg(test)]
 mod tests {
     #[test]
+    fn module_snapshot_validates_identity_before_output() {
+        use super::*;
+
+        let mut snapshot = ModuleSnapshot::default();
+        let name = vec![b'a'; MAX_MODULE_NAME_BYTES];
+        assert!(snapshot.record(0x3000, 16, &name));
+        assert!(snapshot.record(0x1000, 16, &name));
+        assert!(snapshot.record(0x3000, 16, &name));
+        assert!(!snapshot.record(0x3000, 16, b"alias"));
+        assert!(!snapshot.record(0x3000, 8, &name));
+        assert!(!snapshot.record(0x2000, 0, b"empty-range"));
+        assert!(!snapshot.record(u64::MAX, 1, b"wrapped"));
+        assert!(!snapshot.record(0x2000, 16, &vec![b'a'; MAX_MODULE_NAME_BYTES + 1]));
+        assert!(snapshot.record(0x2000, 16, b""));
+        assert_eq!(snapshot.order, [0x3000, 0x1000]);
+    }
+
+    #[test]
+    fn metadata_budget_charges_fragments_and_keeps_exact_duplicates_free() {
+        use super::*;
+        use traceq_core::wire::MAX_METADATA_FRAGMENTS;
+
+        let mut snapshot = ModuleSnapshot::default();
+        assert!(snapshot.budget.take(MAX_METADATA_FRAGMENTS - 2));
+        assert!(!snapshot.record(1, 1, &[b'a'; 49]));
+        assert!(snapshot.record(1, 1, &[b'a'; 25]));
+        assert!(snapshot.record(1, 1, &[b'a'; 25]));
+        assert!(!snapshot.record(2, 1, b"a"));
+        assert_eq!(snapshot.order, [1]);
+    }
+
+    #[test]
     fn cache_zero_requires_completed_observation_and_continuity() {
         use super::*;
         use crate::plan::address::Address;
@@ -863,6 +948,7 @@ mod tests {
                     gpr_bank: [0; 29],
                     complete: false,
                     sites: Sites::new(&scope).unwrap(),
+                    metadata: MetadataBudget::default(),
                     failed: false,
                     exclusive: false,
                     pending: None,
@@ -1085,6 +1171,7 @@ mod tests {
                 gpr_bank: [0; 29],
                 complete: false,
                 sites: Sites::new(&CodeScope::single(header.code_base, header.code_size)).unwrap(),
+                metadata: MetadataBudget::default(),
                 failed: false,
                 exclusive: false,
                 pending: None,
@@ -1174,6 +1261,7 @@ mod tests {
                 gpr_bank: [0; 29],
                 complete: false,
                 sites: Sites::new(&CodeScope::single(header.code_base, header.code_size)).unwrap(),
+                metadata: MetadataBudget::default(),
                 failed: false,
                 exclusive: false,
                 pending: None,

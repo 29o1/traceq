@@ -2,7 +2,9 @@
 //! are provisional until `read` returns Ok: a damaged suffix invalidates a query.
 use crate::{
     Error, Result,
-    wire::{Event, Header, Input, Kind},
+    wire::{
+        Event, Header, Input, Kind, MAX_MODULE_NAME_BYTES, METADATA_FRAGMENT_BYTES, MetadataBudget,
+    },
 };
 use std::{collections::HashMap, io::Read};
 
@@ -341,7 +343,7 @@ pub fn read_selected<R: Read, P: FnMut(u64) -> bool, F: FnMut(&Group, &Info)>(
     selected: P,
     callback: F,
 ) -> Result<Info> {
-    read_impl::<true, false, false, _, _, _>(input, selected, callback)
+    read_impl::<true, false, false, _, _, _>(input, MetadataBudget::default(), selected, callback)
 }
 
 /// Validate the complete stream and materialize pre states only at selected
@@ -351,20 +353,25 @@ pub fn read_boundary_pre<R: Read, P: FnMut(u64) -> bool, F: FnMut(BoundaryPre<'_
     selected: P,
     mut callback: F,
 ) -> Result<Info> {
-    read_impl::<false, false, true, _, _, _>(input, selected, |g, info| {
-        if g.exit.transfer != 0 || g.reentered {
-            callback(
-                BoundaryPre {
-                    seq: g.seq,
-                    pc: g.pc,
-                    pre: &g.pre,
-                    exit: &g.exit,
-                    reentered: g.reentered,
-                },
-                info,
-            );
-        }
-    })
+    read_impl::<false, false, true, _, _, _>(
+        input,
+        MetadataBudget::default(),
+        selected,
+        |g, info| {
+            if g.exit.transfer != 0 || g.reentered {
+                callback(
+                    BoundaryPre {
+                        seq: g.seq,
+                        pc: g.pc,
+                        pre: &g.pre,
+                        exit: &g.exit,
+                        reentered: g.reentered,
+                    },
+                    info,
+                );
+            }
+        },
+    )
 }
 
 /// Validate the complete stream while exposing only explicitly recorded
@@ -376,6 +383,7 @@ pub fn read_observations<R: Read, F: FnMut(ObservationGroup<'_>, &Info)>(
 ) -> Result<Info> {
     read_impl::<false, true, false, _, _, _>(
         input,
+        MetadataBudget::default(),
         |_| true,
         |g, info| {
             callback(
@@ -409,6 +417,7 @@ pub fn read_evidence<R: Read, F: FnMut(EvidenceGroup<'_>, &Info)>(
 ) -> Result<Info> {
     read_impl::<false, false, false, _, _, _>(
         input,
+        MetadataBudget::default(),
         |_| true,
         |g, info| {
             callback(
@@ -440,6 +449,7 @@ fn read_impl<
     F: FnMut(&Group, &Info),
 >(
     mut input: Input<R>,
+    mut metadata: MetadataBudget,
     mut selected: P,
     mut callback: F,
 ) -> Result<Info> {
@@ -530,10 +540,11 @@ fn read_impl<
                         && !active.live
                         && e.address != 0
                         && e.pc.checked_add(e.address).is_some()
-                        && (1..=24).contains(&e.size)
-                        && e.seq <= 4096 - e.size,
+                        && (1..=METADATA_FRAGMENT_BYTES as u64).contains(&e.size)
+                        && e.seq <= MAX_MODULE_NAME_BYTES as u64 - e.size,
                     "invalid module metadata",
                 )?;
+                require(metadata.take(1), "metadata fragment limit exceeded")?;
                 if !info.modules.contains_key(&e.pc) {
                     info.module_order.push(e.pc);
                 }
@@ -553,11 +564,13 @@ fn read_impl<
             Kind::Site => {
                 require(
                     info.in_code(e.pc)
-                        && (1..=24).contains(&e.size)
+                        && e.pc.is_multiple_of(4)
+                        && (1..=METADATA_FRAGMENT_BYTES as u64).contains(&e.size)
                         && e.seq <= 256 - e.size
                         && e.address <= u32::MAX as u64,
                     "invalid site metadata",
                 )?;
+                require(metadata.take(1), "metadata fragment limit exceeded")?;
                 let site = info.sites.entry(e.pc).or_insert(Site {
                     word: e.address as u32,
                     text: Vec::new(),
@@ -825,4 +838,46 @@ pub fn fingerprint(mut hash: u64, g: &Group) -> u64 {
         hash = mix(hash, v);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::{FLAT_MAGIC, MAX_METADATA_FRAGMENTS};
+
+    #[test]
+    fn module_and_site_fragments_share_the_replay_limit() {
+        let module = [Kind::Module as u64, 0, 0x1000, 4, 1, b'm' as u64, 0, 0];
+        let site = [Kind::Site as u64, 0, 0x1000, 0, 1, b's' as u64, 0, 0];
+        for pair in [[module, site], [site, module]] {
+            let mut bytes = FLAT_MAGIC.to_vec();
+            let header = [0x1000, 4, 0x2000, 4, 1, 2, 64];
+            let features = [Kind::Features as u64, 0, 0, 1, 0, 0, 0, 0];
+            let end = [Kind::End as u64, 0, 0, 0, 0, 0, 0, 2];
+            for words in [&header[..], &features, &pair[0], &pair[1], &end] {
+                for word in words {
+                    bytes.extend(word.to_le_bytes());
+                }
+            }
+            for remaining in [1, 2] {
+                let mut budget = MetadataBudget::default();
+                assert!(budget.take(MAX_METADATA_FRAGMENTS - remaining));
+                let result = read_impl::<true, false, false, _, _, _>(
+                    Input::new(bytes.as_slice()).unwrap(),
+                    budget,
+                    |_| false,
+                    |_, _| {},
+                );
+                if remaining == 2 {
+                    let info = result.unwrap();
+                    assert_eq!((info.modules.len(), info.sites.len()), (1, 1));
+                } else {
+                    assert_eq!(
+                        result.err().unwrap().message,
+                        "metadata fragment limit exceeded"
+                    );
+                }
+            }
+        }
+    }
 }
