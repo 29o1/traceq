@@ -63,6 +63,15 @@ class FindValueChecks(unittest.TestCase):
         r=subprocess.run(argv,capture_output=True,text=True,timeout=10);data=json.loads(r.stdout)
         self.assertEqual(r.returncode==0,ok,(argv,r.stdout,r.stderr));return data
 
+    def test_help_links_to_the_existing_byte_mode_usage(self):
+        summary = subprocess.check_output([CLI, 'find-value', '--help'], text=True, timeout=10)
+        self.assertIn('--bytes HEX', summary)
+        self.assertIn('--across-events', summary)
+        self.assertIn('traceq find-value --help --bytes', summary)
+        detail = subprocess.check_output([CLI, 'find-value', '--help', '--bytes'], text=True, timeout=10)
+        self.assertIn('traceq find-value FILE --bytes HEX', detail)
+        self.assertIn('--across-events joins adjacent increasing addresses across events', detail)
+
     def test_zero_and_unknown_are_distinct(self):
         for chunked in (False,True):
             path=self.artifact(chunked=chunked);q=self.query(path,'--value',0)
