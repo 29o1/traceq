@@ -138,7 +138,7 @@ impl<'a> Options<'a> {
 
 pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
     let Some(options) = Options::parse(args)? else {
-        return Ok(Response::text(include_str!("../cli_state_help.txt")));
+        return Ok(state_help("mem-access"));
     };
     let mut rows = Vec::new();
     let mut sources = Vec::new();

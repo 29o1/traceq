@@ -741,6 +741,17 @@ impl From<traceq_core::Error> for CliError {
 // Query implementations use a small local error type for argument propagation.
 
 const USAGE: &str = "traceq: structured execution trace queries\nusage: traceq COMMAND FILE [options]\n  context       --at-ev E [--at-ev E ...] [--before N --after N]\n  instructions  [--from E --to E] [--limit N --offset N]\n  reg-state     --at-ev E [--phase pre|post] [--reg x0 ...]\n  mem-state     --range BASE,LEN (--at-ev E | --checkpoint E:pre ...)\n  mem-access    --range BASE,LEN [--read|--write] [--from E --to E]\n  last-writers  --range BASE,LEN [--at-seq E | --checkpoint E ...]\n  find-pc       (--off OFFSET | --addr ADDRESS)...\n  find-value    VALUE FILE | FILE --value VALUE... | FILE --bytes HEX...\n  boundaries    [--from E --to E] [--reg x0 ...]\n  stat          [--json]\nUse traceq COMMAND --help for command-specific options.\nInput: structured GTSW/GTSC captures; execution-state queries require profile 2.\nNumeric values use hexadecimal strings; unknown, gaps, boundaries and completion stay explicit.\nQueries validate the complete stream through END and its suffix.\n\n";
+
+fn state_help(command: &str) -> Response {
+    let section = include_str!("cli_state_help.txt")
+        .split("\n\n")
+        .find(|section| section.split_ascii_whitespace().nth(1) == Some(command));
+    match section {
+        Some(help) => Response::text(format!("{}\n", help.trim_end())),
+        None => Response::text(USAGE),
+    }
+}
+
 pub fn run(args: &[String]) -> Response {
     if args.is_empty() {
         let mut r = Response::text(USAGE);

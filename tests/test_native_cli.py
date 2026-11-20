@@ -1,4 +1,4 @@
-"""Native OS argument errors stay bounded and never become Rust panics."""
+"""Native CLI argument errors and help behavior."""
 import json
 import os
 from pathlib import Path
@@ -35,6 +35,26 @@ class NativeArguments(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertEqual(json.loads(result.stdout)['error']['code'], 'ARGUMENT')
+
+    def test_state_command_help_shows_only_requested_usage(self):
+        commands = {
+            b'stat': (b'--json', b'full input validation'),
+            b'instructions': (b'--mnemonic', b'--gap-reason'),
+            b'boundaries': (b'--target-module', b'--reg'),
+            b'find-pc': (b'--off', b'--addr', b'--module'),
+            b'reg-state': (b'--at-ev', b'--phase', b'--reg'),
+            b'mem-access': (b'--range', b'--pc', b'--source-table'),
+            b'mem-state': (b'--checkpoint', b'--range-checkpoint', b'--source-runs'),
+        }
+        for command, options in commands.items():
+            with self.subTest(command=command):
+                help_text = subprocess.check_output([CLI, command, b'--help'], timeout=10)
+                self.assertEqual(help_text, subprocess.check_output([CLI, command, b'-h'], timeout=10))
+                usage_commands = {line.split()[1] for line in help_text.splitlines()
+                                  if line.startswith(b'traceq ')}
+                self.assertEqual(usage_commands, {command})
+                for option in options:
+                    self.assertIn(option, help_text)
 
 
 if __name__ == '__main__':

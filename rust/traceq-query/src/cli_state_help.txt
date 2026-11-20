@@ -1,6 +1,7 @@
-execution-state stream queries (profile 2):
-  traceq stat FILE [--json]
-  traceq instructions FILE [--from E --to E] [--mnemonic NAME ...] [--gaps] [--gap-reasons] [--gap-reason REASON ...] [--limit N --offset N] [--json [--location]]
+traceq stat FILE [--json]
+    Reports the trace profile, register layout, event totals and gaps after full input validation.
+
+traceq instructions FILE [--from E --to E] [--mnemonic NAME ...] [--gaps] [--gap-reasons] [--gap-reason REASON ...] [--limit N --offset N] [--json [--location]]
     Repeat --mnemonic to select any exact recorded mnemonic before pagination.
     It combines with event and gap filters. The full trace is still validated.
     --gap-reasons adds the positioned gap_count and distinct gap_reasons for each instruction.
@@ -10,19 +11,24 @@ execution-state stream queries (profile 2):
     --location --json adds the unique recorded module name, base and offset.
     PCs with no unique recorded module keep null module fields.
     Unpositioned loss is reported in capture metadata.
-  traceq boundaries FILE [--from E --to E] [--target-module NAME] [--reg x0]... [--limit N --offset N] [--json]
+
+traceq boundaries FILE [--from E --to E] [--target-module NAME] [--reg x0]... [--limit N --offset N] [--json]
     --target-module selects exits by the exact recorded target module name.
     Pagination counts the matches. Capture totals and reentry evidence still apply.
-  traceq find-pc FILE (--off O | --addr A)... [--limit N] [--json]
-  traceq find-pc FILE --module NAME --off O [--off O ...] [--limit N] [--json]
+
+traceq find-pc FILE (--off O | --addr A)... [--limit N] [--json]
+traceq find-pc FILE --module NAME --off O [--off O ...] [--limit N] [--json]
     --module selects one exact recorded module name. off stays capture-relative.
     Module queries also return module_offset and meta.module_base. Without --module,
     --off selects an offset from meta.code_base.
     --location --json adds each hit's recorded module name, base and offset.
     A PC with zero or multiple containing modules has null module fields unless
     --module selects an exact recorded instance. off stays capture-relative.
-  traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
-  traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--pc PC ...] [--read|--write] [--from E --to E] [--compact] [--json [--location]]
+
+traceq reg-state FILE --at-ev E [--phase pre|post] [--reg x0]... [--json]
+    Pre is the default phase. Without --reg, shows x0 through x7 and nzcv.
+
+traceq mem-access FILE --range BASE,LEN [--range BASE,LEN ...] [--pc PC ...] [--read|--write] [--from E --to E] [--limit N --offset N] [--compact] [--json [--location]]
     Up to 64 ranges share one validated scan. Each matching recorded access is
     returned whole and once, in trace order. Filters and pagination apply to the union.
     Repeat --pc up to 64 times to select exact recorded instruction addresses.
@@ -38,8 +44,15 @@ execution-state stream queries (profile 2):
     --location --json adds meta.pc_locations, keyed by each PC shown on the page.
     Each entry gives the unique recorded module, base and offset, or null module fields.
     Row off remains relative to the capture code base.
-  traceq mem-state FILE --range BASE,LEN --at-ev E [--phase pre|post] [--compact] [--json]
-  traceq mem-state FILE --range BASE,LEN --checkpoint E:pre --checkpoint E2:post [--json]
+    Each range length is 1..4096 bytes. For example, --range 0x1000,16 selects 16 bytes.
+    Mixed ordinary and atomic write sources keep named rows with
+    meta.compact_fallback=mixed_write_sources unless --source-table is selected.
+    Atomic add writes use recorded old bits and the addend. Halfword CAS and SWP
+    use returned old bits and saved inputs. Failed CAS leaves an unconfirmed-store gap.
+    Whether a failed CAS wrote back the old value remains unknown.
+
+traceq mem-state FILE --range BASE,LEN --at-ev E [--phase pre|post] [--compact] [--json]
+traceq mem-state FILE --range BASE,LEN --checkpoint E:pre --checkpoint E2:post [--json]
     Profile2 checkpoints share one validated scan; 1..64 requests, input order retained.
     --limit/--offset page bytes independently per checkpoint; whole page <=4096 byte cells.
     meta.total/shown count byte cells; meta.next advances all checkpoints together.
@@ -63,20 +76,4 @@ execution-state stream queries (profile 2):
     To give ranges different checkpoints, place --range-checkpoint E:pre or E:post
     after its --range. Each range needs at least one, with up to 64 in total.
     This mode uses meta.checkpoint_pairs and cannot mix with --checkpoint or --at-ev/--at-seq/--phase.
-  traceq last-writers FILE --range BASE,LEN [--range BASE,LEN ...] [--at-seq E | --checkpoint E ...] [--compact | --runs] [--json]
-    Profile 2 pages up to 64 ranges as one union in address order, skipping holes.
-    --compact requires JSON; first_located_gap_ref indexes the current page's meta.located_gaps.
-    --runs --json combines adjacent bytes with the same writer event and uses byte-count pagination.
-    last_observed_write.first_located_gap explains the earliest positioned gap after that write.
-    Scope-exit memory effects remain unobserved; global unpositioned gaps are reported in meta.
-    meta.as_of_ev marks the state cutoff after recorded accesses at that instruction; null for an empty capture.
-  Profile2 memory ranges use --range BASE,LEN; LEN is 1..4096 bytes.
-    Example: --range 0x1000,16 selects 16 bytes starting at 0x1000.
-    --addr selects instruction PCs in find-pc; --len and --size are unsupported.
-
-mem-access --compact hoists one value source per read/write direction.
-Mixed ordinary/atomic write-source pages retain named rows with
-meta.compact_fallback=mixed_write_sources; precise sources are preserved.
-Atomic add writes use returned old bits plus the saved addend, not a memory peek.
-Halfword CAS/SWP accesses use returned old bits and saved inputs.
-Failed CAS retains an unconfirmed-store gap; whether an old-value writeback occurred remains unknown.
+    Each range length is 1..4096 bytes. For example, --range 0x1000,16 selects 16 bytes.

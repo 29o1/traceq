@@ -273,7 +273,7 @@ pub(super) fn run(args: &[String]) -> Result<Response, CliError> {
         let a = &args[i];
         i += 1;
         match a.as_str() {
-            "--help" | "-h" => return Ok(Response::text(include_str!("../cli_state_help.txt"))),
+            "--help" | "-h" => return Ok(state_help(name)),
             "--json" => {}
             "--compact" => compact = true,
             "--source-runs" => source_runs = true,
